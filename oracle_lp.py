@@ -106,6 +106,13 @@ def _solve_month(
     wear_cost = _to_float(parameters.get("battery_wear_cost"), 0.0)
     demand_rate = _to_float(parameters.get("billing_peak_penalty"), 0.0) if parameters.get("billing_mode") == "2tc" else 0.0
 
+    # math.txt objective:
+    #   sum_t EnergyPrice(t) * dt * (GridCharge(t) - BatteryDischarge(t))
+    # + sum_t BatteryWearCost * dt * (BatteryDischarge(t) + GridCharge(t) + SolarCharge(t))
+    # + DemandChargeRate * PeakGrid.
+    # EffectiveLoad(t) is omitted from the LP objective because it is a constant
+    # no-battery cost; adding price * dt * EffectiveLoad(t) would change the bill
+    # total, but not the optimizer's chosen dispatch.
     for step, price in enumerate(prices):
         objective[idx.grid_charge(step)] = price * dt + wear_cost * dt
         objective[idx.discharge(step)] = -price * dt + wear_cost * dt
@@ -182,6 +189,9 @@ def _build_equalities(
     b_eq = [0.0] * (1 + steps * 2)
 
     row = 0
+    # The formula only states BatterySOC(end) >= RequiredFinalSOC. The LP also
+    # fixes the starting SOC to RequiredFinalSOC so the oracle cannot create free
+    # energy by choosing an arbitrary full battery at the beginning of the month.
     a_eq[row, idx.soc(0)] = 1.0
     b_eq[row] = required_final_soc
     row += 1
@@ -189,12 +199,23 @@ def _build_equalities(
     charge_soc_gain = charge_efficiency * dt / capacity
     discharge_soc_loss = dt / (discharge_efficiency * capacity)
     for step in range(steps):
+        # math.txt power balance:
+        #   GridImport(t) = EffectiveLoad(t) + GridCharge(t) - BatteryDischarge(t)
+        # is written for linprog as:
+        #   GridImport(t) - GridCharge(t) + BatteryDischarge(t) = EffectiveLoad(t).
         a_eq[row, idx.grid_import(step)] = 1.0
         a_eq[row, idx.grid_charge(step)] = -1.0
         a_eq[row, idx.discharge(step)] = 1.0
         b_eq[row] = effective_load[step]
         row += 1
 
+        # math.txt SOC update:
+        #   SOC(t+1) = SOC(t)
+        #            + ChargeEfficiency * dt / BatteryCapacity * (GridCharge(t) + SolarCharge(t))
+        #            - dt / (DischargeEfficiency * BatteryCapacity) * BatteryDischarge(t).
+        # Rearranged for linprog equality rows:
+        #   SOC(t+1) - SOC(t) - charge_gain*GridCharge(t)
+        #   - charge_gain*SolarCharge(t) + discharge_loss*BatteryDischarge(t) = 0.
         a_eq[row, idx.soc(step + 1)] = 1.0
         a_eq[row, idx.soc(step)] = -1.0
         a_eq[row, idx.grid_charge(step)] = -charge_soc_gain
@@ -220,17 +241,28 @@ def _build_inequalities(
 
     row = 0
     for step in range(steps):
+        # BatteryPowerLimit is the total charge-side limit. math2.txt makes this
+        # explicit as GridCharge(t) + SolarCharge(t) <= MaxChargePower.
         a_ub[row, idx.grid_charge(step)] = 1.0
         a_ub[row, idx.solar_charge(step)] = 1.0
         b_ub[row] = power_limit
         row += 1
 
     for window in demand_windows:
+        # math.txt's 15-minute shortcut is:
+        #   0.5 * (GridImport(t) + GridImport(t+1)) <= PeakGrid.
+        # This code uses CUSTOM dt: _demand_window builds normalized time weights
+        # over DEMAND_WINDOW_HOURS, so dt=0.25 becomes [0.5, 0.5], dt=0.5 becomes
+        # [1.0], and non-divisible dt values get partial-step weights.
         for window_step, weight in window:
             a_ub[row, idx.grid_import(window_step)] = weight
         a_ub[row, idx.peak] = -1.0
         row += 1
 
+    # math.txt final SOC floor:
+    #   BatterySOC(end) >= RequiredFinalSOC
+    # is written for linprog as:
+    #   -BatterySOC(end) <= -RequiredFinalSOC.
     a_ub[row, idx.soc(steps)] = -1.0
     b_ub[row] = -required_final_soc
     return a_ub, b_ub

@@ -69,7 +69,7 @@ BatterySOC(96) ≥ RequiredFinalSOC
     GridImport(t)
     + GridImport(t+1)
 )
-≤ PeakGrid
+≤ PeakGrid             ONLY if dt is 15 mins
 
 for t = 0 ... 95
 
