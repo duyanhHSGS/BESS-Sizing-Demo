@@ -1,0 +1,154 @@
+SIZING DEMO PROBLEMS - FRIENDLY NOTES
+=====================================
+
+Main problem
+------------
+
+The Sizing Demo can show a much smaller annual saving than Tool C for the
+same battery size.
+
+Example:
+
+    Battery: 1000 kWh / 500 kW
+
+    Sizing Demo: about 313 million VND/year
+    Tool C:      about 930-970 million VND/year
+
+This looks outrageous at first, but the two pages are not measuring the same
+thing.
+
+
+Problem 1 - Oracle saving vs realistic saving are mixed
+-------------------------------------------------------
+
+Tool C reports:
+
+    Oracle annual saving
+        Perfect-foresight upper bound.
+        This is the big number.
+
+    Realized annual saving
+        Oracle annual saving * realization factor.
+        Default realization factor is 0.60.
+
+Sizing Demo currently annualizes:
+
+    SEER realistic saving = Oracle saving * 0.60
+
+So the demo's annual saving is already the reduced realistic number, while Tool
+C may be showing the full Oracle number.
+
+Translation:
+
+    Tool C may be showing the giant "best possible robot brain" number.
+    Sizing Demo may be showing the "real human controller probably gets this"
+    number.
+
+Those are not the same scoreboard.
+
+
+Problem 2 - Demand charge is counted too weakly in Sizing Demo
+-------------------------------------------------------------
+
+Electric demand charge is monthly.
+
+Tool C scores monthly bills like this:
+
+    Each month has its own peak.
+    Each month gets its own demand charge.
+    Annual saving is built from monthly savings.
+
+Sizing Demo currently summarizes the whole CSV with one before peak and one
+after peak.
+
+That can undercount demand-charge savings when the CSV covers more than one
+month.
+
+Translation:
+
+    Tool C counts every monthly boss fight.
+    Sizing Demo may only count the biggest boss once.
+
+
+Problem 3 - SOC rules are different
+-----------------------------------
+
+Tool C default SOC behavior:
+
+    SOC min = 0.10
+    SOC safety buffer = 0.05
+    SOC_eod = 0.15
+
+So Tool C usually lets the battery operate down near 15 percent.
+
+Sizing Demo default:
+
+    required_final_soc = 0.50
+
+That forces the battery to end the horizon around 50 percent full. This keeps a
+lot of energy locked inside the battery and can reduce savings.
+
+Translation:
+
+    Tool C says: "Keep a small safety snack."
+    Sizing Demo says: "Carry half the lunchbox home."
+
+
+Problem 4 - Horizon wording is confusing
+----------------------------------------
+
+Sizing Demo solves Oracle LP by month blocks, so RequiredFinalSOC is currently a
+month-end horizon constraint, not a daily final SOC constraint.
+
+But some labels and formulas can make it sound like an end-of-day rule.
+
+Translation:
+
+    The code says month.
+    Some text sounds like day.
+    Uncle Memory is sweating.
+
+
+What should be fixed
+--------------------
+
+1. Show both annual saving numbers:
+
+       Oracle annual saving
+       Realistic annual saving
+
+2. Make the table labels very explicit:
+
+       Oracle = perfect upper bound
+       Realistic = Oracle * real-world savings factor
+
+3. Change demand-charge accounting to sum monthly demand-charge savings, not
+   just one peak over the entire CSV.
+
+4. Align default SOC assumptions with Tool C, or explain why Sizing Demo uses a
+   different assumption.
+
+       Tool C-style default: required_final_soc = 0.15
+       Current demo default: required_final_soc = 0.50
+
+5. Rename Required final SOC to something clearer:
+
+       Required horizon-end SOC
+       or Required month-end SOC
+
+
+Current verdict
+---------------
+
+Tool C is probably the better accounting reference.
+
+Sizing Demo is useful for teaching and visualizing, but its summary logic needs
+cleanup before its annual saving number should be compared directly with Tool C.
+
+The 313 vs 930-970 gap is not pure battery magic. It is mostly:
+
+    realistic vs oracle reporting
+    monthly demand-charge accounting
+    different SOC assumptions
+
+Tiny calculator villain defeated, but not deleted yet.
