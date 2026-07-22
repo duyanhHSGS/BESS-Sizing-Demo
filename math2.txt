@@ -1,0 +1,571 @@
+IRL ORACLE LP CHECKLIST
+=======================
+
+This file explains what the simple oracle LP is missing if we want to call it
+a more realistic battery dispatch / sizing model.
+
+The current math is a good classroom LP:
+
+    Minimize energy cost + battery wear + monthly demand charge
+
+But real life is Uncle Caveman with a clipboard. The bill has traps, the
+battery has limits, and the grid contract may say "absolutely not, buddy."
+
+
+1. BETTER OBJECTIVE
+===================
+
+Simple demo version:
+
+    EnergyPrice(t) * dt * (GridCharge(t) - BatteryDischarge(t))
+
+This is okay if we are measuring savings relative to a fixed no-battery base.
+But the cleaner IRL objective is:
+
+    MINIMIZE:
+
+        sum_t EnergyPrice(t) * dt * GridImport(t)
+
+      + sum_t BatteryWearCost(t) * dt *
+            (
+                BatteryDischarge(t)
+              + GridCharge(t)
+              + SolarCharge(t)
+            )
+
+      + DemandChargeRate * PeakGrid
+
+      + OptionalFixedCharges
+
+      + OptionalPenaltyCharges
+
+
+Why:
+
+    GridImport(t) is the actual meter power after battery action.
+    The electric bill usually cares about the meter, not the internal battery
+    flow variables.
+
+
+2. GRID IMPORT / EXPORT POLICY
+==============================
+
+Current assumption:
+
+    GridImport(t) >= 0
+
+This means no export is allowed.
+
+More complete model:
+
+    GridImport(t) >= 0
+    GridExport(t) >= 0
+
+    NetMeterPower(t) = GridImport(t) - GridExport(t)
+
+Objective may include:
+
+    + BuyPrice(t)  * dt * GridImport(t)
+    - SellPrice(t) * dt * GridExport(t)
+
+
+Important:
+
+    If export is forbidden:
+
+        GridExport(t) = 0
+
+    If export is allowed:
+
+        SellPrice(t) is usually different from BuyPrice(t).
+
+
+3. POWER BALANCE
+================
+
+Current simplified balance:
+
+    GridImport(t)
+        = EffectiveLoad(t)
+        + GridCharge(t)
+        - BatteryDischarge(t)
+
+where:
+
+    EffectiveLoad(t) = max(0, Load(t) - PV(t))
+    SolarSurplus(t) = max(0, PV(t) - Load(t))
+
+
+More explicit IRL balance:
+
+    Load(t)
+        = PVToLoad(t)
+        + BatteryDischargeToLoad(t)
+        + GridImportToLoad(t)
+
+    PV(t)
+        = PVToLoad(t)
+        + SolarCharge(t)
+        + GridExportFromPV(t)
+        + PVCurtailment(t)
+
+    GridImport(t)
+        = GridImportToLoad(t)
+        + GridCharge(t)
+
+
+All flow variables should be nonnegative.
+
+
+4. BATTERY SOC DYNAMICS
+=======================
+
+Current idea:
+
+    BatterySOC(t+1)
+        = BatterySOC(t)
+        + ChargeEfficiency * dt / BatteryCapacity * ChargePower(t)
+        - dt / (DischargeEfficiency * BatteryCapacity) * DischargePower(t)
+
+
+IRL energy-state version:
+
+    BatteryEnergy(t+1)
+        = BatteryEnergy(t)
+        + ChargeEfficiency * dt *
+            (
+                GridCharge(t)
+              + SolarCharge(t)
+            )
+        - dt / DischargeEfficiency * BatteryDischarge(t)
+
+    MinimumSOC * BatteryCapacity <= BatteryEnergy(t)
+    BatteryEnergy(t) <= MaximumSOC * BatteryCapacity
+
+
+This is usually cleaner than optimizing SOC directly.
+
+
+5. INITIAL AND FINAL SOC
+========================
+
+Current weak spot:
+
+    BatterySOC(96) >= RequiredFinalSOC
+
+But IRL needs a clear starting rule too.
+
+Options:
+
+    Fixed start:
+
+        BatteryEnergy(0) = InitialSOC * BatteryCapacity
+
+    Daily reset:
+
+        BatteryEnergy(end_of_day) >= RequiredFinalSOC * BatteryCapacity
+
+    Cyclic month:
+
+        BatteryEnergy(end_of_month) = BatteryEnergy(0)
+
+    Rolling operation:
+
+        End SOC of day d becomes start SOC of day d+1.
+
+
+For a monthly oracle, cyclic month is often a clean choice.
+
+
+6. POWER LIMITS
+===============
+
+Current simple version:
+
+    0 <= BatteryDischarge(t) <= BatteryPowerLimit
+    0 <= GridCharge(t) <= BatteryPowerLimit
+    0 <= SolarCharge(t) <= BatteryPowerLimit
+    GridCharge(t) + SolarCharge(t) <= BatteryPowerLimit
+
+
+More complete version:
+
+    0 <= BatteryDischarge(t) <= MaxDischargePower
+    0 <= GridCharge(t) <= MaxGridChargePower
+    0 <= SolarCharge(t) <= MaxSolarChargePower
+
+    GridCharge(t) + SolarCharge(t) <= MaxChargePower
+
+    BatteryDischarge(t) + GridCharge(t) + SolarCharge(t)
+        may also be limited by inverter apparent power.
+
+
+If AC inverter rating matters:
+
+    BatteryDischarge(t) <= InverterDischargeLimit
+    GridCharge(t) + SolarCharge(t) <= InverterChargeLimit
+
+
+7. NO SIMULTANEOUS CHARGE AND DISCHARGE
+=======================================
+
+Plain LP weakness:
+
+    It can sometimes charge and discharge in the same time step.
+
+Usually this is discouraged by:
+
+    efficiency losses
+    battery wear cost
+    energy prices
+
+But to forbid it exactly, LP is not enough.
+
+MILP version:
+
+    y_charge(t) in {0, 1}
+    y_discharge(t) in {0, 1}
+
+    GridCharge(t) + SolarCharge(t) <= MaxChargePower * y_charge(t)
+    BatteryDischarge(t) <= MaxDischargePower * y_discharge(t)
+
+    y_charge(t) + y_discharge(t) <= 1
+
+
+Translation:
+
+    Uncle Manager needs binary switches.
+    Without them, Uncle Caveman may discover "charge and discharge at once"
+    nonsense if the economics get weird.
+
+
+8. DEMAND CHARGE / PEAK MODEL
+=============================
+
+Current simple version:
+
+    0.5 * (GridImport(t) + GridImport(t+1)) <= PeakGrid
+
+    Demand cost = DemandChargeRate * PeakGrid
+
+
+More complete IRL options:
+
+    Demand window only:
+
+        RollingDemand(t) <= PeakGrid
+        only for billable demand windows
+
+    Multiple peak categories:
+
+        PeakOn(t)  for expensive demand period
+        PeakOff(t) for off-peak demand period
+
+        Cost = OnDemandRate * PeakOn + OffDemandRate * PeakOff
+
+    Contract demand:
+
+        PeakGrid <= ContractDemand
+
+    Exceedance penalty:
+
+        ExcessDemand >= PeakGrid - ContractDemand
+        ExcessDemand >= 0
+
+        Cost += ExcessDemandPenaltyRate * ExcessDemand
+
+    Demand ratchet:
+
+        BilledDemand >= CurrentMonthPeak
+        BilledDemand >= RatchetPercent * HistoricalPeak
+
+
+Demand charge rules are where the billing demons live.
+
+
+9. TARIFF MODEL
+===============
+
+Simple model:
+
+    EnergyPrice(t) comes from cheap / normal / expensive windows.
+
+
+IRL tariff may need:
+
+    weekday / weekend / holiday schedules
+    seasonal rates
+    special Sunday rules
+    tiered energy blocks
+    taxes and VAT
+    fixed monthly charges
+    power factor penalties
+    reactive energy charges
+    contract capacity charges
+
+
+10. BATTERY DEGRADATION
+=======================
+
+Simple model:
+
+    BatteryWearCost * throughput
+
+
+More realistic options:
+
+    Throughput-based:
+
+        WearCostPerKWh * (charge throughput + discharge throughput)
+
+    Cycle-depth-based:
+
+        deeper cycles cost more than shallow cycles
+
+    Temperature / C-rate model:
+
+        high power and high temperature age the battery faster
+
+    Warranty model:
+
+        total lifetime throughput <= WarrantyThroughputLimit
+
+
+Pure LP can handle simple throughput wear.
+Depth-of-discharge aging may require piecewise linear variables or MILP.
+
+
+11. PV AND CURTAILMENT
+======================
+
+Current model:
+
+    PV serves load first.
+    Only surplus PV can charge battery.
+
+
+More complete model:
+
+    PVToLoad(t) >= 0
+    SolarCharge(t) >= 0
+    PVExport(t) >= 0
+    PVCurtailment(t) >= 0
+
+    PVToLoad(t) + SolarCharge(t) + PVExport(t) + PVCurtailment(t) = PV(t)
+
+
+Useful if:
+
+    export is allowed
+    export is capped
+    PV inverter clipping matters
+    battery is DC-coupled to PV
+
+
+12. FORECAST VS ORACLE
+======================
+
+The oracle knows the future.
+
+IRL controllers do not.
+
+Oracle LP:
+
+    has perfect Load(t), PV(t), and Price(t)
+
+Real controller:
+
+    has forecasts with errors
+    updates decisions every step
+    may use MPC, DRL, rules, or hybrid control
+
+
+So oracle savings are an upper bound:
+
+    RealSavings <= OracleSavings
+
+
+13. SIZING VARIABLES
+====================
+
+Current oracle dispatch assumes:
+
+    BatteryCapacity is given
+    BatteryPowerLimit is given
+
+
+For true sizing, capacity and power can become decision variables:
+
+    BatteryCapacity >= 0
+    BatteryPowerLimit >= 0
+
+Objective adds:
+
+    + BatteryCapacity * BatteryCostPerKWh
+    + BatteryPowerLimit * BatteryCostPerKW
+    + AnnualMaintenanceCost
+
+
+But this gets bigger because SOC constraints contain:
+
+    BatteryEnergy(t) <= MaximumSOC * BatteryCapacity
+
+That is still linear if BatteryEnergy and BatteryCapacity are both variables.
+
+
+14. INVESTMENT / PAYBACK MODEL
+==============================
+
+Dispatch LP finds best operation.
+
+Sizing economics also needs:
+
+    capital cost
+    maintenance cost
+    discount rate
+    project years
+    battery replacement
+    inverter replacement
+    salvage value
+    inflation / tariff escalation
+
+
+Example:
+
+    NetPresentValue
+        = -Capex
+        - present_value(Maintenance)
+        + present_value(AnnualSavings)
+        + present_value(SalvageValue)
+
+
+15. RECOMMENDED "MATH2" FULLER LP SHAPE
+=======================================
+
+Decision variables:
+
+    GridImport(t)
+    GridExport(t)
+    GridCharge(t)
+    SolarCharge(t)
+    BatteryDischarge(t)
+    BatteryEnergy(t)
+    PVCurtailment(t)
+    PeakGrid
+
+Optional MILP variables:
+
+    y_charge(t)
+    y_discharge(t)
+
+
+Objective:
+
+    MINIMIZE
+
+        sum_t BuyPrice(t) * dt * GridImport(t)
+
+      - sum_t SellPrice(t) * dt * GridExport(t)
+
+      + sum_t BatteryWearCost * dt *
+            (
+                GridCharge(t)
+              + SolarCharge(t)
+              + BatteryDischarge(t)
+            )
+
+      + DemandChargeRate * PeakGrid
+
+      + FixedBillCharges
+
+      + OptionalExceedancePenalty
+
+
+Core constraints:
+
+    Load(t)
+        = PVToLoad(t)
+        + BatteryDischarge(t)
+        + GridImportToLoad(t)
+
+    PV(t)
+        = PVToLoad(t)
+        + SolarCharge(t)
+        + GridExport(t)
+        + PVCurtailment(t)
+
+    GridImport(t)
+        = GridImportToLoad(t)
+        + GridCharge(t)
+
+    BatteryEnergy(t+1)
+        = BatteryEnergy(t)
+        + ChargeEfficiency * dt *
+            (
+                GridCharge(t)
+              + SolarCharge(t)
+            )
+        - dt / DischargeEfficiency * BatteryDischarge(t)
+
+    MinimumSOC * BatteryCapacity <= BatteryEnergy(t)
+    BatteryEnergy(t) <= MaximumSOC * BatteryCapacity
+
+    0 <= GridCharge(t) + SolarCharge(t) <= MaxChargePower
+    0 <= BatteryDischarge(t) <= MaxDischargePower
+
+    RollingDemand(t) <= PeakGrid
+
+    BatteryEnergy(0) = InitialSOC * BatteryCapacity
+
+    BatteryEnergy(end) >= RequiredFinalSOC * BatteryCapacity
+
+
+Optional exact anti-silliness constraints:
+
+    y_charge(t) + y_discharge(t) <= 1
+
+    GridCharge(t) + SolarCharge(t) <= MaxChargePower * y_charge(t)
+
+    BatteryDischarge(t) <= MaxDischargePower * y_discharge(t)
+
+
+FINAL VERDICT
+=============
+
+The original math.txt is:
+
+    good for a demo oracle
+    good for explaining basic peak shaving
+    good for comparing before vs after battery dispatch
+
+
+It is not yet:
+
+    a full tariff-grade IRL bill optimizer
+    a full battery warranty model
+    a strict no-simultaneous-charge/discharge MILP
+    a complete investment sizing optimizer
+    a real controller with forecast uncertainty
+
+
+Best next upgrade:
+
+    Make the app's displayed math match the code:
+
+        use GridImport(t) in the energy cost objective
+
+    Then add:
+
+        InitialSOC
+        export policy
+        separate charge/discharge limits
+        optional MILP anti-simultaneous constraint
+        richer demand charge rules
+
+
+Brain HQ summary:
+
+    Uncle Manager built a clean LP.
+    Uncle Memory says the assumptions must be written down.
+    Uncle Caveman screams because real bills are spicy.
+    Mr. Joy Juice approves the chart if the oracle peak turns green.

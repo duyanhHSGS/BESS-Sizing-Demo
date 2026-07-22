@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sizing Demo</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #171e26;
+      --panel2: #1d2630;
+      --border: #2a3644;
+      --text: #d7e0ea;
+      --muted: #8496a8;
+      --accent: #38bdf8;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", system-ui, sans-serif;
+      font-size: 14px;
+    }
+
+    main {
+      padding: 16px 22px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, .25);
+      margin-bottom: 14px;
+      padding: 14px 16px;
+    }
+
+    .card h2 {
+      color: var(--accent);
+      font-size: 14px;
+      margin: 0 0 12px;
+    }
+
+    label {
+      color: var(--muted);
+      display: inline-flex;
+      flex-direction: column;
+      font-size: 12px;
+      gap: 4px;
+      margin: 4px 12px 8px 0;
+    }
+
+    .field-name {
+      align-items: center;
+      display: inline-flex;
+      gap: 5px;
+      width: fit-content;
+    }
+
+    .hint {
+      align-items: center;
+      background: #22303d;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--accent);
+      cursor: help;
+      display: inline-flex;
+      font-size: 10px;
+      font-weight: 700;
+      height: 16px;
+      justify-content: center;
+      line-height: 1;
+      position: relative;
+      width: 16px;
+    }
+
+    .hint::after {
+      background: #0b1117;
+      border: 1px solid #334155;
+      border-radius: 7px;
+      bottom: calc(100% + 8px);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, .32);
+      color: var(--text);
+      content: attr(data-tip);
+      font-size: 12px;
+      font-weight: 400;
+      left: 50%;
+      line-height: 1.45;
+      max-width: min(280px, 80vw);
+      opacity: 0;
+      padding: 8px 10px;
+      pointer-events: none;
+      position: absolute;
+      transform: translate(-50%, 4px);
+      transition: opacity .12s, transform .12s;
+      visibility: hidden;
+      width: max-content;
+      z-index: 10;
+    }
+
+    .hint:hover::after,
+    .hint:focus::after {
+      opacity: 1;
+      transform: translate(-50%, 0);
+      visibility: visible;
+    }
+
+    input {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 13px;
+      min-width: 90px;
+      padding: 7px 9px;
+    }
+
+    .row {
+      align-items: flex-end;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    button {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      color: var(--text);
+      cursor: default;
+      font-size: 13px;
+      padding: 8px 16px;
+    }
+
+    button.primary {
+      background: #0c4a6e;
+      border-color: var(--accent);
+      color: #e0f2fe;
+    }
+
+    .info {
+      color: var(--muted);
+      font-size: 12.5px;
+      line-height: 1.7;
+    }
+
+    .saved {
+      color: #34d399;
+      margin-top: 8px;
+    }
+
+    .mode-pick {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: 8px 0;
+    }
+
+    .mode-card {
+      align-items: flex-start;
+      border: 2px solid #2a3550;
+      border-radius: 10px;
+      cursor: default;
+      display: flex;
+      flex: 1;
+      gap: 10px;
+      min-width: 260px;
+      padding: 12px 14px;
+      transition: border-color .15s;
+    }
+
+    .mode-card input[type=radio] {
+      accent-color: #4da3ff;
+      margin-top: 4px;
+    }
+
+    .mode-card small {
+      display: block;
+      font-weight: 400;
+      line-height: 1.45;
+      margin-top: 4px;
+      opacity: .75;
+    }
+
+    .mode-card:has(input:checked) {
+      background: rgba(77, 163, 255, .08);
+      border-color: #4da3ff;
+    }
+
+    .section-head {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+
+    .section-head h2 {
+      margin: 0;
+    }
+
+    select {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 13px;
+      padding: 7px 9px;
+    }
+
+    .metric-grid {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      margin-bottom: 14px;
+    }
+
+    .metric {
+      border-left: 2px solid var(--accent);
+      padding: 4px 10px;
+    }
+
+    .metric span {
+      color: var(--muted);
+      display: block;
+      font-size: 11px;
+      margin-bottom: 3px;
+    }
+
+    .metric b {
+      color: var(--text);
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .chart-wrap {
+      height: 430px;
+      min-height: 320px;
+      position: relative;
+      width: 100%;
+    }
+
+    canvas {
+      background: #111922;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: block;
+      height: 100%;
+      width: 100%;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 10px;
+    }
+
+    .legend-item {
+      align-items: center;
+      background: transparent;
+      border: 0;
+      color: var(--muted);
+      cursor: pointer;
+      display: inline-flex;
+      font-size: 12px;
+      gap: 6px;
+      padding: 2px 0;
+    }
+
+    .legend-item[aria-pressed=false] {
+      opacity: .38;
+    }
+
+    .legend-item[aria-pressed=false] .swatch {
+      background: transparent !important;
+      border-style: dashed;
+    }
+
+    .legend-item:focus-visible {
+      outline: 1px solid var(--accent);
+      outline-offset: 3px;
+    }
+
+    .swatch {
+      border: 2px solid currentColor;
+      border-radius: 999px;
+      display: inline-block;
+      height: 9px;
+      width: 9px;
+    }
+
+    .math-grid {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    }
+
+    .math-block {
+      background: #111922;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .math-block h3 {
+      color: var(--text);
+      font-size: 13px;
+      margin: 0 0 10px;
+    }
+
+    .math-list {
+      display: grid;
+      gap: 8px;
+      margin: 0;
+    }
+
+    .math-list dt {
+      color: #e5edf5;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12.5px;
+      font-weight: 700;
+    }
+
+    .math-list dd {
+      color: var(--muted);
+      font-size: 12.5px;
+      line-height: 1.45;
+      margin: 2px 0 0;
+    }
+
+    .formula {
+      background: #0b1117;
+      border: 1px solid #283544;
+      border-radius: 8px;
+      color: #dbeafe;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12.5px;
+      line-height: 1.65;
+      margin: 0;
+      overflow-x: auto;
+      padding: 12px;
+      white-space: pre;
+    }
+
+    .formula-note {
+      color: #93c5fd;
+    }
+  </style>
+</head>
+
+<body>
+  <main>
+    <form class="card" method="post" action="/set-parameters">
+      <h2>Battery operation inputs</h2>
+      <div class="row">
+        <label><span class="field-name">Battery capacity (kWh)<span class="hint" tabindex="0" data-tip="BatteryCapacity: how much energy the battery can store. A bigger kWh value is like a bigger backpack for saving energy.">?</span></span><input type="number" id="tf-bcap" name="battery_capacity_kWh" step="10" min="0"
+            value="{{ battery_capacity_kWh }}"></label>
+        <label><span class="field-name">Battery power limit (kW)<span class="hint" tabindex="0" data-tip="BatteryPowerLimit: how fast the battery can charge or discharge. kW is the speed, not the storage size.">?</span></span><input type="number" id="tf-bpow" name="battery_power_limit_kW" step="10"
+            min="0" value="{{ battery_power_limit_kW }}"></label>
+        <label><span class="field-name">Charge efficiency<span class="hint" tabindex="0" data-tip="ChargeEfficiency: the fraction of charging energy that actually gets stored. 0.95 means 95% stays and 5% is lost.">?</span></span><input type="number" id="tf-cheff" name="charge_efficiency" step="0.01" min="0" max="1"
+            value="{{ charge_efficiency }}"></label>
+        <label><span class="field-name">Discharge efficiency<span class="hint" tabindex="0" data-tip="DischargeEfficiency: the fraction of stored energy that comes back out usefully. 0.95 means 95% reaches the load.">?</span></span><input type="number" id="tf-deff" name="discharge_efficiency" step="0.01" min="0"
+            max="1" value="{{ discharge_efficiency }}"></label>
+        <label><span class="field-name">Time step dt (h)<span class="hint" tabindex="0" data-tip="dt: how long one CSV step lasts, in hours. 0.25 means one row is 15 minutes, so four rows make one hour.">?</span></span><input type="number" id="tf-dt" name="dt" step="0.01" min="0" value="{{ dt }}"></label>
+      </div>
+      <div class="row">
+        <label><span class="field-name">Battery wear cost (VND/kWh throughput)<span class="hint" tabindex="0" data-tip="BatteryWearCost: a small cost for each kWh moved through the battery, representing battery aging from use.">?</span></span><input type="number" id="tf-wear" name="battery_wear_cost"
+            step="1" min="0" value="{{ battery_wear_cost }}"></label>
+        <label><span class="field-name">Minimum SOC<span class="hint" tabindex="0" data-tip="MinimumSOC: the lowest allowed battery fill level. 0.10 means the battery should not go below 10% full.">?</span></span><input type="number" id="tf-minsoc" name="minimum_soc" step="0.01" min="0" max="1"
+            value="{{ minimum_soc }}"></label>
+        <label><span class="field-name">Maximum SOC<span class="hint" tabindex="0" data-tip="MaximumSOC: the highest allowed battery fill level. 0.90 means stop charging around 90% full.">?</span></span><input type="number" id="tf-maxsoc" name="maximum_soc" step="0.01" min="0" max="1"
+            value="{{ maximum_soc }}"></label>
+        <label><span class="field-name">Required final SOC<span class="hint" tabindex="0" data-tip="RequiredFinalSOC: the minimum battery fill level wanted at the end of the simulated day or horizon.">?</span></span><input type="number" id="tf-finalsoc" name="required_final_soc" step="0.01" min="0"
+            max="1" value="{{ required_final_soc }}"></label>
+      </div>
+      <div class="info">Load(t) and PV(t) come from the CSV columns P_load_kW and P_pv_kW. The CSV time rows use dt to
+        convert power snapshots into energy.</div>
+
+      <h2>Electric bill and battery price inputs</h2>
+      <div class="mode-pick" id="tf-mode-pick">
+        <label class="mode-card">
+          <input type="radio" name="billing_mode" value="2tc" {{ checked_2tc }}>
+          <div><b>Pay by kWh + monthly peak</b>
+            <small>You pay for energy used, and also pay extra for the highest 30-minute grid peak in the month.
+              The battery can save money two ways: buy cheap energy and lower that peak.</small>
+          </div>
+        </label>
+        <label class="mode-card">
+          <input type="radio" name="billing_mode" value="tou" {{ checked_tou }}>
+          <div><b>Pay by kWh only</b>
+            <small>You only pay different kWh prices at different times of day.
+              The battery saves money by charging when electricity is cheap and discharging when it is
+              expensive.</small>
+          </div>
+        </label>
+      </div>
+      <div class="row">
+        <label><span class="field-name">Sunday pricing<span class="hint" tabindex="0" data-tip="When checked, Sunday ignores expensive-hour pricing and uses the normal price instead.">?</span></span><input type="checkbox" id="tf-sunday" name="billing_sunday" {{ checked_sunday }}>
+          Sunday has no expensive hours; use the normal price instead</label>
+      </div>
+      <div class="row">
+        <label><span class="field-name">Expensive-hour price (VND/kWh)<span class="hint" tabindex="0" data-tip="EnergyPrice(t) during costly hours. The bill multiplies this price by grid kWh used in those time windows.">?</span></span><input type="number" id="tf-peak" name="billing_expensive" step="10"
+            value="{{ billing_expensive }}"></label>
+        <label><span class="field-name">Normal-hour price (VND/kWh)<span class="hint" tabindex="0" data-tip="EnergyPrice(t) during regular hours, used when the time is not cheap or expensive.">?</span></span><input type="number" id="tf-mid" name="billing_normal" step="10"
+            value="{{ billing_normal }}"></label>
+        <label><span class="field-name">Cheap-hour price (VND/kWh)<span class="hint" tabindex="0" data-tip="EnergyPrice(t) during cheap hours. A battery may charge here so it can discharge later.">?</span></span><input type="number" id="tf-off" name="billing_cheap" step="10"
+            value="{{ billing_cheap }}"></label>
+        <label><span class="field-name">Monthly peak fee (VND/kW/month)<span class="hint" tabindex="0" data-tip="DemandChargeRate: extra monthly charge based on the highest grid demand peak. Lowering this peak is peak shaving.">?</span></span><input type="number" id="tf-tcap" name="billing_peak_penalty" step="1000"
+            value="{{ billing_peak_penalty }}"></label>
+      </div>
+      <div class="row">
+        <label><span class="field-name">Expensive-hour windows<span class="hint" tabindex="0" data-tip="Clock ranges that use the expensive price. Example: 17:30-22:30 means evening power is costly.">?</span></span><input id="tf-wpeak" name="billing_windows_expensive" size="24"
+            placeholder="17:30-22:30" value="{{ billing_windows_expensive }}"></label>
+        <label><span class="field-name">Cheap-hour windows<span class="hint" tabindex="0" data-tip="Clock ranges that use the cheap price. Example: 00:00-06:00 means overnight power is cheap.">?</span></span><input id="tf-woff" name="billing_windows_cheap" size="24" placeholder="00:00-06:00"
+            value="{{ billing_windows_cheap }}"></label>
+      </div>
+      <div class="row">
+        <label><span class="field-name">Battery cell price (VND/kWh)<span class="hint" tabindex="0" data-tip="Capital cost for battery energy capacity. Bigger BatteryCapacity increases this part of project cost.">?</span></span><input type="number" id="tf-ckwh" name="billing_battery_per_kWh"
+            step="100000" value="{{ billing_battery_per_kWh }}"></label>
+        <label><span class="field-name">Inverter/PCS price (VND/kW)<span class="hint" tabindex="0" data-tip="Capital cost for battery power capability. Bigger BatteryPowerLimit increases this part of project cost.">?</span></span><input type="number" id="tf-ckw" name="billing_battery_per_kW" step="100000"
+            value="{{ billing_battery_per_kW }}"></label>
+        <label><span class="field-name">Yearly maintenance (%)<span class="hint" tabindex="0" data-tip="Yearly upkeep cost as a fraction of battery investment. 0.02 means 2% per year.">?</span></span><input type="number" id="tf-opex" name="billing_yearly_maintain_percentage"
+            step="0.005" value="{{ billing_yearly_maintain_percentage }}"></label>
+        <label><span class="field-name">Discount rate<span class="hint" tabindex="0" data-tip="Makes future savings count less than money today. 0.08 means an 8% yearly discount rate.">?</span></span><input type="number" id="tf-disc" name="billing_discount_rate" step="0.01"
+            value="{{ billing_discount_rate }}"></label>
+        <label><span class="field-name">Project years<span class="hint" tabindex="0" data-tip="How many years to evaluate battery costs and savings over.">?</span></span><input type="number" id="tf-years" name="billing_years" step="1"
+            value="{{ billing_years }}"></label>
+        <label><span class="field-name">Real-world savings factor<span class="hint" tabindex="0" data-tip="Reduces ideal oracle savings into realistic expected savings. 0.60 means count 60% of the perfect result.">?</span></span><input type="number" id="tf-real" name="billing_real_saving_factor" step="0.05"
+            min="0.1" max="1" value="{{ billing_real_saving_factor }}"></label>
+        <button id="btn-tf-save" class="primary" type="submit">Save bill and finance inputs</button>
+      </div>
+      <div class="info">Real-world savings factor means: if Oracle says the battery can save 100, the real controller
+        may
+        capture only part of it. Example: 0.60 means count 60 as realistic savings. Changing the time windows means the
+        DRL policy should be trained again.</div>
+      {% if saved %}<div class="info saved">Saved bill and finance inputs.</div>{% endif %}
+      <div id="tariff-info" class="info"></div>
+    </form>
+
+    <section class="card">
+      <div class="section-head">
+        <h2>Before-oracle daily benchmark</h2>
+        <label>Day
+          <select id="benchmark-day"></select>
+        </label>
+      </div>
+      <div class="metric-grid">
+        <div class="metric"><span>Days in CSV</span><b>{{ benchmark.summary.day_count }}</b></div>
+        <div class="metric"><span>Total load</span><b>{{ "{:,.0f}".format(benchmark.summary.total_load_kWh) }} kWh</b></div>
+        <div class="metric"><span>Total PV</span><b>{{ "{:,.0f}".format(benchmark.summary.total_pv_kWh) }} kWh</b></div>
+        <div class="metric"><span>Grid import before battery</span><b>{{ "{:,.0f}".format(benchmark.summary.total_grid_kWh) }} kWh</b></div>
+        <div class="metric"><span>Highest monthly DEADLY peak</span><b>{{ "{:,.1f}".format(benchmark.summary.peak_grid_kW) }} kW, day {{ benchmark.summary.peak_day_index }}</b></div>
+        <div class="metric"><span>Bill before battery</span><b>{{ "{:,.0f}".format(benchmark.summary.total_bill_vnd) }} VND</b></div>
+        <div class="metric"><span>Oracle LP status</span><b>{{ oracle.status }}</b></div>
+        <div class="metric"><span>Grid import after Oracle</span><b>{{ "{:,.0f}".format(oracle.summary.total_grid_kWh) }} kWh</b></div>
+        <div class="metric"><span>Peak shaved by Oracle</span><b>{{ "{:,.1f}".format(oracle.summary.peak_reduction_kW) }} kW</b></div>
+        <div class="metric"><span>Oracle perfect saving</span><b>{{ "{:,.0f}".format(oracle.summary.oracle_saving_vnd) }} VND</b></div>
+        <div class="metric"><span>SEER realistic saving</span><b>{{ "{:,.0f}".format(oracle.summary.seer_saving_vnd) }} VND</b></div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="benchmark-chart"></canvas>
+      </div>
+      <div class="legend" id="benchmark-legend" aria-label="Chart line visibility controls">
+        <button class="legend-item" type="button" data-series="load" aria-pressed="true"><span class="swatch" style="background:#92400e;color:#92400e"></span>Load</button>
+        <button class="legend-item" type="button" data-series="pv" aria-pressed="true"><span class="swatch" style="background:#166534;color:#166534"></span>PV</button>
+        <button class="legend-item" type="button" data-series="grid" aria-pressed="true"><span class="swatch" style="background:#075985;color:#075985"></span>Grid import before battery</button>
+        <button class="legend-item" type="button" data-series="rolling_grid" aria-pressed="true"><span class="swatch" style="background:#9f1239;color:#9f1239"></span>Daily 30-minute rolling grid</button>
+        <button class="legend-item" type="button" data-series="monthly_peak" aria-pressed="true"><span class="swatch" style="background:#7f1d1d;color:#7f1d1d"></span>DEADLY monthly peak</button>
+        <button class="legend-item" type="button" data-series="oracle_peak" aria-pressed="true"><span class="swatch" style="background:#86efac;color:#86efac"></span>Post-oracle DEADLY peak</button>
+        <button class="legend-item" type="button" data-series="oracle_grid" aria-pressed="true"><span class="swatch" style="background:#c4b5fd;color:#c4b5fd"></span>Oracle grid after battery</button>
+        <button class="legend-item" type="button" data-series="oracle_rolling_grid" aria-pressed="true"><span class="swatch" style="background:#fda4af;color:#fda4af"></span>Oracle 30-minute rolling grid</button>
+        <button class="legend-item" type="button" data-series="oracle_discharge" aria-pressed="true"><span class="swatch" style="background:#fdba74;color:#fdba74"></span>Battery discharge</button>
+        <button class="legend-item" type="button" data-series="oracle_charge" aria-pressed="true"><span class="swatch" style="background:#67e8f9;color:#67e8f9"></span>Battery charge</button>
+        <button class="legend-item" type="button" data-series="oracle_soc" aria-pressed="true"><span class="swatch" style="background:#fde047;color:#fde047"></span>SOC %</button>
+      </div>
+      <div id="benchmark-day-info" class="info"></div>
+    </section>
+
+    <section class="card">
+      <h2>Oracle LP math</h2>
+      <div class="info">This is the optimization problem the oracle will solve later. The machine knows the real CSV
+        load/PV data and chooses the unknown battery actions that minimize the bill.</div>
+
+      <div class="math-grid" style="margin-top:14px">
+        <div class="math-block">
+          <h3>Known parameters</h3>
+          <dl class="math-list">
+            <div><dt>Load(t)</dt><dd>Building load from the CSV, in kW.</dd></div>
+            <div><dt>PV(t)</dt><dd>Solar generation from the CSV, in kW.</dd></div>
+            <div><dt>BatteryCapacity</dt><dd>Battery energy capacity, in kWh.</dd></div>
+            <div><dt>BatteryPowerLimit</dt><dd>Maximum battery charge/discharge power, in kW.</dd></div>
+            <div><dt>ChargeEfficiency</dt><dd>Fraction of charging energy that becomes stored energy.</dd></div>
+            <div><dt>DischargeEfficiency</dt><dd>Fraction of stored energy that comes back out usefully.</dd></div>
+            <div><dt>dt</dt><dd>Time step in hours. Current default is 0.25 h.</dd></div>
+            <div><dt>EnergyPrice(t)</dt><dd>Electricity tariff at time t, in VND/kWh.</dd></div>
+            <div><dt>DemandChargeRate</dt><dd>Capacity charge, in VND/kW.</dd></div>
+            <div><dt>BatteryWearCost</dt><dd>Battery degradation cost, in VND/kWh throughput.</dd></div>
+            <div><dt>MinimumSOC</dt><dd>Lowest allowed battery state of charge.</dd></div>
+            <div><dt>MaximumSOC</dt><dd>Highest allowed battery state of charge.</dd></div>
+            <div><dt>RequiredFinalSOC</dt><dd>Minimum SOC required at the end of the horizon.</dd></div>
+          </dl>
+        </div>
+
+        <div class="math-block">
+          <h3>Unknown variables to solve</h3>
+          <dl class="math-list">
+            <div><dt>BatteryDischarge(t)</dt><dd>Battery to load power, in kW.</dd></div>
+            <div><dt>GridCharge(t)</dt><dd>Grid to battery power, in kW.</dd></div>
+            <div><dt>SolarCharge(t)</dt><dd>PV surplus to battery power, in kW.</dd></div>
+            <div><dt>GridImport(t)</dt><dd>Power imported from the grid, in kW.</dd></div>
+            <div><dt>BatterySOC(t)</dt><dd>Battery state of charge from 0 to 1.</dd></div>
+            <div><dt>PeakGrid</dt><dd>Monthly billed peak demand, in kW.</dd></div>
+          </dl>
+        </div>
+      </div>
+
+      <div class="math-block" style="margin-top:14px">
+        <h3>Objective</h3>
+        <pre class="formula">MINIMIZE:
+
+  Σ[t=1→96] (
+      EnergyPrice(t) × dt × (
+          GridCharge(t) - BatteryDischarge(t)
+      )
+  )
+      <span class="formula-note">← Net energy cost</span>
+
++ Σ[t=1→96] (
+      BatteryWearCost × dt × (
+          BatteryDischarge(t)
+        + GridCharge(t)
+        + SolarCharge(t)
+      )
+  )
+      <span class="formula-note">← Battery getting old</span>
+
++ DemandChargeRate × PeakGrid
+      <span class="formula-note">← Monthly demand charge</span></pre>
+      </div>
+
+      <div class="math-block" style="margin-top:14px">
+        <h3>Constraints</h3>
+        <pre class="formula">GridImport(t)
+  = EffectiveLoad(t) + GridCharge(t) - BatteryDischarge(t)
+  ≥ 0
+      <span class="formula-note">← No electricity export</span>
+
+BatterySOC(t+1)
+  = BatterySOC(t)
+  + (ChargeEfficiency × dt / BatteryCapacity) × GridCharge(t)
+  + (ChargeEfficiency × dt / BatteryCapacity) × SolarCharge(t)
+  - (dt / (DischargeEfficiency × BatteryCapacity)) × BatteryDischarge(t)
+      <span class="formula-note">← Battery SOC update</span>
+
+0 ≤ BatteryDischarge(t) ≤ BatteryPowerLimit
+0 ≤ GridCharge(t) ≤ BatteryPowerLimit
+0 ≤ SolarCharge(t) ≤ BatteryPowerLimit
+0 ≤ SolarCharge(t) ≤ SolarSurplus(t)
+
+MinimumSOC ≤ BatterySOC(t) ≤ MaximumSOC
+BatterySOC(96) ≥ RequiredFinalSOC
+
+0.5 × (GridImport(t) + GridImport(t+1)) ≤ PeakGrid
+for t = 0 ... 95
+      <span class="formula-note">← 30-minute rolling average demand</span></pre>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const benchmark = {{ benchmark | tojson }};
+    const oracle = {{ oracle | tojson }};
+    const daySelect = document.getElementById("benchmark-day");
+    const chart = document.getElementById("benchmark-chart");
+    const dayInfo = document.getElementById("benchmark-day-info");
+    const legend = document.getElementById("benchmark-legend");
+    const ctx = chart.getContext("2d");
+
+    const seriesStyles = [
+      { key: "load", label: "Load", color: "#92400e" },
+      { key: "pv", label: "PV", color: "#166534" },
+      { key: "grid", label: "Grid import", color: "#075985" },
+      { key: "rolling_grid", label: "Daily 30-minute rolling grid", color: "#9f1239" },
+      { key: "monthly_peak", label: "DEADLY monthly peak", color: "#7f1d1d", reference: true },
+      { key: "oracle_peak", label: "Post-oracle DEADLY peak", color: "#86efac", oracleReference: true },
+      { key: "oracle_grid", label: "Oracle grid", color: "#c4b5fd", oracleKey: "grid" },
+      { key: "oracle_rolling_grid", label: "Oracle rolling grid", color: "#fda4af", oracleKey: "rolling_grid" },
+      { key: "oracle_discharge", label: "Battery discharge", color: "#fdba74", oracleKey: "discharge" },
+      { key: "oracle_charge", label: "Battery charge", color: "#67e8f9", oracleCharge: true },
+      { key: "oracle_soc", label: "SOC %", color: "#fde047", soc: true },
+    ];
+    const activeSeries = Object.fromEntries(seriesStyles.map((series) => [series.key, true]));
+    const oracleDaysByIndex = new Map((oracle.days || []).map((day) => [day.day_index, day]));
+
+    function formatNumber(value, digits = 0) {
+      return Number(value).toLocaleString(undefined, {
+        maximumFractionDigits: digits,
+        minimumFractionDigits: digits,
+      });
+    }
+
+    function fillDayOptions() {
+      benchmark.days.forEach((day, index) => {
+        const option = document.createElement("option");
+        option.value = index;
+        option.textContent = `Day ${day.day_index} (${day.day_type})`;
+        daySelect.appendChild(option);
+      });
+    }
+
+    function resizeCanvas() {
+      const rect = chart.getBoundingClientRect();
+      const scale = window.devicePixelRatio || 1;
+      chart.width = Math.round(rect.width * scale);
+      chart.height = Math.round(rect.height * scale);
+      ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    }
+
+    function drawBenchmark() {
+      if (!benchmark.days.length) {
+        return;
+      }
+
+      resizeCanvas();
+      const day = benchmark.days[Number(daySelect.value || 0)];
+      const oracleDay = oracleDaysByIndex.get(day.day_index);
+      const rect = chart.getBoundingClientRect();
+      const width = rect.width;
+      const height = rect.height;
+      const padding = { top: 46, right: 18, bottom: 44, left: 58 };
+      const plotWidth = width - padding.left - padding.right;
+      const plotHeight = height - padding.top - padding.bottom;
+      const visibleSeries = seriesStyles.filter((series) => activeSeries[series.key]);
+      const maxY = Math.max(
+        1,
+        ...visibleSeries.flatMap((series) => {
+          if (series.reference) {
+            return [day.month_peak.value_kW];
+          }
+          if (series.oracleReference && oracleDay && oracleDay.month_peak) {
+            return [oracleDay.month_peak.value_kW];
+          }
+          if (series.oracleCharge && oracleDay) {
+            return combineCharge(oracleDay);
+          }
+          if (series.oracleKey && oracleDay) {
+            return oracleDay[series.oracleKey] || [];
+          }
+          if (series.soc) {
+            return [];
+          }
+          return day[series.key] || [];
+        })
+      ) * 1.08;
+
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = "#111922";
+      ctx.fillRect(0, 0, width, height);
+
+      drawGrid(width, height, padding, plotWidth, plotHeight, maxY);
+      visibleSeries
+        .filter((series) => !series.reference && !series.oracleReference && !series.soc)
+        .forEach((series) => {
+          if (series.oracleCharge && oracleDay) {
+            drawLine(combineCharge(oracleDay), series.color, padding, plotWidth, plotHeight, maxY, [3, 4]);
+          } else if (series.oracleKey && oracleDay) {
+            drawLine(oracleDay[series.oracleKey], series.color, padding, plotWidth, plotHeight, maxY, [6, 4]);
+          } else if (!series.oracleKey && !series.oracleCharge) {
+            drawLine(day[series.key], series.color, padding, plotWidth, plotHeight, maxY);
+          }
+        });
+      visibleSeries
+        .filter((series) => series.reference)
+        .forEach((series) => drawMonthlyPeakLine(series, day, padding, plotWidth, plotHeight, maxY));
+      visibleSeries
+        .filter((series) => series.oracleReference && oracleDay && oracleDay.month_peak)
+        .forEach((series) => drawOraclePeakLine(series, oracleDay, padding, plotWidth, plotHeight, maxY));
+      visibleSeries
+        .filter((series) => series.soc && oracleDay)
+        .forEach((series) => drawSocLine(oracleDay.soc || [], series.color, width, padding, plotWidth, plotHeight));
+
+      if (oracleDay && oracleDay.solved) {
+        dayInfo.textContent = `Day ${day.day_index}: before grid ${formatNumber(day.grid_kWh)} kWh, after Oracle grid ${formatNumber(oracleDay.grid_kWh)} kWh, charged ${formatNumber(oracleDay.charged_kWh)} kWh, discharged ${formatNumber(oracleDay.discharged_kWh)} kWh, final SOC ${formatNumber(oracleDay.final_soc, 1)}%. Daily peak falls from ${formatNumber(day.peak_grid_kW, 1)} to ${formatNumber(oracleDay.peak_grid_kW, 1)} kW. Oracle day saving ${formatNumber(oracleDay.day_saving_vnd)} VND; SEER counts ${formatNumber(Math.max(0, oracleDay.day_saving_vnd) * oracle.summary.seer_factor)} VND.`;
+      } else {
+        const oracleStatus = oracleDay ? oracleDay.status : oracle.status;
+        dayInfo.textContent = `Day ${day.day_index}: load ${formatNumber(day.load_kWh)} kWh, PV ${formatNumber(day.pv_kWh)} kWh, grid ${formatNumber(day.grid_kWh)} kWh, surplus ${formatNumber(day.surplus_kWh)} kWh, daily peak ${formatNumber(day.peak_grid_kW, 1)} kW. Oracle unavailable: ${oracleStatus}`;
+      }
+    }
+
+    function drawGrid(width, height, padding, plotWidth, plotHeight, maxY) {
+      ctx.strokeStyle = "#263241";
+      ctx.lineWidth = 1;
+      ctx.fillStyle = "#8496a8";
+      ctx.font = "12px Segoe UI, system-ui, sans-serif";
+
+      for (let tick = 0; tick <= 4; tick += 1) {
+        const y = padding.top + plotHeight * tick / 4;
+        const value = maxY * (1 - tick / 4);
+        ctx.beginPath();
+        ctx.moveTo(padding.left, y);
+        ctx.lineTo(width - padding.right, y);
+        ctx.stroke();
+        ctx.fillText(formatNumber(value), 10, y + 4);
+      }
+
+      [0, 6, 12, 18, 24].forEach((hour) => {
+        const x = padding.left + plotWidth * hour / 24;
+        ctx.beginPath();
+        ctx.moveTo(x, padding.top);
+        ctx.lineTo(x, height - padding.bottom);
+        ctx.stroke();
+        ctx.fillText(`${hour}:00`, x - 12, height - 18);
+      });
+
+      ctx.fillText("kW", 12, 18);
+      ctx.fillText("SOC %", width - 54, 18);
+      [0, 50, 100].forEach((value) => {
+        const y = padding.top + plotHeight * (1 - value / 100);
+        ctx.fillText(String(value), width - 42, y + 4);
+      });
+    }
+
+    function drawLine(values, color, padding, plotWidth, plotHeight, maxY, dash = []) {
+      if (!values.length) {
+        return;
+      }
+
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash(dash);
+      ctx.beginPath();
+      values.forEach((value, index) => {
+        const x = padding.left + plotWidth * index / Math.max(1, values.length - 1);
+        const y = padding.top + plotHeight * (1 - value / maxY);
+        if (index === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      });
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawSocLine(values, color, width, padding, plotWidth, plotHeight) {
+      if (!values.length) {
+        return;
+      }
+
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([2, 4]);
+      ctx.beginPath();
+      values.forEach((value, index) => {
+        const x = padding.left + plotWidth * index / Math.max(1, values.length - 1);
+        const y = padding.top + plotHeight * (1 - value / 100);
+        if (index === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      });
+      ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.font = "700 12px Segoe UI, system-ui, sans-serif";
+      ctx.fillText("SOC", width - 82, padding.top + 14);
+      ctx.restore();
+    }
+
+    function combineCharge(day) {
+      const gridCharge = day.grid_charge || [];
+      const solarCharge = day.solar_charge || [];
+      return gridCharge.map((value, index) => value + (solarCharge[index] || 0));
+    }
+
+    function drawMonthlyPeakLine(series, day, padding, plotWidth, plotHeight, maxY) {
+      const peak = day.month_peak;
+      const value = peak.value_kW;
+      const y = padding.top + plotHeight * (1 - value / maxY);
+
+      ctx.save();
+      ctx.strokeStyle = series.color;
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([8, 5]);
+      ctx.beginPath();
+      ctx.moveTo(padding.left, y);
+      ctx.lineTo(padding.left + plotWidth, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      const label = `DEADLY peak: ${formatNumber(value, 1)} kW, day ${peak.day_index}`;
+      const monthLabel = `using month from day ${peak.month_start_day_index} to day ${peak.month_end_day_index}`;
+      const labelX = padding.left + 8;
+      const labelY = Math.max(18, y - 24);
+      ctx.font = "700 12px Segoe UI, system-ui, sans-serif";
+      const titleWidth = ctx.measureText(label).width;
+      ctx.font = "12px Segoe UI, system-ui, sans-serif";
+      const monthWidth = ctx.measureText(monthLabel).width;
+
+      ctx.fillStyle = "rgba(17, 25, 34, .88)";
+      ctx.fillRect(labelX - 7, labelY - 15, Math.max(titleWidth, monthWidth) + 14, 35);
+      ctx.strokeStyle = "rgba(239, 68, 68, .45)";
+      ctx.strokeRect(labelX - 7, labelY - 15, Math.max(titleWidth, monthWidth) + 14, 35);
+
+      ctx.fillStyle = series.color;
+      ctx.font = "700 12px Segoe UI, system-ui, sans-serif";
+      ctx.fillText(label, labelX, labelY - 1);
+      ctx.font = "12px Segoe UI, system-ui, sans-serif";
+      ctx.fillText(monthLabel, labelX, labelY + 14);
+      ctx.restore();
+    }
+
+    function drawOraclePeakLine(series, day, padding, plotWidth, plotHeight, maxY) {
+      const peak = day.month_peak;
+      const value = peak.value_kW;
+      const y = padding.top + plotHeight * (1 - value / maxY);
+
+      ctx.save();
+      ctx.strokeStyle = series.color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 5]);
+      ctx.beginPath();
+      ctx.moveTo(padding.left, y);
+      ctx.lineTo(padding.left + plotWidth, y);
+      ctx.stroke();
+
+      const label = `Post-oracle DEADLY peak: ${formatNumber(value, 1)} kW`;
+      ctx.fillStyle = series.color;
+      ctx.font = "700 12px Segoe UI, system-ui, sans-serif";
+      ctx.fillText(label, padding.left + plotWidth - ctx.measureText(label).width - 8, Math.max(18, y - 7));
+      ctx.restore();
+    }
+
+    function bindLegendControls() {
+      legend.querySelectorAll("[data-series]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const key = button.dataset.series;
+          activeSeries[key] = !activeSeries[key];
+          button.setAttribute("aria-pressed", String(activeSeries[key]));
+          drawBenchmark();
+        });
+      });
+    }
+
+    fillDayOptions();
+    bindLegendControls();
+    daySelect.addEventListener("change", drawBenchmark);
+    window.addEventListener("resize", drawBenchmark);
+    drawBenchmark();
+  </script>
+</body>
+
+</html>
