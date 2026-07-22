@@ -145,6 +145,12 @@
       color: #e0f2fe;
     }
 
+    button.secondary {
+      background: #123142;
+      border-color: #25637c;
+      color: #d7f3ff;
+    }
+
     .info {
       color: var(--muted);
       font-size: 12.5px;
@@ -205,6 +211,33 @@
 
     .section-head h2 {
       margin: 0;
+    }
+
+    .sample-row {
+      align-items: flex-end;
+      background: #111922;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 2px 0 10px;
+      padding: 10px 12px;
+    }
+
+    .sample-row label {
+      margin-bottom: 0;
+    }
+
+    .sample-row select {
+      min-width: 230px;
+    }
+
+    .dashboard-grid {
+      align-items: start;
+      display: grid;
+      gap: 14px;
+      grid-template-columns: 1fr;
     }
 
     select {
@@ -474,6 +507,10 @@
     }
 
     @media (max-width: 720px) {
+      .dashboard-grid {
+        grid-template-columns: 1fr;
+      }
+
       .metric-row.summary-main,
       .metric-row.summary-oracle-align,
       .metric-row.summary-triple {
@@ -494,13 +531,20 @@
       <div class="row">
         <label><span class="field-name">Battery capacity (kWh)<span class="hint" tabindex="0" data-tip="BatteryCapacity: how much energy the battery can store. A bigger kWh value is like a bigger backpack for saving energy.">?</span></span><input type="number" id="tf-bcap" name="battery_capacity_kWh" step="10" min="0"
             value="{{ battery_capacity_kWh }}"></label>
-        <label><span class="field-name">Battery power limit (kW)<span class="hint" tabindex="0" data-tip="BatteryPowerLimit: how fast the battery can charge or discharge. kW is the speed, not the storage size.">?</span></span><input type="number" id="tf-bpow" name="battery_power_limit_kW" step="10"
+        <label><span class="field-name">Battery power limit (kW)<span class="hint" tabindex="0" data-tip="BatteryPowerLimit: how fast the battery can charge or discharge. kW is the speed, not the storage size.">?</span></span><input type="number" id="tf-bpow" name="battery_power_limit_kW" step="0.5"
             min="0" value="{{ battery_power_limit_kW }}"></label>
         <label><span class="field-name">Charge efficiency<span class="hint" tabindex="0" data-tip="ChargeEfficiency: the fraction of charging energy that actually gets stored. 0.95 means 95% stays and 5% is lost.">?</span></span><input type="number" id="tf-cheff" name="charge_efficiency" step="0.01" min="0" max="1"
             value="{{ charge_efficiency }}"></label>
         <label><span class="field-name">Discharge efficiency<span class="hint" tabindex="0" data-tip="DischargeEfficiency: the fraction of stored energy that comes back out usefully. 0.95 means 95% reaches the load.">?</span></span><input type="number" id="tf-deff" name="discharge_efficiency" step="0.01" min="0"
             max="1" value="{{ discharge_efficiency }}"></label>
         <label><span class="field-name">Time step dt (h)<span class="hint" tabindex="0" data-tip="dt: how long one CSV step lasts, in hours. 0.25 means one row is 15 minutes, so four rows make one hour.">?</span></span><input type="number" id="tf-dt" name="dt" step="0.01" min="0" value="{{ dt }}"></label>
+      </div>
+      <div class="sample-row">
+        <label><span class="field-name">Sample batteries<span class="hint" tabindex="0" data-tip="Pick from the project sample grid: energy sizes 250, 500, 750, 1000, 1250 kWh and power ratios 0.35, 0.50, 0.70 times capacity.">?</span></span>
+          <select id="sample-battery"></select>
+        </label>
+        <button id="btn-sample-battery" class="secondary" type="button">Use selected sample batteries option</button>
+        <div class="info">This replaces only BatteryCapacity and BatteryPowerLimit; all tariff, SOC, and finance inputs stay as-is.</div>
       </div>
       <div class="row">
         <label><span class="field-name">Battery wear cost (VND/kWh throughput)<span class="hint" tabindex="0" data-tip="BatteryWearCost: a small cost for each kWh moved through the battery, representing battery aging from use.">?</span></span><input type="number" id="tf-wear" name="battery_wear_cost"
@@ -576,22 +620,50 @@
       <div id="tariff-info" class="info"></div>
     </form>
 
-    <section class="card">
-      <div class="section-head">
-        <h2>Before-oracle daily benchmark</h2>
-        <label>Day
-          <select id="benchmark-day"></select>
-        </label>
-      </div>
+    <div class="dashboard-grid">
+      <section class="card">
+        <div class="section-head">
+          <h2>Daily chart</h2>
+          <div class="row">
+            <label>Day
+              <select id="benchmark-day"></select>
+            </label>
+            <label>Battery
+              <select id="benchmark-battery"></select>
+            </label>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="benchmark-chart"></canvas>
+          <div class="chart-tooltip" id="benchmark-tooltip" role="status" aria-live="polite"></div>
+        </div>
+        <div class="legend" id="benchmark-legend" aria-label="Chart line visibility controls">
+          <button class="legend-item" type="button" data-series="load" aria-pressed="true"><span class="swatch" style="background:#92400e;color:#92400e"></span>Load</button>
+          <button class="legend-item" type="button" data-series="pv" aria-pressed="true"><span class="swatch" style="background:#166534;color:#166534"></span>PV</button>
+          <button class="legend-item" type="button" data-series="grid" aria-pressed="true"><span class="swatch" style="background:#075985;color:#075985"></span>Grid import before battery</button>
+          <button class="legend-item" type="button" data-series="rolling_grid" aria-pressed="true"><span class="swatch" style="background:#9f1239;color:#9f1239"></span>Daily 30-minute rolling grid</button>
+          <button class="legend-item" type="button" data-series="monthly_peak" aria-pressed="true"><span class="swatch" style="background:#7f1d1d;color:#7f1d1d"></span>DEADLY monthly peak</button>
+          <button class="legend-item" type="button" data-series="oracle_peak" aria-pressed="true"><span class="swatch" style="background:#86efac;color:#86efac"></span>Post-oracle DEADLY peak</button>
+          <button class="legend-item" type="button" data-series="oracle_grid" aria-pressed="true"><span class="swatch" style="background:#c4b5fd;color:#c4b5fd"></span>Oracle grid after battery</button>
+          <button class="legend-item" type="button" data-series="oracle_rolling_grid" aria-pressed="true"><span class="swatch" style="background:#fda4af;color:#fda4af"></span>Oracle 30-minute rolling grid</button>
+          <button class="legend-item" type="button" data-series="oracle_discharge" aria-pressed="true"><span class="swatch" style="background:#fdba74;color:#fdba74"></span>Battery discharge</button>
+          <button class="legend-item" type="button" data-series="oracle_charge" aria-pressed="true"><span class="swatch" style="background:#67e8f9;color:#67e8f9"></span>Battery charge</button>
+          <button class="legend-item" type="button" data-series="oracle_soc" aria-pressed="true"><span class="swatch" style="background:#fde047;color:#fde047"></span>SOC %</button>
+        </div>
+        <div id="benchmark-day-info" class="info"></div>
+      </section>
+
+      <section class="card">
+        <h2>Battery benchmark</h2>
       <div class="metric-grid">
         <div class="metric-row summary-main">
-          <div class="metric"><span class="metric-label">Battery cost<span class="hint" tabindex="0" data-tip="Battery cost = BatteryCapacity * Battery cell price + BatteryPowerLimit * Inverter/PCS price. This is the upfront battery investment, not the electric bill.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.battery_cost_vnd) }} VND</b></div>
-          <div class="metric"><span class="metric-label">Battery capacity<span class="hint" tabindex="0" data-tip="BatteryCapacity from the input form. It controls stored energy size in kWh.">?</span></span><b>{{ "{:,.0f}".format(battery_capacity_kWh | float) }} kWh</b></div>
-          <div class="metric"><span class="metric-label">Power limit<span class="hint" tabindex="0" data-tip="BatteryPowerLimit from the input form. It controls maximum charge or discharge speed in kW.">?</span></span><b>{{ "{:,.0f}".format(battery_power_limit_kW | float) }} kW</b></div>
+          <div class="metric"><span class="metric-label">Battery cost<span class="hint" tabindex="0" data-tip="Battery cost = BatteryCapacity * Battery cell price + BatteryPowerLimit * Inverter/PCS price. This is the upfront battery investment, not the electric bill.">?</span></span><b id="summary-battery-cost">{{ "{:,.0f}".format(benchmark.summary.battery_cost_vnd) }} VND</b></div>
+          <div class="metric"><span class="metric-label">Battery capacity<span class="hint" tabindex="0" data-tip="BatteryCapacity from the selected sample batteries option. It controls stored energy size in kWh.">?</span></span><b id="summary-battery-capacity">{{ "{:,.0f}".format(battery_capacity_kWh | float) }} kWh</b></div>
+          <div class="metric"><span class="metric-label">Power limit<span class="hint" tabindex="0" data-tip="BatteryPowerLimit from the selected sample batteries option. It controls maximum charge or discharge speed in kW.">?</span></span><b id="summary-battery-power">{{ "{:,.0f}".format(battery_power_limit_kW | float) }} kW</b></div>
           <div class="metric"><span class="metric-label">Wear cost<span class="hint" tabindex="0" data-tip="BatteryWearCost times battery throughput is added to the Oracle post-battery bill.">?</span></span><b>{{ "{:,.0f}".format(battery_wear_cost | float) }} VND/kWh</b></div>
         </div>
         <div class="metric-row summary-main">
-          <div class="metric"><span class="metric-label">FACT: Oracle LP solved<span class="hint" tabindex="0" data-tip="True when SciPy/linprog solved at least one month. False means the Oracle result is not a valid optimized battery answer.">?</span></span><b>{{ "True" if oracle.summary.solved_day_count else "False" }}</b></div>
+          <div class="metric"><span class="metric-label">FACT: Oracle LP solved<span class="hint" tabindex="0" data-tip="True when SciPy/linprog solved at least one month. False means the Oracle result is not a valid optimized battery answer.">?</span></span><b id="summary-solved">{{ "True" if oracle.summary.solved_day_count else "False" }}</b></div>
           <div class="metric"><span class="metric-label">Days in CSV<span class="hint" tabindex="0" data-tip="Count of unique day_index values loaded from offline_data_Youngone.csv.">?</span></span><b>{{ benchmark.summary.day_count }}</b></div>
           <div class="metric"><span class="metric-label">Total load<span class="hint" tabindex="0" data-tip="Total load = sum of P_load_kW * dt across all CSV rows.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_load_kWh) }} kWh</b></div>
           <div class="metric"><span class="metric-label">Total PV<span class="hint" tabindex="0" data-tip="Total PV = sum of P_pv_kW * dt across all CSV rows.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_pv_kWh) }} kWh</b></div>
@@ -602,23 +674,22 @@
           <div class="metric"><span class="metric-label">Highest monthly DEADLY peak before battery<span class="hint" tabindex="0" data-tip="Before-battery peak = max monthly 30-minute rolling average of grid import before battery. This drives the demand charge in 2TC mode.">?</span></span><b>{{ "{:,.1f}".format(benchmark.summary.peak_grid_kW) }} kW, day {{ benchmark.summary.peak_day_index }}</b></div>
         </div>
         <div class="metric-row summary-triple">
-          <div class="metric"><span class="metric-label">Grid import post battery<span class="hint" tabindex="0" data-tip="Post-battery grid import = sum of Oracle GridImport(t) * dt after optimized battery charge/discharge.">?</span></span><b>{{ "{:,.0f}".format(oracle.summary.total_grid_kWh) }} kWh</b></div>
-          <div class="metric"><span class="metric-label">Bill post battery<span class="hint" tabindex="0" data-tip="Post-battery bill = Oracle energy charge + Oracle demand charge + battery wear cost. It does not include upfront battery cost.">?</span></span><b>{{ "{:,.0f}".format(oracle.summary.total_bill_vnd) }} VND</b></div>
-          <div class="metric"><span class="metric-label">Highest monthly DEADLY peak post battery<span class="hint" tabindex="0" data-tip="Post-battery peak = max monthly 30-minute rolling average of Oracle grid import after battery dispatch.">?</span></span><b>{{ "{:,.1f}".format(oracle.summary.peak_grid_kW) }} kW</b></div>
+          <div class="metric"><span class="metric-label">Grid import post battery<span class="hint" tabindex="0" data-tip="Post-battery grid import = sum of Oracle GridImport(t) * dt after optimized battery charge/discharge.">?</span></span><b id="summary-post-grid">{{ "{:,.0f}".format(oracle.summary.total_grid_kWh) }} kWh</b></div>
+          <div class="metric"><span class="metric-label">Bill post battery<span class="hint" tabindex="0" data-tip="Post-battery bill = Oracle energy charge + Oracle demand charge + battery wear cost. It does not include upfront battery cost.">?</span></span><b id="summary-post-bill">{{ "{:,.0f}".format(oracle.summary.total_bill_vnd) }} VND</b></div>
+          <div class="metric"><span class="metric-label">Highest monthly DEADLY peak post battery<span class="hint" tabindex="0" data-tip="Post-battery peak = max monthly 30-minute rolling average of Oracle grid import after battery dispatch.">?</span></span><b id="summary-post-peak">{{ "{:,.1f}".format(oracle.summary.peak_grid_kW) }} kW</b></div>
         </div>
         <div class="metric-row summary-triple">
-          <div class="metric"><span class="metric-label">Grid import diff<span class="hint" tabindex="0" data-tip="Grid import diff = before-battery grid import - post-battery grid import. Positive means the optimized battery reduced grid energy.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_grid_kWh - oracle.summary.total_grid_kWh) }} kWh</b></div>
-          <div class="metric"><span class="metric-label">Bill diff<span class="hint" tabindex="0" data-tip="Bill diff = before-battery bill - post-battery bill. This is the perfect Oracle saving before applying the real-world savings factor.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_bill_vnd - oracle.summary.total_bill_vnd) }} VND</b></div>
-          <div class="metric"><span class="metric-label">DEADLY peak diff<span class="hint" tabindex="0" data-tip="Peak diff = before-battery highest monthly peak - post-battery highest monthly peak. This is the kW shaved by Oracle.">?</span></span><b>{{ "{:,.1f}".format(benchmark.summary.peak_grid_kW - oracle.summary.peak_grid_kW) }} kW</b></div>
+          <div class="metric"><span class="metric-label">Grid import diff<span class="hint" tabindex="0" data-tip="Grid import diff = before-battery grid import - post-battery grid import. Positive means the optimized battery reduced grid energy.">?</span></span><b id="summary-grid-diff">{{ "{:,.0f}".format(benchmark.summary.total_grid_kWh - oracle.summary.total_grid_kWh) }} kWh</b></div>
+          <div class="metric"><span class="metric-label">Bill diff<span class="hint" tabindex="0" data-tip="Bill diff = before-battery bill - post-battery bill. This is the perfect Oracle saving before applying the real-world savings factor.">?</span></span><b id="summary-bill-diff">{{ "{:,.0f}".format(benchmark.summary.total_bill_vnd - oracle.summary.total_bill_vnd) }} VND</b></div>
+          <div class="metric"><span class="metric-label">DEADLY peak diff<span class="hint" tabindex="0" data-tip="Peak diff = before-battery highest monthly peak - post-battery highest monthly peak. This is the kW shaved by Oracle.">?</span></span><b id="summary-peak-diff">{{ "{:,.1f}".format(benchmark.summary.peak_grid_kW - oracle.summary.peak_grid_kW) }} kW</b></div>
         </div>
         <div class="metric-row summary-triple">
-          <div class="metric"><span class="metric-label">Oracle perfect saving<span class="hint" tabindex="0" data-tip="Oracle perfect saving = before-battery bill - post-battery bill, using perfect future knowledge. It is an upper bound.">?</span></span><b>{{ "{:,.0f}".format(oracle.summary.oracle_saving_vnd) }} VND</b></div>
-          <div class="metric"><span class="metric-label">SEER realistic saving<span class="hint" tabindex="0" data-tip="SEER realistic saving = max(0, Oracle perfect saving) * real-world savings factor.">?</span></span><b>{{ "{:,.0f}".format(oracle.summary.seer_saving_vnd) }} VND</b></div>
-          <div class="metric"><span class="metric-label">Oracle LP status<span class="hint" tabindex="0" data-tip="Raw solver status message from the Oracle LP. If it says solved, the optimized battery dispatch is available.">?</span></span><b>{{ oracle.status }}</b></div>
+          <div class="metric"><span class="metric-label">Oracle perfect saving<span class="hint" tabindex="0" data-tip="Oracle perfect saving = before-battery bill - post-battery bill, using perfect future knowledge. It is an upper bound.">?</span></span><b id="summary-oracle-saving">{{ "{:,.0f}".format(oracle.summary.oracle_saving_vnd) }} VND</b></div>
+          <div class="metric"><span class="metric-label">SEER realistic saving<span class="hint" tabindex="0" data-tip="SEER realistic saving = max(0, Oracle perfect saving) * real-world savings factor.">?</span></span><b id="summary-seer-saving">{{ "{:,.0f}".format(oracle.summary.seer_saving_vnd) }} VND</b></div>
+          <div class="metric"><span class="metric-label">Oracle LP status<span class="hint" tabindex="0" data-tip="Raw solver status message from the Oracle LP. If it says solved, the optimized battery dispatch is available.">?</span></span><b id="summary-status">{{ oracle.status }}</b></div>
         </div>
       </div>
 
-      {% set sizing = oracle.summary.sizing_economics %}
       <h2>Oracle sizing economics</h2>
       <div class="sizing-table-wrap">
         <table class="sizing-table">
@@ -635,16 +706,19 @@
             </tr>
           </thead>
           <tbody>
-            <tr>
-              <td>Current input</td>
-              <td>{{ "{:,.0f}".format(sizing.battery_capacity_kWh) }}</td>
-              <td>{{ "{:,.0f}".format(sizing.battery_power_limit_kW) }}</td>
-              <td>{{ "{:,.2f}".format(sizing.annual_saving_million_vnd) }}</td>
-              <td>{{ "{:,.3f}".format(sizing.npv_billion_vnd) }}</td>
-              <td>{{ "Never" if sizing.payback_years is none else "{:,.2f}".format(sizing.payback_years) }}</td>
-              <td>{{ "{:,.1f}".format(sizing.recommended_contract_max_kW) }} kW ({{ "{:,.1f}".format(sizing.oracle_peak_kW) }} + 5%)</td>
-              <td>{{ sizing.pareto_status }}</td>
-            </tr>
+            {% for candidate in candidate_oracles %}
+              {% set sizing = candidate.oracle.summary.sizing_economics %}
+              <tr>
+                <td>{{ candidate.label }}</td>
+                <td>{{ "{:,.0f}".format(sizing.battery_capacity_kWh) }}</td>
+                <td>{{ "{:,.1f}".format(sizing.battery_power_limit_kW) }}</td>
+                <td>{{ "{:,.2f}".format(sizing.annual_saving_million_vnd) }}</td>
+                <td>{{ "{:,.3f}".format(sizing.npv_billion_vnd) }}</td>
+                <td>{{ "Never" if sizing.payback_years is none else "{:,.2f}".format(sizing.payback_years) }}</td>
+                <td>{{ "{:,.1f}".format(sizing.recommended_contract_max_kW) }} kW ({{ "{:,.1f}".format(sizing.oracle_peak_kW) }} + 5%)</td>
+                <td>{{ sizing.pareto_status }}</td>
+              </tr>
+            {% endfor %}
           </tbody>
         </table>
       </div>
@@ -666,28 +740,10 @@ If Annual net cashflow is zero or negative, payback shows Never.
 Contract cap recommendation = Oracle post-battery highest monthly peak * 1.05
 That 5% is a small buffer above the oracle peak, because real controllers are not magical future-seeing robots.
 
-Pareto frontier? = whether this candidate is non-dominated among compared battery sizes.
-Right now the app evaluates one battery size at a time, so the current input is marked as a single-case frontier point. A real Pareto yes/no table needs a size sweep.</pre>
+Pareto frontier? = whether this candidate is non-dominated among all sample batteries options.</pre>
       </div>
-      <div class="chart-wrap">
-        <canvas id="benchmark-chart"></canvas>
-        <div class="chart-tooltip" id="benchmark-tooltip" role="status" aria-live="polite"></div>
-      </div>
-      <div class="legend" id="benchmark-legend" aria-label="Chart line visibility controls">
-        <button class="legend-item" type="button" data-series="load" aria-pressed="true"><span class="swatch" style="background:#92400e;color:#92400e"></span>Load</button>
-        <button class="legend-item" type="button" data-series="pv" aria-pressed="true"><span class="swatch" style="background:#166534;color:#166534"></span>PV</button>
-        <button class="legend-item" type="button" data-series="grid" aria-pressed="true"><span class="swatch" style="background:#075985;color:#075985"></span>Grid import before battery</button>
-        <button class="legend-item" type="button" data-series="rolling_grid" aria-pressed="true"><span class="swatch" style="background:#9f1239;color:#9f1239"></span>Daily 30-minute rolling grid</button>
-        <button class="legend-item" type="button" data-series="monthly_peak" aria-pressed="true"><span class="swatch" style="background:#7f1d1d;color:#7f1d1d"></span>DEADLY monthly peak</button>
-        <button class="legend-item" type="button" data-series="oracle_peak" aria-pressed="true"><span class="swatch" style="background:#86efac;color:#86efac"></span>Post-oracle DEADLY peak</button>
-        <button class="legend-item" type="button" data-series="oracle_grid" aria-pressed="true"><span class="swatch" style="background:#c4b5fd;color:#c4b5fd"></span>Oracle grid after battery</button>
-        <button class="legend-item" type="button" data-series="oracle_rolling_grid" aria-pressed="true"><span class="swatch" style="background:#fda4af;color:#fda4af"></span>Oracle 30-minute rolling grid</button>
-        <button class="legend-item" type="button" data-series="oracle_discharge" aria-pressed="true"><span class="swatch" style="background:#fdba74;color:#fdba74"></span>Battery discharge</button>
-        <button class="legend-item" type="button" data-series="oracle_charge" aria-pressed="true"><span class="swatch" style="background:#67e8f9;color:#67e8f9"></span>Battery charge</button>
-        <button class="legend-item" type="button" data-series="oracle_soc" aria-pressed="true"><span class="swatch" style="background:#fde047;color:#fde047"></span>SOC %</button>
-      </div>
-      <div id="benchmark-day-info" class="info"></div>
-    </section>
+      </section>
+    </div>
 
     <section class="card">
       <h2>Oracle LP math</h2>
@@ -783,12 +839,21 @@ for t = 0 ... 95
   <script>
     const benchmark = {{ benchmark | tojson }};
     const oracle = {{ oracle | tojson }};
+    const candidateOracles = {{ candidate_oracles | tojson }};
+    const selectedCandidateIndex = {{ selected_candidate_index | tojson }};
     const daySelect = document.getElementById("benchmark-day");
+    const benchmarkBatterySelect = document.getElementById("benchmark-battery");
     const chart = document.getElementById("benchmark-chart");
     const dayInfo = document.getElementById("benchmark-day-info");
     const legend = document.getElementById("benchmark-legend");
     const tooltip = document.getElementById("benchmark-tooltip");
     const ctx = chart.getContext("2d");
+    const sampleBatterySelect = document.getElementById("sample-battery");
+    const sampleBatteryButton = document.getElementById("btn-sample-battery");
+    const batteryCapacityInput = document.getElementById("tf-bcap");
+    const batteryPowerInput = document.getElementById("tf-bpow");
+
+    const sampleBatteryCandidates = {{ sample_battery_candidates | tojson }};
 
     const seriesStyles = [
       { key: "load", label: "Load", color: "#92400e" },
@@ -804,7 +869,6 @@ for t = 0 ... 95
       { key: "oracle_soc", label: "SOC %", color: "#fde047", soc: true },
     ];
     const activeSeries = Object.fromEntries(seriesStyles.map((series) => [series.key, true]));
-    const oracleDaysByIndex = new Map((oracle.days || []).map((day) => [day.day_index, day]));
     let chartState = null;
 
     function formatNumber(value, digits = 0) {
@@ -823,6 +887,52 @@ for t = 0 ... 95
       });
     }
 
+    function fillBenchmarkBatteryOptions() {
+      candidateOracles.forEach((candidate, index) => {
+        const option = document.createElement("option");
+        option.value = String(index);
+        option.textContent = candidate.label;
+        if (index === selectedCandidateIndex) {
+          option.selected = true;
+        }
+        benchmarkBatterySelect.appendChild(option);
+      });
+    }
+
+    function fillSampleBatteryOptions() {
+      if (!sampleBatterySelect) {
+        return;
+      }
+
+      const currentCapacity = Number(batteryCapacityInput.value);
+      const currentPower = Number(batteryPowerInput.value);
+      sampleBatteryCandidates.forEach((candidate, index) => {
+        const option = document.createElement("option");
+        option.value = String(index);
+        option.textContent = candidate.label;
+        if (
+          candidate.battery_capacity_kWh === currentCapacity
+          && Math.abs(candidate.battery_power_limit_kW - currentPower) < 0.001
+        ) {
+          option.selected = true;
+        }
+        sampleBatterySelect.appendChild(option);
+      });
+    }
+
+    function bindSampleBatteryButton() {
+      if (!sampleBatterySelect || !sampleBatteryButton) {
+        return;
+      }
+
+      sampleBatteryButton.addEventListener("click", () => {
+        const candidate = sampleBatteryCandidates[Number(sampleBatterySelect.value || 0)];
+        batteryCapacityInput.value = candidate.battery_capacity_kWh;
+        batteryPowerInput.value = candidate.battery_power_limit_kW;
+        sampleBatteryButton.closest("form").requestSubmit();
+      });
+    }
+
     function resizeCanvas() {
       const rect = chart.getBoundingClientRect();
       const scale = window.devicePixelRatio || 1;
@@ -831,12 +941,44 @@ for t = 0 ... 95
       ctx.setTransform(scale, 0, 0, scale, 0, 0);
     }
 
+    function setText(id, value) {
+      const element = document.getElementById(id);
+      if (element) {
+        element.textContent = value;
+      }
+    }
+
+    function updateBatteryBenchmark(candidate, activeOracle) {
+      const summary = activeOracle.summary || {};
+      const batteryCost = (
+        Number(candidate.battery_capacity_kWh || 0) * Number({{ billing_battery_per_kWh | tojson }})
+        + Number(candidate.battery_power_limit_kW || 0) * Number({{ billing_battery_per_kW | tojson }})
+      );
+
+      setText("summary-battery-cost", `${formatNumber(batteryCost)} VND`);
+      setText("summary-battery-capacity", `${formatNumber(candidate.battery_capacity_kWh)} kWh`);
+      setText("summary-battery-power", `${formatNumber(candidate.battery_power_limit_kW, 1)} kW`);
+      setText("summary-solved", summary.solved_day_count ? "True" : "False");
+      setText("summary-post-grid", `${formatNumber(summary.total_grid_kWh)} kWh`);
+      setText("summary-post-bill", `${formatNumber(summary.total_bill_vnd)} VND`);
+      setText("summary-post-peak", `${formatNumber(summary.peak_grid_kW, 1)} kW`);
+      setText("summary-grid-diff", `${formatNumber(benchmark.summary.total_grid_kWh - Number(summary.total_grid_kWh || 0))} kWh`);
+      setText("summary-bill-diff", `${formatNumber(benchmark.summary.total_bill_vnd - Number(summary.total_bill_vnd || 0))} VND`);
+      setText("summary-peak-diff", `${formatNumber(benchmark.summary.peak_grid_kW - Number(summary.peak_grid_kW || 0), 1)} kW`);
+      setText("summary-oracle-saving", `${formatNumber(summary.oracle_saving_vnd)} VND`);
+      setText("summary-seer-saving", `${formatNumber(summary.seer_saving_vnd)} VND`);
+      setText("summary-status", activeOracle.status || "Oracle status unavailable.");
+    }
+
     function drawBenchmark() {
       if (!benchmark.days.length) {
         return;
       }
 
       resizeCanvas();
+      const selectedCandidate = candidateOracles[Number(benchmarkBatterySelect.value || 0)] || candidateOracles[0];
+      const activeOracle = selectedCandidate ? selectedCandidate.oracle : oracle;
+      const oracleDaysByIndex = new Map((activeOracle.days || []).map((day) => [day.day_index, day]));
       const day = benchmark.days[Number(daySelect.value || 0)];
       const oracleDay = oracleDaysByIndex.get(day.day_index);
       const rect = chart.getBoundingClientRect();
@@ -895,12 +1037,13 @@ for t = 0 ... 95
         .forEach((series) => drawSocLine(oracleDay.soc || [], series.color, width, padding, plotWidth, plotHeight));
 
       if (oracleDay && oracleDay.solved) {
-        dayInfo.textContent = `Day ${day.day_index}: before grid ${formatNumber(day.grid_kWh)} kWh, after Oracle grid ${formatNumber(oracleDay.grid_kWh)} kWh, charged ${formatNumber(oracleDay.charged_kWh)} kWh, discharged ${formatNumber(oracleDay.discharged_kWh)} kWh, final SOC ${formatNumber(oracleDay.final_soc, 1)}%. Daily peak falls from ${formatNumber(day.peak_grid_kW, 1)} to ${formatNumber(oracleDay.peak_grid_kW, 1)} kW. Oracle day saving ${formatNumber(oracleDay.day_saving_vnd)} VND; SEER counts ${formatNumber(Math.max(0, oracleDay.day_saving_vnd) * oracle.summary.seer_factor)} VND.`;
+        dayInfo.textContent = `Day ${day.day_index}, ${selectedCandidate.label}: before grid ${formatNumber(day.grid_kWh)} kWh, after Oracle grid ${formatNumber(oracleDay.grid_kWh)} kWh, charged ${formatNumber(oracleDay.charged_kWh)} kWh, discharged ${formatNumber(oracleDay.discharged_kWh)} kWh, final SOC ${formatNumber(oracleDay.final_soc, 1)}%. Daily peak falls from ${formatNumber(day.peak_grid_kW, 1)} to ${formatNumber(oracleDay.peak_grid_kW, 1)} kW. Oracle day saving ${formatNumber(oracleDay.day_saving_vnd)} VND; SEER counts ${formatNumber(Math.max(0, oracleDay.day_saving_vnd) * activeOracle.summary.seer_factor)} VND.`;
       } else {
-        const oracleStatus = oracleDay ? oracleDay.status : oracle.status;
-        dayInfo.textContent = `Day ${day.day_index}: load ${formatNumber(day.load_kWh)} kWh, PV ${formatNumber(day.pv_kWh)} kWh, grid ${formatNumber(day.grid_kWh)} kWh, surplus ${formatNumber(day.surplus_kWh)} kWh, daily peak ${formatNumber(day.peak_grid_kW, 1)} kW. Oracle unavailable: ${oracleStatus}`;
+        const oracleStatus = oracleDay ? oracleDay.status : activeOracle.status;
+        dayInfo.textContent = `Day ${day.day_index}, ${selectedCandidate.label}: load ${formatNumber(day.load_kWh)} kWh, PV ${formatNumber(day.pv_kWh)} kWh, grid ${formatNumber(day.grid_kWh)} kWh, surplus ${formatNumber(day.surplus_kWh)} kWh, daily peak ${formatNumber(day.peak_grid_kW, 1)} kW. Oracle unavailable: ${oracleStatus}`;
       }
 
+      updateBatteryBenchmark(selectedCandidate, activeOracle);
       chartState = {
         day,
         oracleDay,
@@ -1149,11 +1292,18 @@ for t = 0 ... 95
       });
     }
 
+    fillSampleBatteryOptions();
+    bindSampleBatteryButton();
     fillDayOptions();
+    fillBenchmarkBatteryOptions();
     bindLegendControls();
     chart.addEventListener("mousemove", showHoverStats);
     chart.addEventListener("mouseleave", hideTooltip);
     daySelect.addEventListener("change", () => {
+      hideTooltip();
+      drawBenchmark();
+    });
+    benchmarkBatterySelect.addEventListener("change", () => {
       hideTooltip();
       drawBenchmark();
     });
