@@ -426,6 +426,53 @@
       color: #93c5fd;
     }
 
+    .sizing-table-wrap {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin: 12px 0 14px;
+      overflow-x: auto;
+    }
+
+    .sizing-table {
+      border-collapse: collapse;
+      min-width: 920px;
+      width: 100%;
+    }
+
+    .sizing-table th,
+    .sizing-table td {
+      border-bottom: 1px solid var(--border);
+      padding: 9px 10px;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .sizing-table th {
+      background: #111922;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .sizing-table td {
+      color: var(--text);
+      font-size: 13px;
+    }
+
+    .sizing-table th:first-child,
+    .sizing-table td:first-child {
+      text-align: left;
+    }
+
+    .sizing-table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .formula.tight {
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
     @media (max-width: 720px) {
       .metric-row.summary-main,
       .metric-row.summary-oracle-align,
@@ -569,6 +616,58 @@
           <div class="metric"><span class="metric-label">SEER realistic saving<span class="hint" tabindex="0" data-tip="SEER realistic saving = max(0, Oracle perfect saving) * real-world savings factor.">?</span></span><b>{{ "{:,.0f}".format(oracle.summary.seer_saving_vnd) }} VND</b></div>
           <div class="metric"><span class="metric-label">Oracle LP status<span class="hint" tabindex="0" data-tip="Raw solver status message from the Oracle LP. If it says solved, the optimized battery dispatch is available.">?</span></span><b>{{ oracle.status }}</b></div>
         </div>
+      </div>
+
+      {% set sizing = oracle.summary.sizing_economics %}
+      <h2>Oracle sizing economics</h2>
+      <div class="sizing-table-wrap">
+        <table class="sizing-table">
+          <thead>
+            <tr>
+              <th>Candidate</th>
+              <th>E battery (kWh)</th>
+              <th>P battery (kW)</th>
+              <th>Saving/year (mil VND)</th>
+              <th>NPV (bil VND)</th>
+              <th>Payback (years)</th>
+              <th>Contract cap recommendation</th>
+              <th>Pareto frontier?</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Current input</td>
+              <td>{{ "{:,.0f}".format(sizing.battery_capacity_kWh) }}</td>
+              <td>{{ "{:,.0f}".format(sizing.battery_power_limit_kW) }}</td>
+              <td>{{ "{:,.2f}".format(sizing.annual_saving_million_vnd) }}</td>
+              <td>{{ "{:,.3f}".format(sizing.npv_billion_vnd) }}</td>
+              <td>{{ "Never" if sizing.payback_years is none else "{:,.2f}".format(sizing.payback_years) }}</td>
+              <td>{{ "{:,.1f}".format(sizing.recommended_contract_max_kW) }} kW ({{ "{:,.1f}".format(sizing.oracle_peak_kW) }} + 5%)</td>
+              <td>{{ sizing.pareto_status }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="math-block">
+        <h3>How the sizing numbers are calculated</h3>
+        <pre class="formula tight">Annual saving = SEER realistic saving from this CSV horizon * 365 / DaysInCSV
+
+Battery investment = E battery * Battery cell price + P battery * Inverter/PCS price
+
+Yearly maintenance = Battery investment * Yearly maintenance %
+
+Annual net cashflow = Annual saving - Yearly maintenance
+
+NPV = -Battery investment + sum(year = 1..ProjectYears, Annual net cashflow / (1 + DiscountRate)^year)
+
+Payback = Battery investment / Annual net cashflow
+If Annual net cashflow is zero or negative, payback shows Never.
+
+Contract cap recommendation = Oracle post-battery highest monthly peak * 1.05
+That 5% is a small buffer above the oracle peak, because real controllers are not magical future-seeing robots.
+
+Pareto frontier? = whether this candidate is non-dominated among compared battery sizes.
+Right now the app evaluates one battery size at a time, so the current input is marked as a single-case frontier point. A real Pareto yes/no table needs a size sweep.</pre>
       </div>
       <div class="chart-wrap">
         <canvas id="benchmark-chart"></canvas>

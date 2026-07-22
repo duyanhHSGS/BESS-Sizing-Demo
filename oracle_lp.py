@@ -336,6 +336,49 @@ def _build_summary(base_days, oracle_days, parameters, dt):
         "oracle_saving_vnd": round(oracle_saving),
         "seer_saving_vnd": round(max(0.0, oracle_saving) * seer_factor),
         "seer_factor": seer_factor,
+        "sizing_economics": _build_sizing_economics(
+            parameters,
+            len(base_days),
+            max(0.0, oracle_saving) * seer_factor,
+            after_peak,
+        ),
+    }
+
+
+def _build_sizing_economics(parameters, day_count, scenario_saving_vnd, oracle_peak_kW):
+    capacity = max(0.0, _to_float(parameters.get("battery_capacity_kWh"), 0.0))
+    power_limit = max(0.0, _to_float(parameters.get("battery_power_limit_kW"), 0.0))
+    battery_cost = (
+        capacity * _to_float(parameters.get("billing_battery_per_kWh"), 0.0)
+        + power_limit * _to_float(parameters.get("billing_battery_per_kW"), 0.0)
+    )
+    annualization_factor = 365.0 / day_count if day_count > 0 else 0.0
+    annual_saving = scenario_saving_vnd * annualization_factor
+    annual_maintenance = battery_cost * max(0.0, _to_float(parameters.get("billing_yearly_maintain_percentage"), 0.0))
+    annual_net_cashflow = annual_saving - annual_maintenance
+    project_years = max(0, int(round(_to_float(parameters.get("billing_years"), 0.0))))
+    discount_rate = max(0.0, _to_float(parameters.get("billing_discount_rate"), 0.0))
+    discounted_cashflow = 0.0
+    for year in range(1, project_years + 1):
+        discounted_cashflow += annual_net_cashflow / ((1.0 + discount_rate) ** year)
+
+    payback_years = None
+    if annual_net_cashflow > FLOAT_EPSILON:
+        payback_years = battery_cost / annual_net_cashflow
+
+    return {
+        "battery_capacity_kWh": round(capacity, 2),
+        "battery_power_limit_kW": round(power_limit, 2),
+        "annual_saving_vnd": round(annual_saving),
+        "annual_saving_million_vnd": round(annual_saving / 1_000_000.0, 2),
+        "annual_maintenance_vnd": round(annual_maintenance),
+        "annual_net_cashflow_vnd": round(annual_net_cashflow),
+        "npv_vnd": round(-battery_cost + discounted_cashflow),
+        "npv_billion_vnd": round((-battery_cost + discounted_cashflow) / 1_000_000_000.0, 3),
+        "payback_years": None if payback_years is None else round(payback_years, 2),
+        "oracle_peak_kW": round(oracle_peak_kW, 2),
+        "recommended_contract_max_kW": round(oracle_peak_kW * 1.05, 2),
+        "pareto_status": "Yes (single case)",
     }
 
 
@@ -460,6 +503,20 @@ def _empty_summary():
         "oracle_saving_vnd": 0,
         "seer_saving_vnd": 0,
         "seer_factor": 0,
+        "sizing_economics": {
+            "battery_capacity_kWh": 0,
+            "battery_power_limit_kW": 0,
+            "annual_saving_vnd": 0,
+            "annual_saving_million_vnd": 0,
+            "annual_maintenance_vnd": 0,
+            "annual_net_cashflow_vnd": 0,
+            "npv_vnd": 0,
+            "npv_billion_vnd": 0,
+            "payback_years": None,
+            "oracle_peak_kW": 0,
+            "recommended_contract_max_kW": 0,
+            "pareto_status": "No oracle result",
+        },
     }
 
 
