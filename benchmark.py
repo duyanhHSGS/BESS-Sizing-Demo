@@ -116,7 +116,7 @@ def _prices_for_day(day, parameters, dt):
     expensive_windows = _parse_windows(parameters.get("billing_windows_expensive", ""))
     cheap_windows = _parse_windows(parameters.get("billing_windows_cheap", ""))
     sunday_is_normal = bool(parameters.get("billing_sunday"))
-    is_sunday = str(day["day_type"]).lower() == "sunday"
+    is_sunday = str(day["day_type"]).lower() == "weekend"           # TODO: in the csv thing, 1 week 2 weekend but saturday is not sunday!
 
     prices = []
     for step in range(len(day["grid"])):

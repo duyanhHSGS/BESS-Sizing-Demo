@@ -223,6 +223,28 @@
       margin-bottom: 14px;
     }
 
+    .metric-row {
+      display: grid;
+      gap: 8px;
+      grid-column: 1 / -1;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    }
+
+    .metric-row + .metric-row {
+      border-top: 1px solid var(--border);
+      margin-top: 10px;
+      padding-top: 10px;
+    }
+
+    .metric-row.summary-main,
+    .metric-row.summary-oracle-align {
+      grid-template-columns: repeat(4, minmax(150px, 1fr));
+    }
+
+    .metric-spacer {
+      min-height: 1px;
+    }
+
     .metric {
       border-left: 2px solid var(--accent);
       padding: 4px 10px;
@@ -246,6 +268,43 @@
       min-height: 320px;
       position: relative;
       width: 100%;
+    }
+
+    .chart-tooltip {
+      background: rgba(11, 17, 23, .94);
+      border: 1px solid #334155;
+      border-radius: 7px;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, .38);
+      color: var(--text);
+      display: none;
+      font-size: 12px;
+      left: 0;
+      line-height: 1.45;
+      max-width: min(280px, calc(100vw - 32px));
+      padding: 8px 10px;
+      pointer-events: none;
+      position: absolute;
+      top: 0;
+      z-index: 8;
+    }
+
+    .chart-tooltip strong {
+      color: #e5edf5;
+      display: block;
+      font-size: 12.5px;
+      margin-bottom: 5px;
+    }
+
+    .chart-tooltip div {
+      align-items: center;
+      display: grid;
+      gap: 10px;
+      grid-template-columns: 1fr auto;
+      white-space: nowrap;
+    }
+
+    .chart-tooltip .tip-soc {
+      color: #fde047;
     }
 
     canvas {
@@ -354,6 +413,17 @@
     .formula-note {
       color: #93c5fd;
     }
+
+    @media (max-width: 720px) {
+      .metric-row.summary-main,
+      .metric-row.summary-oracle-align {
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      }
+
+      .metric-spacer {
+        display: none;
+      }
+    }
   </style>
 </head>
 
@@ -454,20 +524,30 @@
         </label>
       </div>
       <div class="metric-grid">
-        <div class="metric"><span>Days in CSV</span><b>{{ benchmark.summary.day_count }}</b></div>
-        <div class="metric"><span>Total load</span><b>{{ "{:,.0f}".format(benchmark.summary.total_load_kWh) }} kWh</b></div>
-        <div class="metric"><span>Total PV</span><b>{{ "{:,.0f}".format(benchmark.summary.total_pv_kWh) }} kWh</b></div>
-        <div class="metric"><span>Grid import before battery</span><b>{{ "{:,.0f}".format(benchmark.summary.total_grid_kWh) }} kWh</b></div>
-        <div class="metric"><span>Highest monthly DEADLY peak</span><b>{{ "{:,.1f}".format(benchmark.summary.peak_grid_kW) }} kW, day {{ benchmark.summary.peak_day_index }}</b></div>
-        <div class="metric"><span>Bill before battery</span><b>{{ "{:,.0f}".format(benchmark.summary.total_bill_vnd) }} VND</b></div>
-        <div class="metric"><span>Oracle LP status</span><b>{{ oracle.status }}</b></div>
-        <div class="metric"><span>Grid import after Oracle</span><b>{{ "{:,.0f}".format(oracle.summary.total_grid_kWh) }} kWh</b></div>
-        <div class="metric"><span>Peak shaved by Oracle</span><b>{{ "{:,.1f}".format(oracle.summary.peak_reduction_kW) }} kW</b></div>
-        <div class="metric"><span>Oracle perfect saving</span><b>{{ "{:,.0f}".format(oracle.summary.oracle_saving_vnd) }} VND</b></div>
-        <div class="metric"><span>SEER realistic saving</span><b>{{ "{:,.0f}".format(oracle.summary.seer_saving_vnd) }} VND</b></div>
+        <div class="metric-row summary-main">
+          <div class="metric"><span>Days in CSV</span><b>{{ benchmark.summary.day_count }}</b></div>
+          <div class="metric"><span>Total load</span><b>{{ "{:,.0f}".format(benchmark.summary.total_load_kWh) }} kWh</b></div>
+          <div class="metric"><span>Total PV</span><b>{{ "{:,.0f}".format(benchmark.summary.total_pv_kWh) }} kWh</b></div>
+          <div class="metric"><span>Grid import before battery</span><b>{{ "{:,.0f}".format(benchmark.summary.total_grid_kWh) }} kWh</b></div>
+        </div>
+        <div class="metric-row summary-oracle-align">
+          <div class="metric-spacer" aria-hidden="true"></div>
+          <div class="metric-spacer" aria-hidden="true"></div>
+          <div class="metric-spacer" aria-hidden="true"></div>
+          <div class="metric"><span>Grid import after Oracle</span><b>{{ "{:,.0f}".format(oracle.summary.total_grid_kWh) }} kWh</b></div>
+        </div>
+        <div class="metric-row">
+          <div class="metric"><span>Peak shaved by Oracle</span><b>{{ "{:,.1f}".format(oracle.summary.peak_reduction_kW) }} kW</b></div>
+          <div class="metric"><span>Oracle perfect saving</span><b>{{ "{:,.0f}".format(oracle.summary.oracle_saving_vnd) }} VND</b></div>
+          <div class="metric"><span>SEER realistic saving</span><b>{{ "{:,.0f}".format(oracle.summary.seer_saving_vnd) }} VND</b></div>
+          <div class="metric"><span>Highest monthly DEADLY peak</span><b>{{ "{:,.1f}".format(benchmark.summary.peak_grid_kW) }} kW, day {{ benchmark.summary.peak_day_index }}</b></div>
+          <div class="metric"><span>Bill before battery</span><b>{{ "{:,.0f}".format(benchmark.summary.total_bill_vnd) }} VND</b></div>
+          <div class="metric"><span>Oracle LP status</span><b>{{ oracle.status }}</b></div>
+        </div>
       </div>
       <div class="chart-wrap">
         <canvas id="benchmark-chart"></canvas>
+        <div class="chart-tooltip" id="benchmark-tooltip" role="status" aria-live="polite"></div>
       </div>
       <div class="legend" id="benchmark-legend" aria-label="Chart line visibility controls">
         <button class="legend-item" type="button" data-series="load" aria-pressed="true"><span class="swatch" style="background:#92400e;color:#92400e"></span>Load</button>
@@ -583,6 +663,7 @@ for t = 0 ... 95
     const chart = document.getElementById("benchmark-chart");
     const dayInfo = document.getElementById("benchmark-day-info");
     const legend = document.getElementById("benchmark-legend");
+    const tooltip = document.getElementById("benchmark-tooltip");
     const ctx = chart.getContext("2d");
 
     const seriesStyles = [
@@ -600,6 +681,7 @@ for t = 0 ... 95
     ];
     const activeSeries = Object.fromEntries(seriesStyles.map((series) => [series.key, true]));
     const oracleDaysByIndex = new Map((oracle.days || []).map((day) => [day.day_index, day]));
+    let chartState = null;
 
     function formatNumber(value, digits = 0) {
       return Number(value).toLocaleString(undefined, {
@@ -694,6 +776,17 @@ for t = 0 ... 95
         const oracleStatus = oracleDay ? oracleDay.status : oracle.status;
         dayInfo.textContent = `Day ${day.day_index}: load ${formatNumber(day.load_kWh)} kWh, PV ${formatNumber(day.pv_kWh)} kWh, grid ${formatNumber(day.grid_kWh)} kWh, surplus ${formatNumber(day.surplus_kWh)} kWh, daily peak ${formatNumber(day.peak_grid_kW, 1)} kW. Oracle unavailable: ${oracleStatus}`;
       }
+
+      chartState = {
+        day,
+        oracleDay,
+        padding,
+        plotWidth,
+        plotHeight,
+        width,
+        height,
+        visibleSeries,
+      };
     }
 
     function drawGrid(width, height, padding, plotWidth, plotHeight, maxY) {
@@ -784,6 +877,85 @@ for t = 0 ... 95
       return gridCharge.map((value, index) => value + (solarCharge[index] || 0));
     }
 
+    function formatSlotTime(index, length) {
+      const minutes = Math.round(index * 24 * 60 / Math.max(1, length));
+      const hour = Math.floor(minutes / 60);
+      const minute = minutes % 60;
+      return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+    }
+
+    function valueForSeries(series, index, state) {
+      if (series.reference) {
+        return state.day.month_peak ? state.day.month_peak.value_kW : null;
+      }
+      if (series.oracleReference) {
+        return state.oracleDay && state.oracleDay.month_peak ? state.oracleDay.month_peak.value_kW : null;
+      }
+      if (series.oracleCharge) {
+        return state.oracleDay ? combineCharge(state.oracleDay)[index] : null;
+      }
+      if (series.oracleKey) {
+        return state.oracleDay && state.oracleDay[series.oracleKey] ? state.oracleDay[series.oracleKey][index] : null;
+      }
+      if (series.soc) {
+        return state.oracleDay && state.oracleDay.soc ? state.oracleDay.soc[index] : null;
+      }
+      return state.day[series.key] ? state.day[series.key][index] : null;
+    }
+
+    function unitForSeries(series) {
+      return series.soc ? "%" : "kW";
+    }
+
+    function hideTooltip() {
+      tooltip.style.display = "none";
+    }
+
+    function showHoverStats(event) {
+      if (!chartState) {
+        hideTooltip();
+        return;
+      }
+
+      const rect = chart.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      const { padding, plotWidth, plotHeight, day, visibleSeries } = chartState;
+      if (x < padding.left || x > padding.left + plotWidth || y < padding.top || y > padding.top + plotHeight) {
+        hideTooltip();
+        return;
+      }
+
+      const slotCount = Math.max(
+        day.load ? day.load.length : 0,
+        day.pv ? day.pv.length : 0,
+        day.grid ? day.grid.length : 0,
+        chartState.oracleDay && chartState.oracleDay.grid ? chartState.oracleDay.grid.length : 0
+      );
+      const index = Math.max(0, Math.min(slotCount - 1, Math.round((x - padding.left) / plotWidth * (slotCount - 1))));
+      const rows = visibleSeries
+        .map((series) => ({ series, value: valueForSeries(series, index, chartState) }))
+        .filter((row) => Number.isFinite(row.value));
+
+      if (!rows.length) {
+        hideTooltip();
+        return;
+      }
+
+      tooltip.innerHTML = `<strong>Day ${day.day_index} at ${formatSlotTime(index, slotCount)}</strong>` + rows
+        .map((row) => `<div${row.series.soc ? " class=\"tip-soc\"" : ""}><span>${row.series.label}</span><b>${formatNumber(row.value, 1)} ${unitForSeries(row.series)}</b></div>`)
+        .join("");
+
+      const wrapRect = chart.parentElement.getBoundingClientRect();
+      tooltip.style.display = "block";
+      const tipRect = tooltip.getBoundingClientRect();
+      const offsetX = event.clientX - wrapRect.left;
+      const offsetY = event.clientY - wrapRect.top;
+      const left = Math.min(Math.max(8, offsetX + 14), wrapRect.width - tipRect.width - 8);
+      const top = Math.min(Math.max(8, offsetY + 14), wrapRect.height - tipRect.height - 8);
+      tooltip.style.transform = `translate(${left}px, ${top}px)`;
+    }
+
     function drawMonthlyPeakLine(series, day, padding, plotWidth, plotHeight, maxY) {
       const peak = day.month_peak;
       const value = peak.value_kW;
@@ -855,8 +1027,16 @@ for t = 0 ... 95
 
     fillDayOptions();
     bindLegendControls();
-    daySelect.addEventListener("change", drawBenchmark);
-    window.addEventListener("resize", drawBenchmark);
+    chart.addEventListener("mousemove", showHoverStats);
+    chart.addEventListener("mouseleave", hideTooltip);
+    daySelect.addEventListener("change", () => {
+      hideTooltip();
+      drawBenchmark();
+    });
+    window.addEventListener("resize", () => {
+      hideTooltip();
+      drawBenchmark();
+    });
     drawBenchmark();
   </script>
 </body>
