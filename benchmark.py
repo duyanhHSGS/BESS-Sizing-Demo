@@ -13,6 +13,12 @@ def build_benchmark(parameters):
     total_pv_kWh = sum(day["pv_kWh"] for day in days)
     total_grid_kWh = sum(day["grid_kWh"] for day in days)
     total_surplus_kWh = sum(day["surplus_kWh"] for day in days)
+    battery_cost_vnd = (
+        _to_float(parameters.get("battery_capacity_kWh"), 0.0)
+        * _to_float(parameters.get("billing_battery_per_kWh"), 0.0)
+        + _to_float(parameters.get("battery_power_limit_kW"), 0.0)
+        * _to_float(parameters.get("billing_battery_per_kW"), 0.0)
+    )
     month_peaks = _month_peaks(days, dt)
     for day in days:
         day["month_peak"] = month_peaks.get(_month_start_day(day["day_index"]))
@@ -38,6 +44,7 @@ def build_benchmark(parameters):
             "total_pv_kWh": round(total_pv_kWh, 2),
             "total_grid_kWh": round(total_grid_kWh, 2),
             "total_surplus_kWh": round(total_surplus_kWh, 2),
+            "battery_cost_vnd": round(battery_cost_vnd),
             "peak_grid_kW": round(peak_grid_kW, 2),
             "peak_day_index": monthly_peak["day_index"],
             "peak_step": monthly_peak["step"],

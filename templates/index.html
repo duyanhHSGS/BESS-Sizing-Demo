@@ -237,8 +237,13 @@
     }
 
     .metric-row.summary-main,
-    .metric-row.summary-oracle-align {
+    .metric-row.summary-oracle-align,
+    .metric-row.summary-triple {
       grid-template-columns: repeat(4, minmax(150px, 1fr));
+    }
+
+    .metric-row.summary-triple {
+      grid-template-columns: repeat(3, minmax(180px, 1fr));
     }
 
     .metric-spacer {
@@ -250,11 +255,18 @@
       padding: 4px 10px;
     }
 
-    .metric span {
+    .metric > span {
       color: var(--muted);
       display: block;
       font-size: 11px;
       margin-bottom: 3px;
+    }
+
+    .metric .metric-label {
+      align-items: center;
+      display: inline-flex;
+      gap: 5px;
+      width: fit-content;
     }
 
     .metric b {
@@ -416,7 +428,8 @@
 
     @media (max-width: 720px) {
       .metric-row.summary-main,
-      .metric-row.summary-oracle-align {
+      .metric-row.summary-oracle-align,
+      .metric-row.summary-triple {
         grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
       }
 
@@ -525,24 +538,36 @@
       </div>
       <div class="metric-grid">
         <div class="metric-row summary-main">
-          <div class="metric"><span>Days in CSV</span><b>{{ benchmark.summary.day_count }}</b></div>
-          <div class="metric"><span>Total load</span><b>{{ "{:,.0f}".format(benchmark.summary.total_load_kWh) }} kWh</b></div>
-          <div class="metric"><span>Total PV</span><b>{{ "{:,.0f}".format(benchmark.summary.total_pv_kWh) }} kWh</b></div>
-          <div class="metric"><span>Grid import before battery</span><b>{{ "{:,.0f}".format(benchmark.summary.total_grid_kWh) }} kWh</b></div>
+          <div class="metric"><span class="metric-label">Battery cost<span class="hint" tabindex="0" data-tip="Battery cost = BatteryCapacity * Battery cell price + BatteryPowerLimit * Inverter/PCS price. This is the upfront battery investment, not the electric bill.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.battery_cost_vnd) }} VND</b></div>
+          <div class="metric"><span class="metric-label">Battery capacity<span class="hint" tabindex="0" data-tip="BatteryCapacity from the input form. It controls stored energy size in kWh.">?</span></span><b>{{ "{:,.0f}".format(battery_capacity_kWh | float) }} kWh</b></div>
+          <div class="metric"><span class="metric-label">Power limit<span class="hint" tabindex="0" data-tip="BatteryPowerLimit from the input form. It controls maximum charge or discharge speed in kW.">?</span></span><b>{{ "{:,.0f}".format(battery_power_limit_kW | float) }} kW</b></div>
+          <div class="metric"><span class="metric-label">Wear cost<span class="hint" tabindex="0" data-tip="BatteryWearCost times battery throughput is added to the Oracle post-battery bill.">?</span></span><b>{{ "{:,.0f}".format(battery_wear_cost | float) }} VND/kWh</b></div>
         </div>
-        <div class="metric-row summary-oracle-align">
-          <div class="metric-spacer" aria-hidden="true"></div>
-          <div class="metric-spacer" aria-hidden="true"></div>
-          <div class="metric-spacer" aria-hidden="true"></div>
-          <div class="metric"><span>Grid import after Oracle</span><b>{{ "{:,.0f}".format(oracle.summary.total_grid_kWh) }} kWh</b></div>
+        <div class="metric-row summary-main">
+          <div class="metric"><span class="metric-label">FACT: Oracle LP solved<span class="hint" tabindex="0" data-tip="True when SciPy/linprog solved at least one month. False means the Oracle result is not a valid optimized battery answer.">?</span></span><b>{{ "True" if oracle.summary.solved_day_count else "False" }}</b></div>
+          <div class="metric"><span class="metric-label">Days in CSV<span class="hint" tabindex="0" data-tip="Count of unique day_index values loaded from offline_data_Youngone.csv.">?</span></span><b>{{ benchmark.summary.day_count }}</b></div>
+          <div class="metric"><span class="metric-label">Total load<span class="hint" tabindex="0" data-tip="Total load = sum of P_load_kW * dt across all CSV rows.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_load_kWh) }} kWh</b></div>
+          <div class="metric"><span class="metric-label">Total PV<span class="hint" tabindex="0" data-tip="Total PV = sum of P_pv_kW * dt across all CSV rows.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_pv_kWh) }} kWh</b></div>
         </div>
-        <div class="metric-row">
-          <div class="metric"><span>Peak shaved by Oracle</span><b>{{ "{:,.1f}".format(oracle.summary.peak_reduction_kW) }} kW</b></div>
-          <div class="metric"><span>Oracle perfect saving</span><b>{{ "{:,.0f}".format(oracle.summary.oracle_saving_vnd) }} VND</b></div>
-          <div class="metric"><span>SEER realistic saving</span><b>{{ "{:,.0f}".format(oracle.summary.seer_saving_vnd) }} VND</b></div>
-          <div class="metric"><span>Highest monthly DEADLY peak</span><b>{{ "{:,.1f}".format(benchmark.summary.peak_grid_kW) }} kW, day {{ benchmark.summary.peak_day_index }}</b></div>
-          <div class="metric"><span>Bill before battery</span><b>{{ "{:,.0f}".format(benchmark.summary.total_bill_vnd) }} VND</b></div>
-          <div class="metric"><span>Oracle LP status</span><b>{{ oracle.status }}</b></div>
+        <div class="metric-row summary-triple">
+          <div class="metric"><span class="metric-label">Grid import before battery<span class="hint" tabindex="0" data-tip="Before-battery grid import = sum of max(0, Load - PV) * dt across the CSV. Battery is ignored here.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_grid_kWh) }} kWh</b></div>
+          <div class="metric"><span class="metric-label">Bill before battery<span class="hint" tabindex="0" data-tip="Before-battery bill = energy charge before battery + demand charge before battery. Energy charge uses time-of-use prices; demand charge uses the highest monthly rolling 30-minute grid peak.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_bill_vnd) }} VND</b></div>
+          <div class="metric"><span class="metric-label">Highest monthly DEADLY peak before battery<span class="hint" tabindex="0" data-tip="Before-battery peak = max monthly 30-minute rolling average of grid import before battery. This drives the demand charge in 2TC mode.">?</span></span><b>{{ "{:,.1f}".format(benchmark.summary.peak_grid_kW) }} kW, day {{ benchmark.summary.peak_day_index }}</b></div>
+        </div>
+        <div class="metric-row summary-triple">
+          <div class="metric"><span class="metric-label">Grid import post battery<span class="hint" tabindex="0" data-tip="Post-battery grid import = sum of Oracle GridImport(t) * dt after optimized battery charge/discharge.">?</span></span><b>{{ "{:,.0f}".format(oracle.summary.total_grid_kWh) }} kWh</b></div>
+          <div class="metric"><span class="metric-label">Bill post battery<span class="hint" tabindex="0" data-tip="Post-battery bill = Oracle energy charge + Oracle demand charge + battery wear cost. It does not include upfront battery cost.">?</span></span><b>{{ "{:,.0f}".format(oracle.summary.total_bill_vnd) }} VND</b></div>
+          <div class="metric"><span class="metric-label">Highest monthly DEADLY peak post battery<span class="hint" tabindex="0" data-tip="Post-battery peak = max monthly 30-minute rolling average of Oracle grid import after battery dispatch.">?</span></span><b>{{ "{:,.1f}".format(oracle.summary.peak_grid_kW) }} kW</b></div>
+        </div>
+        <div class="metric-row summary-triple">
+          <div class="metric"><span class="metric-label">Grid import diff<span class="hint" tabindex="0" data-tip="Grid import diff = before-battery grid import - post-battery grid import. Positive means the optimized battery reduced grid energy.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_grid_kWh - oracle.summary.total_grid_kWh) }} kWh</b></div>
+          <div class="metric"><span class="metric-label">Bill diff<span class="hint" tabindex="0" data-tip="Bill diff = before-battery bill - post-battery bill. This is the perfect Oracle saving before applying the real-world savings factor.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_bill_vnd - oracle.summary.total_bill_vnd) }} VND</b></div>
+          <div class="metric"><span class="metric-label">DEADLY peak diff<span class="hint" tabindex="0" data-tip="Peak diff = before-battery highest monthly peak - post-battery highest monthly peak. This is the kW shaved by Oracle.">?</span></span><b>{{ "{:,.1f}".format(benchmark.summary.peak_grid_kW - oracle.summary.peak_grid_kW) }} kW</b></div>
+        </div>
+        <div class="metric-row summary-triple">
+          <div class="metric"><span class="metric-label">Oracle perfect saving<span class="hint" tabindex="0" data-tip="Oracle perfect saving = before-battery bill - post-battery bill, using perfect future knowledge. It is an upper bound.">?</span></span><b>{{ "{:,.0f}".format(oracle.summary.oracle_saving_vnd) }} VND</b></div>
+          <div class="metric"><span class="metric-label">SEER realistic saving<span class="hint" tabindex="0" data-tip="SEER realistic saving = max(0, Oracle perfect saving) * real-world savings factor.">?</span></span><b>{{ "{:,.0f}".format(oracle.summary.seer_saving_vnd) }} VND</b></div>
+          <div class="metric"><span class="metric-label">Oracle LP status<span class="hint" tabindex="0" data-tip="Raw solver status message from the Oracle LP. If it says solved, the optimized battery dispatch is available.">?</span></span><b>{{ oracle.status }}</b></div>
         </div>
       </div>
       <div class="chart-wrap">
