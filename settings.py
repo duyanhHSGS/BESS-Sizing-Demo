@@ -22,6 +22,7 @@ DEFAULT_PARAMETERS = {
     "billing_discount_rate": "0.08",
     "billing_years": "20",
     "billing_real_saving_factor": "0.6",
+    "use_sample_battery_options": "no",
 }
 
 SAMPLE_BATTERY_CANDIDATES = tuple(
@@ -58,6 +59,7 @@ FORM_FIELDS = (
     "billing_discount_rate",
     "billing_years",
     "billing_real_saving_factor",
+    "use_sample_battery_options",
 )
 
 BILLING_MODE_FIELD = "billing_mode"

@@ -316,15 +316,60 @@ def _build_summary(base_days, oracle_days, parameters, dt):
     before_energy = sum(_day_energy_cost(day, parameters, dt) for day in base_days)
     after_energy = sum(day.get("energy_cost_vnd", 0.0) for day in solved_days)
     wear_cost = sum(day.get("wear_cost_vnd", 0.0) for day in solved_days)
-    before_peak = max((day["peak_grid_kW"] for day in base_days), default=0.0)
-    after_peak = max((day.get("peak_grid_kW", 0.0) for day in solved_days), default=0.0)
-    before_demand = _demand_charge(parameters, before_peak)
-    after_demand = _demand_charge(parameters, after_peak)
+    monthly_savings = []
+    monthly_billing = []
+    base_by_month = _days_by_month(base_days)
+    solved_by_month = _days_by_month(solved_days)
+
+    for month_start in sorted(base_by_month):
+        base_block = base_by_month[month_start]
+        solved_block = solved_by_month.get(month_start, [])
+        block_day_count = max(1, len(base_block))
+        before_energy_block = sum(_day_energy_cost(day, parameters, dt) for day in base_block)
+        after_energy_block = sum(day.get("energy_cost_vnd", 0.0) for day in solved_block)
+        wear_cost_block = sum(day.get("wear_cost_vnd", 0.0) for day in solved_block)
+        before_peak_block = max((day["peak_grid_kW"] for day in base_block), default=0.0)
+        after_peak_block = max((day.get("peak_grid_kW", 0.0) for day in solved_block), default=0.0)
+        before_demand_block = _demand_charge(parameters, before_peak_block)
+        after_demand_block = _demand_charge(parameters, after_peak_block)
+        energy_saving_month = (
+            before_energy_block - after_energy_block - wear_cost_block
+        ) * (30.0 / block_day_count)
+        demand_saving_month = before_demand_block - after_demand_block
+        monthly_saving = energy_saving_month + demand_saving_month
+        monthly_savings.append(monthly_saving)
+        monthly_billing.append(
+            {
+                "month_start_day_index": month_start,
+                "month_end_day_index": max(day["day_index"] for day in base_block),
+                "day_count": len(base_block),
+                "baseline_peak_kW": round(before_peak_block, 2),
+                "oracle_peak_kW": round(after_peak_block, 2),
+                "baseline_demand_charge_vnd": round(before_demand_block),
+                "oracle_demand_charge_vnd": round(after_demand_block),
+                "energy_saving_30day_vnd": round(energy_saving_month),
+                "demand_saving_vnd": round(demand_saving_month),
+                "monthly_saving_vnd": round(monthly_saving),
+            }
+        )
+
+    before_peak = max((row["baseline_peak_kW"] for row in monthly_billing), default=0.0)
+    after_peak = max((row["oracle_peak_kW"] for row in monthly_billing), default=0.0)
+    before_demand = sum(row["baseline_demand_charge_vnd"] for row in monthly_billing)
+    after_demand = sum(row["oracle_demand_charge_vnd"] for row in monthly_billing)
     oracle_saving = (before_energy + before_demand) - (after_energy + after_demand + wear_cost)
     seer_factor = _clamp(_to_float(parameters.get("billing_real_saving_factor"), 1.0), 0.0, 1.0)
+    oracle_annual_saving = (
+        sum(monthly_savings) / len(monthly_savings) * 12.0
+        if monthly_savings
+        else 0.0
+    )
+    seer_annual_saving = oracle_annual_saving * seer_factor
 
     return {
         "solved_day_count": len(solved_days),
+        "month_count": len(monthly_billing),
+        "monthly_billing": monthly_billing,
         "total_grid_kWh": round(sum(day.get("grid_kWh", 0.0) for day in solved_days), 2),
         "total_discharged_kWh": round(sum(day.get("discharged_kWh", 0.0) for day in solved_days), 2),
         "peak_grid_kW": round(after_peak, 2),
@@ -335,25 +380,25 @@ def _build_summary(base_days, oracle_days, parameters, dt):
         "total_bill_vnd": round(after_energy + after_demand + wear_cost),
         "oracle_saving_vnd": round(oracle_saving),
         "seer_saving_vnd": round(max(0.0, oracle_saving) * seer_factor),
+        "oracle_annual_saving_vnd": round(oracle_annual_saving),
+        "seer_annual_saving_vnd": round(seer_annual_saving),
         "seer_factor": seer_factor,
         "sizing_economics": _build_sizing_economics(
             parameters,
-            len(base_days),
-            max(0.0, oracle_saving) * seer_factor,
+            seer_annual_saving,
             after_peak,
+            oracle_annual_saving,
         ),
     }
 
 
-def _build_sizing_economics(parameters, day_count, scenario_saving_vnd, oracle_peak_kW):
+def _build_sizing_economics(parameters, annual_saving, oracle_peak_kW, oracle_annual_saving=None):
     capacity = max(0.0, _to_float(parameters.get("battery_capacity_kWh"), 0.0))
     power_limit = max(0.0, _to_float(parameters.get("battery_power_limit_kW"), 0.0))
     battery_cost = (
         capacity * _to_float(parameters.get("billing_battery_per_kWh"), 0.0)
         + power_limit * _to_float(parameters.get("billing_battery_per_kW"), 0.0)
     )
-    annualization_factor = 365.0 / day_count if day_count > 0 else 0.0
-    annual_saving = scenario_saving_vnd * annualization_factor
     annual_maintenance = battery_cost * max(0.0, _to_float(parameters.get("billing_yearly_maintain_percentage"), 0.0))
     annual_net_cashflow = annual_saving - annual_maintenance
     project_years = max(0, int(round(_to_float(parameters.get("billing_years"), 0.0))))
@@ -369,6 +414,7 @@ def _build_sizing_economics(parameters, day_count, scenario_saving_vnd, oracle_p
     return {
         "battery_capacity_kWh": round(capacity, 2),
         "battery_power_limit_kW": round(power_limit, 2),
+        "oracle_annual_saving_vnd": round(oracle_annual_saving if oracle_annual_saving is not None else annual_saving),
         "annual_saving_vnd": round(annual_saving),
         "annual_saving_million_vnd": round(annual_saving / 1_000_000.0, 2),
         "annual_maintenance_vnd": round(annual_maintenance),
@@ -386,6 +432,13 @@ def _attach_month_peaks(days, dt):
     month_peaks = _month_peaks(days, dt)
     for day in days:
         day["month_peak"] = month_peaks.get(_month_start_day(day["day_index"]))
+
+
+def _days_by_month(days):
+    grouped = {}
+    for day in days:
+        grouped.setdefault(_month_start_day(day["day_index"]), []).append(day)
+    return grouped
 
 
 def _no_battery_result(days, parameters, dt):
@@ -492,6 +545,8 @@ def _rolling_30_minute_average(values, dt):
 def _empty_summary():
     return {
         "solved_day_count": 0,
+        "month_count": 0,
+        "monthly_billing": [],
         "total_grid_kWh": 0,
         "total_discharged_kWh": 0,
         "peak_grid_kW": 0,
@@ -502,10 +557,13 @@ def _empty_summary():
         "total_bill_vnd": 0,
         "oracle_saving_vnd": 0,
         "seer_saving_vnd": 0,
+        "oracle_annual_saving_vnd": 0,
+        "seer_annual_saving_vnd": 0,
         "seer_factor": 0,
         "sizing_economics": {
             "battery_capacity_kWh": 0,
             "battery_power_limit_kW": 0,
+            "oracle_annual_saving_vnd": 0,
             "annual_saving_vnd": 0,
             "annual_saving_million_vnd": 0,
             "annual_maintenance_vnd": 0,

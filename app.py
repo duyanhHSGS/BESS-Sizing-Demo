@@ -96,14 +96,17 @@ def _pending_candidate_oracles():
 def _active_battery_candidates(parameters):
     capacity = _to_float(parameters.get("battery_capacity_kWh"), 0.0)
     power = _to_float(parameters.get("battery_power_limit_kW"), 0.0)
+    custom_candidate = {
+        "id": "custom",
+        "label": f"Custom {capacity:,.0f} kWh / {power:,.1f} kW",
+        "battery_capacity_kWh": capacity,
+        "battery_power_limit_kW": power,
+        "power_ratio": power / capacity if capacity else 0,
+    }
+    if parameters.get("use_sample_battery_options") != "yes":
+        return (custom_candidate,)
     return (
-        {
-            "id": "custom",
-            "label": f"Custom {capacity:,.0f} kWh / {power:,.1f} kW",
-            "battery_capacity_kWh": capacity,
-            "battery_power_limit_kW": power,
-            "power_ratio": power / capacity if capacity else 0,
-        },
+        custom_candidate,
         *SAMPLE_BATTERY_CANDIDATES,
     )
 
@@ -125,10 +128,15 @@ def _pending_summary():
         "peak_grid_kW": 0,
         "oracle_saving_vnd": 0,
         "seer_saving_vnd": 0,
+        "oracle_annual_saving_vnd": 0,
+        "seer_annual_saving_vnd": 0,
+        "month_count": 0,
+        "monthly_billing": [],
         "seer_factor": _to_float(PARAMETERS.get("billing_real_saving_factor"), 1.0),
         "sizing_economics": {
             "battery_capacity_kWh": 0,
             "battery_power_limit_kW": 0,
+            "oracle_annual_saving_vnd": 0,
             "annual_saving_vnd": 0,
             "annual_saving_million_vnd": 0,
             "npv_vnd": 0,

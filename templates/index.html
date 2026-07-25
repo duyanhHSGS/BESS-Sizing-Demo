@@ -568,13 +568,18 @@
         <label><span class="field-name">Discharge efficiency<span class="hint" tabindex="0" data-tip="DischargeEfficiency: the fraction of stored energy that comes back out usefully. 0.95 means 95% reaches the load.">?</span></span><input type="number" id="tf-deff" name="discharge_efficiency" step="0.01" min="0"
             max="1" value="{{ discharge_efficiency }}"></label>
         <label><span class="field-name">Time step dt (h)<span class="hint" tabindex="0" data-tip="dt: how long one CSV step lasts, in hours. 0.25 means one row is 15 minutes, so four rows make one hour.">?</span></span><input type="number" id="tf-dt" name="dt" step="0.01" min="0" value="{{ dt }}"></label>
-        <button id="btn-custom-battery" class="primary" type="submit" name="form_action" value="calculate">Select this custom battery</button>
+        <button id="btn-custom-battery" class="primary" type="submit" name="form_action" value="save">Save this custom battery</button>
       </div>
       <div class="sample-row">
         <label><span class="field-name">Sample batteries<span class="hint" tabindex="0" data-tip="Pick from the project sample grid: energy sizes 250, 500, 750, 1000, 1250 kWh and power ratios 0.35, 0.50, 0.70 times capacity.">?</span></span>
           <select id="sample-battery"></select>
         </label>
-        <button id="btn-sample-battery" class="secondary" type="button">Use selected sample batteries option</button>
+        <label><span class="field-name">Use selected sample batteries option<span class="hint" tabindex="0" data-tip="Yes copies the selected sample battery into BatteryCapacity and BatteryPowerLimit. It does not calculate until you click Calculate.">?</span></span>
+          <select id="use-sample-battery" name="use_sample_battery_options">
+            <option value="no" {% if use_sample_battery_options != "yes" %}selected{% endif %}>No</option>
+            <option value="yes" {% if use_sample_battery_options == "yes" %}selected{% endif %}>Yes</option>
+          </select>
+        </label>
         <div class="info">This replaces only BatteryCapacity and BatteryPowerLimit; all tariff, SOC, and finance inputs stay as-is.</div>
       </div>
       <div class="row">
@@ -885,7 +890,7 @@ for t = 0 ... 95
     const tooltip = document.getElementById("benchmark-tooltip");
     const ctx = chart.getContext("2d");
     const sampleBatterySelect = document.getElementById("sample-battery");
-    const sampleBatteryButton = document.getElementById("btn-sample-battery");
+    const useSampleBatterySelect = document.getElementById("use-sample-battery");
     const calculateButton = document.getElementById("btn-calculate");
     const batteryCapacityInput = document.getElementById("tf-bcap");
     const batteryPowerInput = document.getElementById("tf-bpow");
@@ -960,16 +965,28 @@ for t = 0 ... 95
       });
     }
 
-    function bindSampleBatteryButton() {
-      if (!sampleBatterySelect || !sampleBatteryButton) {
+    function bindSampleBatteryOption() {
+      if (!sampleBatterySelect || !useSampleBatterySelect) {
         return;
       }
 
-      sampleBatteryButton.addEventListener("click", () => {
+      function copySelectedSampleBattery() {
         const candidate = sampleBatteryCandidates[Number(sampleBatterySelect.value || 0)];
         batteryCapacityInput.value = candidate.battery_capacity_kWh;
         batteryPowerInput.value = candidate.battery_power_limit_kW;
-        sampleBatteryButton.closest("form").requestSubmit(calculateButton || undefined);
+      }
+
+      useSampleBatterySelect.addEventListener("change", () => {
+        if (useSampleBatterySelect.value !== "yes") {
+          return;
+        }
+        copySelectedSampleBattery();
+      });
+
+      sampleBatterySelect.addEventListener("change", () => {
+        if (useSampleBatterySelect.value === "yes") {
+          copySelectedSampleBattery();
+        }
       });
     }
 
@@ -1453,7 +1470,7 @@ for t = 0 ... 95
     }
 
     fillSampleBatteryOptions();
-    bindSampleBatteryButton();
+    bindSampleBatteryOption();
     fillDayOptions();
     fillBenchmarkBatteryOptions();
     bindLegendControls();

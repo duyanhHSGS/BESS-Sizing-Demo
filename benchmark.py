@@ -1,4 +1,5 @@
 import csv
+from datetime import date
 from pathlib import Path
 
 
@@ -30,7 +31,18 @@ def build_benchmark(parameters):
     )
     peak_grid_kW = monthly_peak["value_kW"]
     energy_cost_vnd = sum(_day_energy_cost(day, parameters, dt) for day in days)
-    demand_charge_vnd = _demand_charge(parameters, peak_grid_kW)
+    demand_charge_vnd = sum(
+        _demand_charge(parameters, peak["value_kW"])
+        for peak in month_peaks.values()
+    )
+    monthly_peaks = [
+        {
+            **peak,
+            "value_kW": round(peak["value_kW"], 2),
+            "demand_charge_vnd": round(_demand_charge(parameters, peak["value_kW"])),
+        }
+        for _, peak in sorted(month_peaks.items())
+    ]
 
     return {
         "dt": dt,
@@ -40,6 +52,8 @@ def build_benchmark(parameters):
             "day_count": len(days),
             "month_start_day_index": monthly_peak["month_start_day_index"],
             "month_end_day_index": monthly_peak["month_end_day_index"],
+            "month_count": len(month_peaks),
+            "monthly_peaks": monthly_peaks,
             "total_load_kWh": round(total_load_kWh, 2),
             "total_pv_kWh": round(total_pv_kWh, 2),
             "total_grid_kWh": round(total_grid_kWh, 2),
@@ -50,6 +64,7 @@ def build_benchmark(parameters):
             "peak_step": monthly_peak["step"],
             "peak_time": monthly_peak["time"],
             "energy_cost_vnd": round(energy_cost_vnd),
+            "annualized_energy_cost_vnd": round(energy_cost_vnd * 365.0 / len(days)) if days else 0,
             "demand_charge_vnd": round(demand_charge_vnd),
             "total_bill_vnd": round(energy_cost_vnd + demand_charge_vnd),
         },
@@ -66,6 +81,7 @@ def _load_rows(path):
                 "load_kW": float(row["P_load_kW"]),
                 "pv_kW": float(row["P_pv_kW"]),
                 "day_type": row["day_type"],
+                "date_iso": row.get("date_iso") or None,
             }
             for row in reader
         ]
@@ -93,6 +109,7 @@ def _group_days(rows, dt):
             {
                 "day_index": day_index,
                 "day_type": source_day["day_type"],
+                "date_iso": points[0].get("date_iso"),
                 "load": _rounded_series(load),
                 "pv": _rounded_series(pv),
                 "grid": _rounded_series(grid),
@@ -123,7 +140,7 @@ def _prices_for_day(day, parameters, dt):
     expensive_windows = _parse_windows(parameters.get("billing_windows_expensive", ""))
     cheap_windows = _parse_windows(parameters.get("billing_windows_cheap", ""))
     sunday_is_normal = bool(parameters.get("billing_sunday"))
-    is_sunday = str(day["day_type"]).lower() == "weekend"           # TODO: in the csv thing, 1 week 2 weekend but saturday is not sunday!
+    is_sunday = _is_sunday(day.get("date_iso"))
 
     prices = []
     for step in range(len(day["grid"])):
@@ -165,6 +182,15 @@ def _inside_windows(hour, windows):
 def _time_to_hour(value):
     hour_raw, minute_raw = value.strip().split(":", 1)
     return int(hour_raw) + int(minute_raw) / 60
+
+
+def _is_sunday(date_iso):
+    if not date_iso:
+        return False
+    try:
+        return date.fromisoformat(str(date_iso)).weekday() == 6
+    except ValueError:
+        return False
 
 
 def _rolling_average(values, window):
