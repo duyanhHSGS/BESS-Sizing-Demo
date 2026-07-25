@@ -724,9 +724,13 @@
           <div class="metric"><span class="metric-label">Bill diff<span class="hint" tabindex="0" data-tip="Bill diff = before-battery bill - post-battery bill. This is the perfect Oracle saving before applying the real-world savings factor.">?</span></span><b id="summary-bill-diff">{{ "{:,.0f}".format(benchmark.summary.total_bill_vnd - oracle.summary.total_bill_vnd) }} VND</b></div>
           <div class="metric"><span class="metric-label">DEADLY peak diff<span class="hint" tabindex="0" data-tip="Peak diff = before-battery highest monthly peak - post-battery highest monthly peak. This is the kW shaved by Oracle.">?</span></span><b id="summary-peak-diff">{{ "{:,.1f}".format(benchmark.summary.peak_grid_kW - oracle.summary.peak_grid_kW) }} kW</b></div>
         </div>
+        {% set oracle_bill_diff_vnd = benchmark.summary.total_bill_vnd - oracle.summary.total_bill_vnd %}
+        {% set csv_day_count = benchmark.summary.day_count if benchmark.summary.day_count else 1 %}
+        {% set oracle_perfect_anual_saving_vnd = oracle_bill_diff_vnd / csv_day_count * 365 %}
+        {% set seer_anual_saving_vnd = (oracle_perfect_anual_saving_vnd if oracle_perfect_anual_saving_vnd > 0 else 0) * oracle.summary.seer_factor %}
         <div class="metric-row summary-triple">
-          <div class="metric"><span class="metric-label">Oracle perfect saving<span class="hint" tabindex="0" data-tip="Oracle perfect saving = before-battery bill - post-battery bill, using perfect future knowledge. It is an upper bound.">?</span></span><b id="summary-oracle-saving">{{ "{:,.0f}".format(oracle.summary.oracle_saving_vnd) }} VND</b></div>
-          <div class="metric"><span class="metric-label">SEER realistic saving<span class="hint" tabindex="0" data-tip="SEER realistic saving = max(0, Oracle perfect saving) * real-world savings factor.">?</span></span><b id="summary-seer-saving">{{ "{:,.0f}".format(oracle.summary.seer_saving_vnd) }} VND</b></div>
+          <div class="metric"><span class="metric-label">Oracle perfect anual saving<span class="hint" tabindex="0" data-tip="Oracle perfect anual saving = bill diff / DaysInCSV * 365, using perfect future knowledge. It is an upper bound.">?</span></span><b id="summary-oracle-saving">{{ "{:,.0f}".format(oracle_perfect_anual_saving_vnd) }} VND/year</b></div>
+          <div class="metric"><span class="metric-label">SEER realistic anual saving<span class="hint" tabindex="0" data-tip="SEER realistic anual saving = max(0, Oracle perfect anual saving) * real-world savings factor.">?</span></span><b id="summary-seer-saving">{{ "{:,.0f}".format(seer_anual_saving_vnd) }} VND/year</b></div>
           <div class="metric"><span class="metric-label">Oracle LP status<span class="hint" tabindex="0" data-tip="Raw solver status message from the Oracle LP. If it says solved, the optimized battery dispatch is available.">?</span></span><b id="summary-status">{{ oracle.status }}</b></div>
         </div>
       </div>
@@ -739,7 +743,7 @@
               <th>Candidate</th>
               <th>E battery (kWh)</th>
               <th>P battery (kW)</th>
-              <th>Saving/year (mil VND)</th>
+              <th>Anual realistic saving/year (mil VND)</th>
               <th>NPV (bil VND)</th>
               <th>Payback (years)</th>
               <th>Contract cap recommendation</th>
@@ -764,7 +768,13 @@
       </div>
       <div class="math-block">
         <h3>How the sizing numbers are calculated</h3>
-        <pre class="formula tight">Annual saving = SEER realistic saving from this CSV horizon * 365 / DaysInCSV
+        <pre class="formula tight">Bill diff = Before-battery bill - Post-battery bill
+
+Oracle perfect anual saving = Bill diff / DaysInCSV * 365
+
+Realistic anual saving = max(0, Oracle perfect anual saving) * Real-world savings factor
+
+Annual saving used below = Realistic anual saving
 
 Battery investment = E battery * Battery cell price + P battery * Inverter/PCS price
 
@@ -1033,9 +1043,11 @@ for t = 0 ... 95
 
     function updateSizingRow(index, candidate) {
       const sizing = candidate.oracle.summary.sizing_economics || {};
-      setSizingCell(index, "annual", formatNumber(sizing.annual_saving_million_vnd || 0, 2));
-      setSizingCell(index, "npv", formatNumber(sizing.npv_billion_vnd || 0, 3));
-      setSizingCell(index, "payback", sizing.payback_years == null ? "Never" : formatNumber(sizing.payback_years, 2));
+      const browserSizing = browserSizingEconomics(candidate);
+      Object.assign(sizing, browserSizing);
+      setSizingCell(index, "annual", formatNumber(browserSizing.annual_saving_million_vnd || 0, 2));
+      setSizingCell(index, "npv", formatNumber(browserSizing.npv_billion_vnd || 0, 3));
+      setSizingCell(index, "payback", browserSizing.payback_years == null ? "Never" : formatNumber(browserSizing.payback_years, 2));
       setSizingCell(
         index,
         "contract",
@@ -1070,6 +1082,44 @@ for t = 0 ... 95
         sizing.pareto_status = status;
         setSizingCell(index, "pareto", status);
       });
+    }
+
+    function annualizedSavingsFromBillDiff(summary) {
+      const billDiff = Number(benchmark.summary.total_bill_vnd || 0) - Number(summary.total_bill_vnd || 0);
+      const dayCount = Math.max(1, Number(benchmark.summary.day_count || benchmark.days.length || 0));
+      const oracleAnualSaving = billDiff / dayCount * 365;
+      const realisticAnualSaving = Math.max(0, oracleAnualSaving) * Number(summary.seer_factor || 0);
+      return { oracleAnualSaving, realisticAnualSaving };
+    }
+
+    function browserSizingEconomics(candidate) {
+      const summary = candidate.oracle && candidate.oracle.summary ? candidate.oracle.summary : {};
+      const anualSavings = annualizedSavingsFromBillDiff(summary);
+      const capacity = Number(candidate.battery_capacity_kWh || 0);
+      const power = Number(candidate.battery_power_limit_kW || 0);
+      const batteryCost = (
+        capacity * Number({{ billing_battery_per_kWh | tojson }})
+        + power * Number({{ billing_battery_per_kW | tojson }})
+      );
+      const yearlyMaintenance = batteryCost * Number({{ billing_yearly_maintain_percentage | tojson }});
+      const annualNetCashflow = anualSavings.realisticAnualSaving - yearlyMaintenance;
+      const discountRate = Number({{ billing_discount_rate | tojson }});
+      const projectYears = Math.max(0, Math.round(Number({{ billing_years | tojson }})));
+      let discountedCashflow = 0;
+      for (let year = 1; year <= projectYears; year += 1) {
+        discountedCashflow += annualNetCashflow / ((1 + discountRate) ** year);
+      }
+      const npv = -batteryCost + discountedCashflow;
+      return {
+        oracle_annual_saving_vnd: Math.round(anualSavings.oracleAnualSaving),
+        annual_saving_vnd: Math.round(anualSavings.realisticAnualSaving),
+        annual_saving_million_vnd: anualSavings.realisticAnualSaving / 1000000,
+        annual_maintenance_vnd: Math.round(yearlyMaintenance),
+        annual_net_cashflow_vnd: Math.round(annualNetCashflow),
+        npv_vnd: Math.round(npv),
+        npv_billion_vnd: npv / 1000000000,
+        payback_years: annualNetCashflow > 0 ? batteryCost / annualNetCashflow : null,
+      };
     }
 
     async function loadCandidateOracles() {
@@ -1127,6 +1177,7 @@ for t = 0 ... 95
 
     function updateBatteryBenchmark(candidate, activeOracle) {
       const summary = activeOracle.summary || {};
+      const anualSavings = annualizedSavingsFromBillDiff(summary);
       const batteryCost = (
         Number(candidate.battery_capacity_kWh || 0) * Number({{ billing_battery_per_kWh | tojson }})
         + Number(candidate.battery_power_limit_kW || 0) * Number({{ billing_battery_per_kW | tojson }})
@@ -1142,8 +1193,8 @@ for t = 0 ... 95
       setText("summary-grid-diff", `${formatNumber(benchmark.summary.total_grid_kWh - Number(summary.total_grid_kWh || 0))} kWh`);
       setText("summary-bill-diff", `${formatNumber(benchmark.summary.total_bill_vnd - Number(summary.total_bill_vnd || 0))} VND`);
       setText("summary-peak-diff", `${formatNumber(benchmark.summary.peak_grid_kW - Number(summary.peak_grid_kW || 0), 1)} kW`);
-      setText("summary-oracle-saving", `${formatNumber(summary.oracle_saving_vnd)} VND`);
-      setText("summary-seer-saving", `${formatNumber(summary.seer_saving_vnd)} VND`);
+      setText("summary-oracle-saving", `${formatNumber(anualSavings.oracleAnualSaving)} VND/year`);
+      setText("summary-seer-saving", `${formatNumber(anualSavings.realisticAnualSaving)} VND/year`);
       setText("summary-status", activeOracle.status || "Oracle status unavailable.");
     }
 
