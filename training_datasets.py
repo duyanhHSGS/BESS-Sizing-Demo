@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
 REQUIRED_HEADERS = ("day_index", "step", "P_load_kW", "P_pv_kW", "day_type")
 TRAINING_HEADERS = ("date_iso", "day_type", "step", "P_load_kW", "P_pv_kW")
 
@@ -15,9 +16,11 @@ class DatasetError(ValueError):
 
 
 def _dataset_paths(base_dir: Path = BASE_DIR) -> dict[str, Path]:
+    data_dir = base_dir / "data"
+    source_dir = data_dir if data_dir.exists() else base_dir
     return {
-        "youngone": base_dir / "offline_data_Youngone.csv",
-        "youngone_grepo": base_dir / "offline_Youngone_grepo.csv",
+        "youngone": source_dir / "offline_data_Youngone.csv",
+        "youngone_grepo": source_dir / "offline_Youngone_grepo.csv",
     }
 
 

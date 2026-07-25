@@ -3,7 +3,9 @@ from datetime import date
 from pathlib import Path
 
 
-DATA_PATH = Path(__file__).with_name("offline_data_Youngone.csv")
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+DATA_PATH = DATA_DIR / "offline_data_Youngone.csv"
 
 
 def build_benchmark(parameters):

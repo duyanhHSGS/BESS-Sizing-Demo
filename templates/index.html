@@ -1093,7 +1093,14 @@ for t = 0 ... 95
     const activeSeries = Object.fromEntries(seriesStyles.map((series) => [series.key, true]));
     const dispatchActiveSeries = Object.fromEntries(seriesStyles.map((series) => [series.key, true]));
     const dispatchSelectedPolicies = new Set();
-    const dispatchPolicyColors = ["#22d3ee", "#fb7185", "#a78bfa", "#facc15", "#4ade80", "#f97316", "#60a5fa", "#f472b6"];
+    const dispatchPolicyPalettes = [
+      { peak: "#1d4ed8", grid: "#2563eb", rolling_grid: "#38bdf8", discharge: "#0ea5e9", charge: "#0891b2", soc: "#bae6fd" },
+      { peak: "#047857", grid: "#059669", rolling_grid: "#34d399", discharge: "#10b981", charge: "#6ee7b7", soc: "#a7f3d0" },
+      { peak: "#7c3aed", grid: "#8b5cf6", rolling_grid: "#c084fc", discharge: "#a855f7", charge: "#d8b4fe", soc: "#e9d5ff" },
+      { peak: "#b45309", grid: "#d97706", rolling_grid: "#fbbf24", discharge: "#f59e0b", charge: "#fcd34d", soc: "#fde68a" },
+      { peak: "#be123c", grid: "#e11d48", rolling_grid: "#fb7185", discharge: "#f43f5e", charge: "#fecdd3", soc: "#ffe4e6" },
+      { peak: "#0f766e", grid: "#14b8a6", rolling_grid: "#5eead4", discharge: "#2dd4bf", charge: "#99f6e4", soc: "#ccfbf1" },
+    ];
     let dispatchPolicies = [];
     let dispatchPolicyTraces = {};
     let dispatchChartState = null;
@@ -1693,12 +1700,8 @@ for t = 0 ... 95
       ctx.restore();
     }
 
-    function dispatchPolicyBaseColor(policyName) {
-      let hash = 0;
-      for (let i = 0; i < policyName.length; i += 1) {
-        hash = ((hash << 5) - hash + policyName.charCodeAt(i)) | 0;
-      }
-      return dispatchPolicyColors[Math.abs(hash) % dispatchPolicyColors.length];
+    function dispatchPolicyMetricColors(policyIndex) {
+      return dispatchPolicyPalettes[policyIndex % dispatchPolicyPalettes.length];
     }
 
     function policyPrefix(name) {
@@ -1711,16 +1714,16 @@ for t = 0 ... 95
 
     function dispatchSeriesStyles() {
       const styles = seriesStyles.map((series) => ({ ...series }));
-      selectedPolicyNames().forEach((policyName) => {
+      selectedPolicyNames().forEach((policyName, policyIndex) => {
         const label = policyPrefix(policyName);
-        const base = dispatchPolicyBaseColor(policyName);
+        const colors = dispatchPolicyMetricColors(policyIndex);
         styles.push(
-          { key: `policy:${policyName}:peak`, label: `${label} monthly DEADLY peak`, color: base, policyName, policyReference: true },
-          { key: `policy:${policyName}:grid`, label: `${label} grid after battery`, color: base, policyName, policyKey: "grid" },
-          { key: `policy:${policyName}:rolling_grid`, label: `${label} 30-minute rolling grid`, color: "#fda4af", policyName, policyKey: "rolling_grid" },
-          { key: `policy:${policyName}:discharge`, label: `${label} battery discharge`, color: "#fdba74", policyName, policyKey: "discharge" },
-          { key: `policy:${policyName}:charge`, label: `${label} battery charge`, color: "#67e8f9", policyName, policyCharge: true },
-          { key: `policy:${policyName}:soc`, label: `${label} SOC %`, color: "#fde047", policyName, policySoc: true },
+          { key: `policy:${policyName}:peak`, label: `${label} monthly DEADLY peak`, color: colors.peak, policyName, policyReference: true },
+          { key: `policy:${policyName}:grid`, label: `${label} grid after battery`, color: colors.grid, policyName, policyKey: "grid" },
+          { key: `policy:${policyName}:rolling_grid`, label: `${label} 30-minute rolling grid`, color: colors.rolling_grid, policyName, policyKey: "rolling_grid" },
+          { key: `policy:${policyName}:discharge`, label: `${label} battery discharge`, color: colors.discharge, policyName, policyKey: "discharge" },
+          { key: `policy:${policyName}:charge`, label: `${label} battery charge`, color: colors.charge, policyName, policyCharge: true },
+          { key: `policy:${policyName}:soc`, label: `${label} SOC %`, color: colors.soc, policyName, policySoc: true },
         );
       });
       styles.forEach((series) => {
