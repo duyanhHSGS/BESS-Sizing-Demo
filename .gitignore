@@ -75,3 +75,7 @@ venv.bak/
 # OS specific files
 .DS_Store
 Thumbs.db
+
+# Sizing Demo training runtime outputs
+checkpoints/
+user_data/

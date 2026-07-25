@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
 from benchmark import build_benchmark
 from oracle_lp import build_oracle_lp
@@ -9,6 +9,10 @@ from settings import (
     FORM_FIELDS,
     SAMPLE_BATTERY_CANDIDATES,
 )
+from training_checkpoints import list_checkpoints
+from training_datasets import DatasetError, list_datasets
+from training_jobs import MANAGER
+from training_launcher import TrainingLaunchError, UnsupportedAlgorithm, start_training
 
 
 app = Flask(__name__)
@@ -41,6 +45,48 @@ def candidate_oracle(index):
             "candidate": _candidate_oracle(PARAMETERS, candidate),
         }
     )
+
+
+@app.route("/api/training/datasets", methods=["GET"])
+def training_datasets():
+    return jsonify(list_datasets())
+
+
+@app.route("/api/training/checkpoints", methods=["GET"])
+def training_checkpoints():
+    return jsonify(list_checkpoints())
+
+
+@app.route("/api/training/start", methods=["POST"])
+def training_start():
+    payload = request.get_json(silent=True) or {}
+    try:
+        job, details = start_training(payload, PARAMETERS, MANAGER)
+    except UnsupportedAlgorithm as exc:
+        return jsonify({"error": str(exc)}), 422
+    except (DatasetError, TrainingLaunchError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 422
+    return jsonify(details | {"status": job.status})
+
+
+@app.route("/api/training/stop/<job_id>", methods=["POST"])
+def training_stop(job_id):
+    if not MANAGER.stop(job_id):
+        return jsonify({"error": "job not running or not found"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/training/jobs/<job_id>", methods=["GET"])
+def training_job_detail(job_id):
+    detail = MANAGER.detail(job_id)
+    if detail is None:
+        return jsonify({"error": "job not found"}), 404
+    return jsonify(detail)
+
+
+@app.route("/api/training/jobs/<job_id>/events", methods=["GET"])
+def training_job_events(job_id):
+    return Response(MANAGER.sse_events(job_id), mimetype="text/event-stream")
 
 
 def _parameters_from_form():

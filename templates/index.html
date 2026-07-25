@@ -32,6 +32,26 @@
       padding: 16px 22px;
     }
 
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .tab-button.active {
+      background: #0c4a6e;
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .tab-panel {
+      display: none;
+    }
+
+    .tab-panel.active {
+      display: block;
+    }
+
     .card {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -111,7 +131,8 @@
       visibility: visible;
     }
 
-    input {
+    input,
+    select {
       background: var(--panel2);
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -531,6 +552,27 @@
       color: #fca5a5;
     }
 
+    .log {
+      background: #0b1117;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      color: #d7e0ea;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      min-height: 180px;
+      overflow: auto;
+      padding: 10px;
+      white-space: pre-wrap;
+    }
+
+    .training-chart {
+      background: #0b1117;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      height: 240px;
+      width: 100%;
+    }
+
     .formula.tight {
       line-height: 1.55;
       white-space: pre-wrap;
@@ -556,6 +598,12 @@
 
 <body>
   <main>
+    <nav class="tabs" aria-label="Sizing Demo sections">
+      <button class="tab-button active" type="button" data-tab-target="sizing-demo">Sizing Demo</button>
+      <button class="tab-button" type="button" data-tab-target="training-lab">Training Lab</button>
+    </nav>
+
+    <section id="tab-sizing-demo" class="tab-panel active">
     <form class="card" method="post" action="/set-parameters">
       <h2>Battery operation inputs</h2>
       <div class="row">
@@ -882,6 +930,59 @@ BatterySOC(96) ≥ RequiredFinalSOC
 0.5 × (GridImport(t) + GridImport(t+1)) ≤ PeakGrid
 for t = 0 ... 95
       <span class="formula-note">← 30-minute rolling average demand</span></pre>
+      </div>
+    </section>
+    </section>
+
+    <section id="tab-training-lab" class="tab-panel">
+      <div class="card">
+        <h2>Training Lab</h2>
+        <div class="row">
+          <label>Dataset <select id="train-dataset"></select></label>
+          <label>Algorithm
+            <select id="train-algo">
+              <option value="ppo">PPO</option>
+              <option value="grepo">GREPO</option>
+              <option value="grpo">GRPO (not implemented)</option>
+            </select>
+          </label>
+          <label>E_cap (kWh) <input type="number" id="train-ecap" step="50" value="{{ battery_capacity_kWh }}"></label>
+          <label>P_rated (kW) <input type="number" id="train-prated" step="25" value="{{ battery_power_limit_kW }}"></label>
+          <label class="train-ppo-field">Steps <input type="number" id="train-steps" value="400000" step="50000"></label>
+          <label class="train-grepo-field">Iters <input type="number" id="train-iters" value="400" step="50"></label>
+          <label class="train-grepo-field">Group <input type="number" id="train-group" value="8" step="1"></label>
+          <label class="train-grepo-field">Beta <input type="number" id="train-beta" value="0.5" step="0.05"></label>
+          <label class="train-grepo-field">Std <input type="number" id="train-std" value="0.30" step="0.05"></label>
+          <label>Checkpoint tag <input id="train-tag" size="22" placeholder="auto"></label>
+          <button id="btn-train" class="primary" type="button">Start training</button>
+          <button id="btn-train-stop" type="button" disabled>Stop</button>
+        </div>
+        <div id="train-plan" class="info">Loading datasets...</div>
+        <pre id="train-log" class="log"></pre>
+      </div>
+      <div class="dashboard-grid">
+        <section class="card">
+          <h2>Learning curve</h2>
+          <canvas id="train-chart" class="training-chart" width="900" height="240"></canvas>
+        </section>
+        <section class="card">
+          <h2>Local checkpoints</h2>
+          <div class="sizing-table-wrap">
+            <table class="sizing-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Algo</th>
+                  <th>E/P</th>
+                  <th>Billing</th>
+                  <th>Test saving</th>
+                  <th>Trained</th>
+                </tr>
+              </thead>
+              <tbody id="checkpoint-table-body"></tbody>
+            </table>
+          </div>
+        </section>
       </div>
     </section>
   </main>
@@ -1520,6 +1621,221 @@ for t = 0 ... 95
       });
     }
 
+    function bindTabs() {
+      document.querySelectorAll("[data-tab-target]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const target = button.dataset.tabTarget;
+          document.querySelectorAll("[data-tab-target]").forEach((item) => {
+            item.classList.toggle("active", item === button);
+          });
+          document.querySelectorAll(".tab-panel").forEach((panel) => {
+            panel.classList.toggle("active", panel.id === `tab-${target}`);
+          });
+          if (target === "training-lab") {
+            refreshTrainingLab();
+          } else {
+            hideTooltip();
+            drawBenchmark();
+          }
+        });
+      });
+    }
+
+    const trainDataset = document.getElementById("train-dataset");
+    const trainAlgo = document.getElementById("train-algo");
+    const trainEcap = document.getElementById("train-ecap");
+    const trainPrated = document.getElementById("train-prated");
+    const trainSteps = document.getElementById("train-steps");
+    const trainIters = document.getElementById("train-iters");
+    const trainGroup = document.getElementById("train-group");
+    const trainBeta = document.getElementById("train-beta");
+    const trainStd = document.getElementById("train-std");
+    const trainTag = document.getElementById("train-tag");
+    const trainPlan = document.getElementById("train-plan");
+    const trainLog = document.getElementById("train-log");
+    const trainButton = document.getElementById("btn-train");
+    const trainStopButton = document.getElementById("btn-train-stop");
+    const checkpointTableBody = document.getElementById("checkpoint-table-body");
+    const trainChart = document.getElementById("train-chart");
+    const trainChartCtx = trainChart.getContext("2d");
+    let trainJobId = null;
+    let trainPoints = [];
+
+    async function trainingApi(path, options = {}) {
+      const response = await fetch(path, options);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      return payload;
+    }
+
+    async function refreshTrainingLab() {
+      await Promise.all([loadTrainingDatasets(), loadTrainingCheckpoints()]);
+      updateTrainAlgoFields();
+      updateTrainPlan();
+      drawTrainCurve();
+    }
+
+    async function loadTrainingDatasets() {
+      const datasets = await trainingApi("/api/training/datasets");
+      trainDataset.innerHTML = datasets.map((dataset) => (
+        `<option value="${dataset.id}" data-days="${dataset.n_days}" data-status="${dataset.status}">` +
+        `${dataset.id} (${dataset.n_days} days)</option>`
+      )).join("");
+    }
+
+    async function loadTrainingCheckpoints() {
+      const checkpoints = await trainingApi("/api/training/checkpoints");
+      checkpointTableBody.innerHTML = checkpoints.map((checkpoint) => (
+        `<tr><td>${checkpoint.name}</td>` +
+        `<td>${checkpoint.algo || "unknown"}</td>` +
+        `<td>${checkpoint.e_cap_kwh ?? "?"}/${checkpoint.p_rated_kw ?? "?"}</td>` +
+        `<td>${checkpoint.billing_mode || ""}</td>` +
+        `<td>${checkpoint.test_saving_pct == null ? "-" : checkpoint.test_saving_pct + "%"}</td>` +
+        `<td>${checkpoint.trained || ""}</td></tr>`
+      )).join("");
+    }
+
+    function updateTrainAlgoFields() {
+      const algo = trainAlgo.value;
+      document.querySelectorAll(".train-ppo-field").forEach((item) => {
+        item.style.display = algo === "ppo" ? "inline-flex" : "none";
+      });
+      document.querySelectorAll(".train-grepo-field").forEach((item) => {
+        item.style.display = algo === "grepo" ? "inline-flex" : "none";
+      });
+      updateTrainPlan();
+    }
+
+    function updateTrainPlan() {
+      const selected = trainDataset.selectedOptions[0];
+      if (!selected) {
+        trainPlan.textContent = "No local training dataset found.";
+        trainButton.disabled = true;
+        return;
+      }
+      const days = Number(selected.dataset.days || 0);
+      const algo = trainAlgo.value;
+      trainButton.disabled = days < 90 || algo === "grpo";
+      if (algo === "grpo") {
+        trainPlan.textContent = "GRPO is visible for planning, but it is not implemented in this repo yet.";
+      } else if (days < 90) {
+        trainPlan.textContent = `${days} days found; training needs at least 90 days.`;
+      } else {
+        const budget = algo === "ppo" ? `${trainSteps.value} PPO steps` : `${trainIters.value} GREPO iterations`;
+        trainPlan.textContent = `Plan: train ${days - 60} days, validation 30, test 30; ${budget}; E/P ${trainEcap.value}/${trainPrated.value}.`;
+      }
+    }
+
+    function drawTrainCurve() {
+      const width = trainChart.width;
+      const height = trainChart.height;
+      trainChartCtx.clearRect(0, 0, width, height);
+      trainChartCtx.fillStyle = "#0b1117";
+      trainChartCtx.fillRect(0, 0, width, height);
+      trainChartCtx.strokeStyle = "#334155";
+      trainChartCtx.strokeRect(0, 0, width, height);
+      trainChartCtx.fillStyle = "#8496a8";
+      trainChartCtx.font = "12px Segoe UI, sans-serif";
+      if (trainPoints.length < 2) {
+        trainChartCtx.fillText("Validation bill points will appear as training logs stream.", 16, 26);
+        return;
+      }
+      const pad = { left: 54, right: 18, top: 18, bottom: 34 };
+      const xs = trainPoints.map((point) => point.x);
+      const ys = trainPoints.map((point) => point.y);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      const xScale = (value) => pad.left + (value - minX) / Math.max(1, maxX - minX) * (width - pad.left - pad.right);
+      const yScale = (value) => height - pad.bottom - (value - minY) / Math.max(1, maxY - minY) * (height - pad.top - pad.bottom);
+      trainChartCtx.strokeStyle = "#f87171";
+      trainChartCtx.lineWidth = 2;
+      trainChartCtx.beginPath();
+      trainPoints.forEach((point, index) => {
+        const x = xScale(point.x);
+        const y = yScale(point.y);
+        if (index === 0) trainChartCtx.moveTo(x, y);
+        else trainChartCtx.lineTo(x, y);
+      });
+      trainChartCtx.stroke();
+      trainChartCtx.fillStyle = "#d7e0ea";
+      trainChartCtx.fillText(`${formatNumber(minX)} steps`, pad.left, height - 10);
+      trainChartCtx.fillText(`${formatNumber(maxX)} steps`, width - 120, height - 10);
+      trainChartCtx.fillText(`${formatNumber(maxY, 1)}M VND`, 10, pad.top + 8);
+      trainChartCtx.fillText(`${formatNumber(minY, 1)}M VND`, 10, height - pad.bottom);
+    }
+
+    function followTrainingJob(jobId) {
+      const events = new EventSource(`/api/training/jobs/${jobId}/events`);
+      events.onmessage = (event) => {
+        trainLog.textContent += `${event.data}\n`;
+        trainLog.scrollTop = trainLog.scrollHeight;
+        const match = event.data.match(/(?:step|steps)\s+(\d+).*?\|\s*val\s+([\d.]+)M/i);
+        if (match) {
+          trainPoints.push({ x: Number(match[1]), y: Number(match[2]) });
+          drawTrainCurve();
+        }
+      };
+      events.addEventListener("end", async () => {
+        events.close();
+        trainButton.disabled = false;
+        trainStopButton.disabled = true;
+        trainJobId = null;
+        await loadTrainingCheckpoints();
+      });
+      events.onerror = () => events.close();
+    }
+
+    async function startTraining() {
+      trainLog.textContent = "";
+      trainPoints = [];
+      drawTrainCurve();
+      try {
+        const payload = await trainingApi("/api/training/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            dataset_id: trainDataset.value,
+            algo: trainAlgo.value,
+            e_cap_kwh: Number(trainEcap.value),
+            p_rated_kw: Number(trainPrated.value),
+            steps: Number(trainSteps.value),
+            iters: Number(trainIters.value),
+            group: Number(trainGroup.value),
+            beta: Number(trainBeta.value),
+            std: Number(trainStd.value),
+            tag: trainTag.value.trim(),
+          }),
+        });
+        trainJobId = payload.job_id;
+        trainButton.disabled = true;
+        trainStopButton.disabled = false;
+        trainLog.textContent += `Started ${payload.algo} -> ${payload.checkpoint}\n`;
+        followTrainingJob(payload.job_id);
+      } catch (error) {
+        trainLog.textContent += `ERROR: ${error.message}\n`;
+        updateTrainPlan();
+      }
+    }
+
+    async function stopTraining() {
+      if (!trainJobId) return;
+      await trainingApi(`/api/training/stop/${trainJobId}`, { method: "POST" }).catch((error) => {
+        trainLog.textContent += `ERROR: ${error.message}\n`;
+      });
+      trainStopButton.disabled = true;
+    }
+
+    trainAlgo.addEventListener("change", updateTrainAlgoFields);
+    trainDataset.addEventListener("change", updateTrainPlan);
+    [trainEcap, trainPrated, trainSteps, trainIters].forEach((input) => input.addEventListener("input", updateTrainPlan));
+    trainButton.addEventListener("click", startTraining);
+    trainStopButton.addEventListener("click", stopTraining);
+
+    bindTabs();
     fillSampleBatteryOptions();
     bindSampleBatteryOption();
     fillDayOptions();
