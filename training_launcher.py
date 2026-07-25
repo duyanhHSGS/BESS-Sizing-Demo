@@ -14,7 +14,7 @@ BASE_DIR = Path(__file__).resolve().parent
 CHECKPOINT_DIR = BASE_DIR / "checkpoints"
 USER_DATA_DIR = BASE_DIR / "user_data"
 PPO_SCRIPT = BASE_DIR / "train_ppo_dataset.py"
-GREPO_SCRIPT = BASE_DIR / "train_grepo_dataset.py"
+GREPO_SCRIPT = BASE_DIR / "train_grepo.py"
 ALGORITHMS = {"ppo", "grepo", "grpo"}
 
 
@@ -147,5 +147,5 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
 
     env = os.environ.copy()
     env["SIZING_DEMO_CHECKPOINT_DIR"] = str(CHECKPOINT_DIR.resolve())
-    job = manager.start_subprocess("train_" + spec["algo"], spec["cmd"], cwd=str(BASE_DIR.parent), env=env)
+    job = manager.start_subprocess("train_" + spec["algo"], spec["cmd"], cwd=str(BASE_DIR), env=env)
     return job, {"job_id": job.id, "n_days": n_days, **spec}

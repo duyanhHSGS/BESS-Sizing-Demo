@@ -1,0 +1,70 @@
+{
+    "_comment": "SADRBC system configuration. BESS = 750 kWh / 350 kW, eta_RT = 0.9025, SOC range 0.10-0.93. Tariff = TT16/2014 EVN, Contract P_target = 350 kW.",
+
+    "BESS": {
+        "E_cap_kWh": 750.0,
+        "P_rated_kW": 350.0,
+        "eta_ch": 0.95,
+        "eta_dis": 0.95,
+        "soc_min": 0.10,
+        "soc_max": 0.93,
+        "soc_safety_buffer": 0.05,
+        "soc_eod": null,
+        "soc_min_emergency": 0.05
+    },
+
+    "PV": {
+        "P_installed_kWp": 500.0,
+        "tilt_deg": 15,
+        "orientation": "south"
+    },
+
+    "Tariff": {
+        "_source": "TT16/2014/TT-BCT - Bieu gia 2 thanh phan EVN",
+        "price_peak_VND_per_kWh":  2759.0,
+        "price_mid_VND_per_kWh":   1485.0,
+        "price_off_VND_per_kWh":    982.0,
+        "T_cap_VND_per_kW_per_month": 235414.0,
+        "FIT_PRICE_VND_per_kWh": 1200.0,
+        "ENABLE_EXPORT": false
+    },
+
+    "TimeWindows_15min": {
+        "_comment": "P_0 = 00:00, dt = 0.25h, N = 96 steps/day",
+        "dt_hours": 0.25,
+        "W1_steps": [38, 39, 40, 41, 42, 43, 44, 45],
+        "W2_steps": [68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79],
+        "INTER_steps_range": [46, 68],
+        "OFF_steps_morning_range": [0, 16],
+        "OFF_steps_evening_range": [88, 96],
+        "W1_START": 38,
+        "W2_START": 68,
+        "OFF_PEAK_END_STEP": 16
+    },
+
+    "Operation": {
+        "P_target_user_kW": 350.0
+    },
+
+    "Safety": {
+        "V_NOMINAL": 1.0,
+        "V_BLACKOUT_TH": 0.85,
+        "T_DERATE": [[35, 1.0], [42, 0.7], [45, 0.5], [999, 0.0]]
+    },
+
+    "LoadProfile": {
+        "_comment": "1-ca production, peak 500 kW, 1 shift 7h-17h",
+        "shift_pattern": "1-ca",
+        "weekday_peak_kW": 500.0,
+        "weekend_kW": 100.0,
+        "holiday_kW": 80.0
+    },
+
+    "Simulation": {
+        "horizon_days": 30,
+        "month": "2025-03",
+        "T_battery_C": 30.0,
+        "V_grid_pu": 1.0,
+        "blackout_steps": null
+    }
+}

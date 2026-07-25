@@ -584,6 +584,13 @@
       width: 100%;
     }
 
+    .chart-help {
+      color: #b6c4d2;
+      font-size: 13px;
+      line-height: 1.45;
+      margin: 8px 0 0;
+    }
+
     .formula.tight {
       line-height: 1.55;
       white-space: pre-wrap;
@@ -976,6 +983,7 @@ for t = 0 ... 95
         <section class="card">
           <h2>Learning curve</h2>
           <canvas id="train-chart" class="training-chart" width="900" height="240"></canvas>
+          <p class="chart-help">Each red point is the validation bill after more training steps. Down is good: the policy is learning to run the battery with a lower electricity bill.</p>
         </section>
         <section class="card">
           <h2>Local checkpoints</h2>
@@ -2173,6 +2181,7 @@ for t = 0 ... 95
       trainChartCtx.font = "12px Segoe UI, sans-serif";
       if (trainPoints.length < 2) {
         trainChartCtx.fillText("Validation bill points will appear as training logs stream.", 16, 26);
+        trainChartCtx.fillText("X = training steps, Y = validation bill in million VND. Lower is better.", 16, 46);
         return;
       }
       const pad = { left: 54, right: 18, top: 18, bottom: 34 };
@@ -2199,6 +2208,7 @@ for t = 0 ... 95
       trainChartCtx.fillText(`${formatNumber(maxX)} steps`, width - 120, height - 10);
       trainChartCtx.fillText(`${formatNumber(maxY, 1)}M VND`, 10, pad.top + 8);
       trainChartCtx.fillText(`${formatNumber(minY, 1)}M VND`, 10, height - pad.bottom);
+      trainChartCtx.fillText("lower bill = better policy", width - 180, pad.top + 8);
     }
 
     function followTrainingJob(jobId) {

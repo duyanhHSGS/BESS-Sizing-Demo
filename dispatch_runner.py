@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import math
-import sys
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -22,12 +21,6 @@ from training_checkpoints import CHECKPOINT_DIR, _load_checkpoint_meta
 
 
 BASE_DIR = Path(__file__).resolve().parent
-WORKSPACE = BASE_DIR.parent
-SADRBC_ROOT = WORKSPACE / "SADRBC_Verification"
-for sub in ("drl", "algorithm", "benchmark_compare"):
-    path = str(SADRBC_ROOT / sub)
-    if path not in sys.path:
-        sys.path.insert(0, path)
 
 from baselines import run_drl_policy  # noqa: E402
 from common import TOU_RULES, build_tariff_windows, load_system_config, score_month  # noqa: E402
