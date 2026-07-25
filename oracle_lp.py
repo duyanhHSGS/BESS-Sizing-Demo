@@ -91,63 +91,17 @@ def _solve_month(
     maximum_soc,
     required_final_soc,
 ):
-    output = []
-    soc = required_final_soc
-    peak_floor = 0.0
-    for day in days:
-        result = _solve_day(
-            linprog,
-            lil_matrix,
-            day,
-            parameters,
-            dt,
-            capacity,
-            power_limit,
-            charge_efficiency,
-            discharge_efficiency,
-            minimum_soc,
-            maximum_soc,
-            required_final_soc,
-            soc,
-            peak_floor,
-        )
-        output.append(result)
-        if result.get("solved"):
-            soc = result["_final_soc_fraction"]
-            peak_floor = max(peak_floor, result["_true_peak_grid_kW"])
-            result.pop("_final_soc_fraction", None)
-            result.pop("_true_peak_grid_kW", None)
-    return output
-
-
-def _solve_day(
-    linprog,
-    lil_matrix,
-    day,
-    parameters,
-    dt,
-    capacity,
-    power_limit,
-    charge_efficiency,
-    discharge_efficiency,
-    minimum_soc,
-    maximum_soc,
-    required_final_soc,
-    initial_soc,
-    peak_floor,
-):
-    load = day["load"]
-    pv = day["pv"]
+    load = _flatten(days, "load")
+    pv = _flatten(days, "pv")
     effective_load = [max(0.0, load_kw - pv_kw) for load_kw, pv_kw in zip(load, pv)]
     solar_surplus = [max(0.0, pv_kw - load_kw) for load_kw, pv_kw in zip(load, pv)]
-    prices = _prices_for_day(day, parameters, dt)
+    prices = [price for day in days for price in _prices_for_day(day, parameters, dt)]
     steps = len(effective_load)
     if steps == 0:
-        return _failed_day(day, "empty day")
+        return []
 
     idx = _Indexes(steps)
-    peak_excess = idx.peak + 1
-    variable_count = peak_excess + 1
+    variable_count = idx.peak + 1
     objective = [0.0] * variable_count
     wear_cost = _to_float(parameters.get("battery_wear_cost"), 0.0)
     demand_rate = _to_float(parameters.get("billing_peak_penalty"), 0.0) if parameters.get("billing_mode") == "2tc" else 0.0
@@ -156,18 +110,9 @@ def _solve_day(
         objective[idx.grid_charge(step)] = price * dt + wear_cost * dt
         objective[idx.discharge(step)] = -price * dt + wear_cost * dt
         objective[idx.solar_charge(step)] = wear_cost * dt
-    objective[idx.peak] = 1e-3 if demand_rate else 0.0
-    objective[peak_excess] = demand_rate
+    objective[idx.peak] = demand_rate
 
-    bounds = _variable_bounds(
-        steps,
-        power_limit,
-        solar_surplus,
-        minimum_soc,
-        maximum_soc,
-        final_soc_floor=required_final_soc,
-    )
-    bounds.append((0.0, None))
+    bounds = _variable_bounds(steps, power_limit, solar_surplus, minimum_soc, maximum_soc)
     a_eq, b_eq = _build_equalities(
         lil_matrix,
         steps,
@@ -178,7 +123,7 @@ def _solve_day(
         capacity,
         charge_efficiency,
         discharge_efficiency,
-        initial_soc,
+        required_final_soc,
     )
     a_ub, b_ub = _build_inequalities(
         lil_matrix,
@@ -187,8 +132,7 @@ def _solve_day(
         idx,
         power_limit,
         dt,
-        peak_floor,
-        peak_excess,
+        required_final_soc,
     )
 
     result = linprog(
@@ -201,12 +145,12 @@ def _solve_day(
         method="highs",
     )
     if not result.success:
-        return _failed_day(day, result.message)
+        return [_failed_day(day, result.message) for day in days]
 
-    return _slice_day(day, result.x, idx, parameters, dt)
+    return _slice_days(days, result.x, idx, parameters, dt)
 
 
-def _variable_bounds(steps, power_limit, solar_surplus, minimum_soc, maximum_soc, final_soc_floor=None):
+def _variable_bounds(steps, power_limit, solar_surplus, minimum_soc, maximum_soc):
     bounds = []
     for _ in range(steps):
         bounds.append((0.0, power_limit))
@@ -216,11 +160,8 @@ def _variable_bounds(steps, power_limit, solar_surplus, minimum_soc, maximum_soc
         bounds.append((0.0, min(power_limit, solar_surplus[step])))
     for _ in range(steps):
         bounds.append((0.0, None))
-    for step in range(steps + 1):
-        lower = minimum_soc
-        if final_soc_floor is not None and step == steps:
-            lower = max(lower, final_soc_floor)
-        bounds.append((lower, maximum_soc))
+    for _ in range(steps + 1):
+        bounds.append((minimum_soc, maximum_soc))
     bounds.append((0.0, None))
     return bounds
 
@@ -235,38 +176,25 @@ def _build_equalities(
     capacity,
     charge_efficiency,
     discharge_efficiency,
-    initial_soc,
+    required_final_soc,
 ):
     a_eq = lil_matrix((1 + steps * 2, variable_count))
     b_eq = [0.0] * (1 + steps * 2)
 
     row = 0
-    # Match Tool C's day-chained oracle: each day starts from the previous
-    # day's final SOC, so the oracle cannot create free energy between days.
     a_eq[row, idx.soc(0)] = 1.0
-    b_eq[row] = initial_soc
+    b_eq[row] = required_final_soc
     row += 1
 
     charge_soc_gain = charge_efficiency * dt / capacity
     discharge_soc_loss = dt / (discharge_efficiency * capacity)
     for step in range(steps):
-        # math.txt power balance:
-        #   GridImport(t) = EffectiveLoad(t) + GridCharge(t) - BatteryDischarge(t)
-        # is written for linprog as:
-        #   GridImport(t) - GridCharge(t) + BatteryDischarge(t) = EffectiveLoad(t).
         a_eq[row, idx.grid_import(step)] = 1.0
         a_eq[row, idx.grid_charge(step)] = -1.0
         a_eq[row, idx.discharge(step)] = 1.0
         b_eq[row] = effective_load[step]
         row += 1
 
-        # math.txt SOC update:
-        #   SOC(t+1) = SOC(t)
-        #            + ChargeEfficiency * dt / BatteryCapacity * (GridCharge(t) + SolarCharge(t))
-        #            - dt / (DischargeEfficiency * BatteryCapacity) * BatteryDischarge(t).
-        # Rearranged for linprog equality rows:
-        #   SOC(t+1) - SOC(t) - charge_gain*GridCharge(t)
-        #   - charge_gain*SolarCharge(t) + discharge_loss*BatteryDischarge(t) = 0.
         a_eq[row, idx.soc(step + 1)] = 1.0
         a_eq[row, idx.soc(step)] = -1.0
         a_eq[row, idx.grid_charge(step)] = -charge_soc_gain
@@ -284,78 +212,71 @@ def _build_inequalities(
     idx,
     power_limit,
     dt,
-    peak_floor,
-    peak_excess,
+    required_final_soc,
 ):
-    demand_windows = _full_demand_windows(steps, dt)
+    demand_windows = _demand_windows(steps, dt)
     a_ub = lil_matrix((steps + len(demand_windows) + 1, variable_count))
     b_ub = [0.0] * (steps + len(demand_windows) + 1)
 
     row = 0
     for step in range(steps):
-        # BatteryPowerLimit is the total charge-side limit. math2.txt makes this
-        # explicit as GridCharge(t) + SolarCharge(t) <= MaxChargePower.
         a_ub[row, idx.grid_charge(step)] = 1.0
         a_ub[row, idx.solar_charge(step)] = 1.0
         b_ub[row] = power_limit
         row += 1
 
     for window in demand_windows:
-        # math.txt's 15-minute shortcut is:
-        #   0.5 * (GridImport(t) + GridImport(t+1)) <= PeakGrid.
-        # This code uses CUSTOM dt: _demand_window builds normalized time weights
-        # over DEMAND_WINDOW_HOURS, so dt=0.25 becomes [0.5, 0.5], dt=0.5 becomes
-        # [1.0], and non-divisible dt values get partial-step weights.
         for window_step, weight in window:
             a_ub[row, idx.grid_import(window_step)] = weight
         a_ub[row, idx.peak] = -1.0
         row += 1
 
-    # Tool C bills only the marginal monthly peak increment for each chained
-    # daily LP: PeakExcess >= PeakGrid - peak_floor.
-    a_ub[row, idx.peak] = 1.0
-    a_ub[row, peak_excess] = -1.0
-    b_ub[row] = peak_floor
+    a_ub[row, idx.soc(steps)] = -1.0
+    b_ub[row] = -required_final_soc
     return a_ub, b_ub
 
 
-def _slice_day(day, solution, idx, parameters, dt):
-    count = len(day["grid"])
-    span = range(count)
-    discharge = [solution[idx.discharge(step)] for step in span]
-    grid_charge = [solution[idx.grid_charge(step)] for step in span]
-    solar_charge = [solution[idx.solar_charge(step)] for step in span]
-    grid_import = [solution[idx.grid_import(step)] for step in span]
-    soc = [solution[idx.soc(step)] for step in range(count + 1)]
-    rolling_grid = _rolling_30_minute_average(grid_import, dt)
-    true_peak_grid = max(_full_rolling_30_minute_average(grid_import, dt), default=0.0)
-    before_cost = _day_energy_cost(day, parameters, dt)
-    after_cost = sum(power * price * dt for power, price in zip(grid_import, _prices_for_day(day, parameters, dt)))
-    wear_cost = _to_float(parameters.get("battery_wear_cost"), 0.0) * dt * sum(
-        d + gc + sc for d, gc, sc in zip(discharge, grid_charge, solar_charge)
-    )
+def _slice_days(days, solution, idx, parameters, dt):
+    output = []
+    offset = 0
+    for day in days:
+        count = len(day["grid"])
+        span = range(offset, offset + count)
+        discharge = [solution[idx.discharge(step)] for step in span]
+        grid_charge = [solution[idx.grid_charge(step)] for step in span]
+        solar_charge = [solution[idx.solar_charge(step)] for step in span]
+        grid_import = [solution[idx.grid_import(step)] for step in span]
+        soc = [solution[idx.soc(step)] for step in range(offset, offset + count + 1)]
+        rolling_grid = _rolling_30_minute_average(grid_import, dt)
+        before_cost = _day_energy_cost(day, parameters, dt)
+        after_cost = sum(power * price * dt for power, price in zip(grid_import, _prices_for_day(day, parameters, dt)))
+        wear_cost = _to_float(parameters.get("battery_wear_cost"), 0.0) * dt * sum(
+            d + gc + sc for d, gc, sc in zip(discharge, grid_charge, solar_charge)
+        )
 
-    return {
-        "day_index": day["day_index"],
-        "solved": True,
-        "status": "optimal",
-        "grid": _rounded_series(grid_import),
-        "rolling_grid": _rounded_series(rolling_grid),
-        "discharge": _rounded_series(discharge),
-        "grid_charge": _rounded_series(grid_charge),
-        "solar_charge": _rounded_series(solar_charge),
-        "soc": [round(value * 100, 1) for value in soc[:-1]],
-        "final_soc": round(soc[-1] * 100, 1),
-        "grid_kWh": round(sum(grid_import) * dt, 2),
-        "charged_kWh": round((sum(grid_charge) + sum(solar_charge)) * dt, 2),
-        "discharged_kWh": round(sum(discharge) * dt, 2),
-        "peak_grid_kW": round(true_peak_grid, 2),
-        "energy_cost_vnd": round(after_cost),
-        "wear_cost_vnd": round(wear_cost),
-        "day_saving_vnd": round(before_cost - after_cost - wear_cost),
-        "_final_soc_fraction": soc[-1],
-        "_true_peak_grid_kW": true_peak_grid,
-    }
+        output.append(
+            {
+                "day_index": day["day_index"],
+                "solved": True,
+                "status": "optimal",
+                "grid": _rounded_series(grid_import),
+                "rolling_grid": _rounded_series(rolling_grid),
+                "discharge": _rounded_series(discharge),
+                "grid_charge": _rounded_series(grid_charge),
+                "solar_charge": _rounded_series(solar_charge),
+                "soc": [round(value * 100, 1) for value in soc[:-1]],
+                "final_soc": round(soc[-1] * 100, 1),
+                "grid_kWh": round(sum(grid_import) * dt, 2),
+                "charged_kWh": round((sum(grid_charge) + sum(solar_charge)) * dt, 2),
+                "discharged_kWh": round(sum(discharge) * dt, 2),
+                "peak_grid_kW": round(max(rolling_grid, default=0.0), 2),
+                "energy_cost_vnd": round(after_cost),
+                "wear_cost_vnd": round(wear_cost),
+                "day_saving_vnd": round(before_cost - after_cost - wear_cost),
+            }
+        )
+        offset += count
+    return output
 
 
 def _build_summary(base_days, oracle_days, parameters, dt):
@@ -363,60 +284,15 @@ def _build_summary(base_days, oracle_days, parameters, dt):
     before_energy = sum(_day_energy_cost(day, parameters, dt) for day in base_days)
     after_energy = sum(day.get("energy_cost_vnd", 0.0) for day in solved_days)
     wear_cost = sum(day.get("wear_cost_vnd", 0.0) for day in solved_days)
-    monthly_savings = []
-    monthly_billing = []
-    base_by_month = _days_by_month(base_days)
-    solved_by_month = _days_by_month(solved_days)
-
-    for month_start in sorted(base_by_month):
-        base_block = base_by_month[month_start]
-        solved_block = solved_by_month.get(month_start, [])
-        block_day_count = max(1, len(base_block))
-        before_energy_block = sum(_day_energy_cost(day, parameters, dt) for day in base_block)
-        after_energy_block = sum(day.get("energy_cost_vnd", 0.0) for day in solved_block)
-        wear_cost_block = sum(day.get("wear_cost_vnd", 0.0) for day in solved_block)
-        before_peak_block = max((day["peak_grid_kW"] for day in base_block), default=0.0)
-        after_peak_block = max((day.get("peak_grid_kW", 0.0) for day in solved_block), default=0.0)
-        before_demand_block = _demand_charge(parameters, before_peak_block)
-        after_demand_block = _demand_charge(parameters, after_peak_block)
-        energy_saving_month = (
-            before_energy_block - after_energy_block - wear_cost_block
-        ) * (30.0 / block_day_count)
-        demand_saving_month = before_demand_block - after_demand_block
-        monthly_saving = energy_saving_month + demand_saving_month
-        monthly_savings.append(monthly_saving)
-        monthly_billing.append(
-            {
-                "month_start_day_index": month_start,
-                "month_end_day_index": max(day["day_index"] for day in base_block),
-                "day_count": len(base_block),
-                "baseline_peak_kW": round(before_peak_block, 2),
-                "oracle_peak_kW": round(after_peak_block, 2),
-                "baseline_demand_charge_vnd": round(before_demand_block),
-                "oracle_demand_charge_vnd": round(after_demand_block),
-                "energy_saving_30day_vnd": round(energy_saving_month),
-                "demand_saving_vnd": round(demand_saving_month),
-                "monthly_saving_vnd": round(monthly_saving),
-            }
-        )
-
-    before_peak = max((row["baseline_peak_kW"] for row in monthly_billing), default=0.0)
-    after_peak = max((row["oracle_peak_kW"] for row in monthly_billing), default=0.0)
-    before_demand = sum(row["baseline_demand_charge_vnd"] for row in monthly_billing)
-    after_demand = sum(row["oracle_demand_charge_vnd"] for row in monthly_billing)
+    before_peak = max((day["peak_grid_kW"] for day in base_days), default=0.0)
+    after_peak = max((day.get("peak_grid_kW", 0.0) for day in solved_days), default=0.0)
+    before_demand = _demand_charge(parameters, before_peak)
+    after_demand = _demand_charge(parameters, after_peak)
     oracle_saving = (before_energy + before_demand) - (after_energy + after_demand + wear_cost)
     seer_factor = _clamp(_to_float(parameters.get("billing_real_saving_factor"), 1.0), 0.0, 1.0)
-    oracle_annual_saving = (
-        sum(monthly_savings) / len(monthly_savings) * 12.0
-        if monthly_savings
-        else 0.0
-    )
-    seer_annual_saving = oracle_annual_saving * seer_factor
 
     return {
         "solved_day_count": len(solved_days),
-        "month_count": len(monthly_billing),
-        "monthly_billing": monthly_billing,
         "total_grid_kWh": round(sum(day.get("grid_kWh", 0.0) for day in solved_days), 2),
         "total_discharged_kWh": round(sum(day.get("discharged_kWh", 0.0) for day in solved_days), 2),
         "peak_grid_kW": round(after_peak, 2),
@@ -427,51 +303,7 @@ def _build_summary(base_days, oracle_days, parameters, dt):
         "total_bill_vnd": round(after_energy + after_demand + wear_cost),
         "oracle_saving_vnd": round(oracle_saving),
         "seer_saving_vnd": round(max(0.0, oracle_saving) * seer_factor),
-        "oracle_annual_saving_vnd": round(oracle_annual_saving),
-        "seer_annual_saving_vnd": round(seer_annual_saving),
         "seer_factor": seer_factor,
-        "sizing_economics": _build_sizing_economics(
-            parameters,
-            seer_annual_saving,
-            after_peak,
-            oracle_annual_saving,
-        ),
-    }
-
-
-def _build_sizing_economics(parameters, annual_saving, oracle_peak_kW, oracle_annual_saving=None):
-    capacity = max(0.0, _to_float(parameters.get("battery_capacity_kWh"), 0.0))
-    power_limit = max(0.0, _to_float(parameters.get("battery_power_limit_kW"), 0.0))
-    battery_cost = (
-        capacity * _to_float(parameters.get("billing_battery_per_kWh"), 0.0)
-        + power_limit * _to_float(parameters.get("billing_battery_per_kW"), 0.0)
-    )
-    annual_maintenance = battery_cost * max(0.0, _to_float(parameters.get("billing_yearly_maintain_percentage"), 0.0))
-    annual_net_cashflow = annual_saving - annual_maintenance
-    project_years = max(0, int(round(_to_float(parameters.get("billing_years"), 0.0))))
-    discount_rate = max(0.0, _to_float(parameters.get("billing_discount_rate"), 0.0))
-    discounted_cashflow = 0.0
-    for year in range(1, project_years + 1):
-        discounted_cashflow += annual_net_cashflow / ((1.0 + discount_rate) ** year)
-
-    payback_years = None
-    if annual_net_cashflow > FLOAT_EPSILON:
-        payback_years = battery_cost / annual_net_cashflow
-
-    return {
-        "battery_capacity_kWh": round(capacity, 2),
-        "battery_power_limit_kW": round(power_limit, 2),
-        "oracle_annual_saving_vnd": round(oracle_annual_saving if oracle_annual_saving is not None else annual_saving),
-        "annual_saving_vnd": round(annual_saving),
-        "annual_saving_million_vnd": round(annual_saving / 1_000_000.0, 2),
-        "annual_maintenance_vnd": round(annual_maintenance),
-        "annual_net_cashflow_vnd": round(annual_net_cashflow),
-        "npv_vnd": round(-battery_cost + discounted_cashflow),
-        "npv_billion_vnd": round((-battery_cost + discounted_cashflow) / 1_000_000_000.0, 3),
-        "payback_years": None if payback_years is None else round(payback_years, 2),
-        "oracle_peak_kW": round(oracle_peak_kW, 2),
-        "recommended_contract_max_kW": round(oracle_peak_kW * 1.05, 2),
-        "pareto_status": "Yes (single case)",
     }
 
 
@@ -479,13 +311,6 @@ def _attach_month_peaks(days, dt):
     month_peaks = _month_peaks(days, dt)
     for day in days:
         day["month_peak"] = month_peaks.get(_month_start_day(day["day_index"]))
-
-
-def _days_by_month(days):
-    grouped = {}
-    for day in days:
-        grouped.setdefault(_month_start_day(day["day_index"]), []).append(day)
-    return grouped
 
 
 def _no_battery_result(days, parameters, dt):
@@ -558,16 +383,6 @@ def _demand_windows(steps, dt):
     return [_demand_window(step, steps, dt) for step in range(steps)]
 
 
-def _full_demand_windows(steps, dt):
-    window_steps = max(1, int(round(DEMAND_WINDOW_HOURS / dt)))
-    if steps < window_steps:
-        return [_demand_window(0, steps, dt)] if steps else []
-    return [
-        [(step + offset, 1.0 / window_steps) for offset in range(window_steps)]
-        for step in range(steps - window_steps + 1)
-    ]
-
-
 def _demand_window(start, steps, dt):
     available_hours = max(0.0, (steps - start) * dt)
     window_hours = min(DEMAND_WINDOW_HOURS, available_hours)
@@ -599,18 +414,9 @@ def _rolling_30_minute_average(values, dt):
     return averages
 
 
-def _full_rolling_30_minute_average(values, dt):
-    averages = []
-    for window in _full_demand_windows(len(values), dt):
-        averages.append(sum(values[step] * weight for step, weight in window))
-    return averages
-
-
 def _empty_summary():
     return {
         "solved_day_count": 0,
-        "month_count": 0,
-        "monthly_billing": [],
         "total_grid_kWh": 0,
         "total_discharged_kWh": 0,
         "peak_grid_kW": 0,
@@ -621,24 +427,7 @@ def _empty_summary():
         "total_bill_vnd": 0,
         "oracle_saving_vnd": 0,
         "seer_saving_vnd": 0,
-        "oracle_annual_saving_vnd": 0,
-        "seer_annual_saving_vnd": 0,
         "seer_factor": 0,
-        "sizing_economics": {
-            "battery_capacity_kWh": 0,
-            "battery_power_limit_kW": 0,
-            "oracle_annual_saving_vnd": 0,
-            "annual_saving_vnd": 0,
-            "annual_saving_million_vnd": 0,
-            "annual_maintenance_vnd": 0,
-            "annual_net_cashflow_vnd": 0,
-            "npv_vnd": 0,
-            "npv_billion_vnd": 0,
-            "payback_years": None,
-            "oracle_peak_kW": 0,
-            "recommended_contract_max_kW": 0,
-            "pareto_status": "No oracle result",
-        },
     }
 
 
