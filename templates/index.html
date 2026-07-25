@@ -501,6 +501,36 @@
       border-bottom: 0;
     }
 
+    .oracle-progress {
+      background: #0b1117;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      color: #cbd5e1;
+      display: grid;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      gap: 4px;
+      line-height: 1.45;
+      margin: 8px 0 12px;
+      max-height: 130px;
+      overflow-y: auto;
+      padding: 9px 10px;
+    }
+
+    .oracle-progress strong {
+      color: #e0f2fe;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      font-size: 12px;
+    }
+
+    .oracle-progress .done {
+      color: #86efac;
+    }
+
+    .oracle-progress .error {
+      color: #fca5a5;
+    }
+
     .formula.tight {
       line-height: 1.55;
       white-space: pre-wrap;
@@ -538,6 +568,7 @@
         <label><span class="field-name">Discharge efficiency<span class="hint" tabindex="0" data-tip="DischargeEfficiency: the fraction of stored energy that comes back out usefully. 0.95 means 95% reaches the load.">?</span></span><input type="number" id="tf-deff" name="discharge_efficiency" step="0.01" min="0"
             max="1" value="{{ discharge_efficiency }}"></label>
         <label><span class="field-name">Time step dt (h)<span class="hint" tabindex="0" data-tip="dt: how long one CSV step lasts, in hours. 0.25 means one row is 15 minutes, so four rows make one hour.">?</span></span><input type="number" id="tf-dt" name="dt" step="0.01" min="0" value="{{ dt }}"></label>
+        <button id="btn-custom-battery" class="primary" type="submit" name="form_action" value="calculate">Select this custom battery</button>
       </div>
       <div class="sample-row">
         <label><span class="field-name">Sample batteries<span class="hint" tabindex="0" data-tip="Pick from the project sample grid: energy sizes 250, 500, 750, 1000, 1250 kWh and power ratios 0.35, 0.50, 0.70 times capacity.">?</span></span>
@@ -610,7 +641,8 @@
             value="{{ billing_years }}"></label>
         <label><span class="field-name">Real-world savings factor<span class="hint" tabindex="0" data-tip="Reduces ideal oracle savings into realistic expected savings. 0.60 means count 60% of the perfect result.">?</span></span><input type="number" id="tf-real" name="billing_real_saving_factor" step="0.05"
             min="0.1" max="1" value="{{ billing_real_saving_factor }}"></label>
-        <button id="btn-tf-save" class="primary" type="submit">Save bill and finance inputs</button>
+        <button id="btn-tf-save" class="primary" type="submit" name="form_action" value="save">Save bill and finance inputs</button>
+        <button id="btn-calculate" class="secondary" type="submit" name="form_action" value="calculate">Calculate</button>
       </div>
       <div class="info">Real-world savings factor means: if Oracle says the battery can save 100, the real controller
         may
@@ -618,6 +650,10 @@
         DRL policy should be trained again.</div>
       {% if saved %}<div class="info saved">Saved bill and finance inputs.</div>{% endif %}
       <div id="tariff-info" class="info"></div>
+      <div class="oracle-progress" id="oracle-progress" role="status" aria-live="polite">
+        <strong>Battery calculation progress</strong>
+        <span>Waiting to start...</span>
+      </div>
     </form>
 
     <div class="dashboard-grid">
@@ -705,18 +741,17 @@
               <th>Pareto frontier?</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody id="sizing-table-body">
             {% for candidate in candidate_oracles %}
-              {% set sizing = candidate.oracle.summary.sizing_economics %}
-              <tr>
+              <tr data-candidate-index="{{ loop.index0 }}">
                 <td>{{ candidate.label }}</td>
-                <td>{{ "{:,.0f}".format(sizing.battery_capacity_kWh) }}</td>
-                <td>{{ "{:,.1f}".format(sizing.battery_power_limit_kW) }}</td>
-                <td>{{ "{:,.2f}".format(sizing.annual_saving_million_vnd) }}</td>
-                <td>{{ "{:,.3f}".format(sizing.npv_billion_vnd) }}</td>
-                <td>{{ "Never" if sizing.payback_years is none else "{:,.2f}".format(sizing.payback_years) }}</td>
-                <td>{{ "{:,.1f}".format(sizing.recommended_contract_max_kW) }} kW ({{ "{:,.1f}".format(sizing.oracle_peak_kW) }} + 5%)</td>
-                <td>{{ sizing.pareto_status }}</td>
+                <td>{{ "{:,.0f}".format(candidate.battery_capacity_kWh) }}</td>
+                <td>{{ "{:,.1f}".format(candidate.battery_power_limit_kW) }}</td>
+                <td data-sizing-cell="annual">...</td>
+                <td data-sizing-cell="npv">...</td>
+                <td data-sizing-cell="payback">...</td>
+                <td data-sizing-cell="contract">...</td>
+                <td data-sizing-cell="pareto">...</td>
               </tr>
             {% endfor %}
           </tbody>
@@ -740,7 +775,7 @@ If Annual net cashflow is zero or negative, payback shows Never.
 Contract cap recommendation = Oracle post-battery highest monthly peak * 1.05
 That 5% is a small buffer above the oracle peak, because real controllers are not magical future-seeing robots.
 
-Pareto frontier? = whether this candidate is non-dominated among all sample batteries options.</pre>
+Pareto frontier? = whether this candidate is non-dominated among the selected custom battery options.</pre>
       </div>
       </section>
     </div>
@@ -841,6 +876,7 @@ for t = 0 ... 95
     const oracle = {{ oracle | tojson }};
     const candidateOracles = {{ candidate_oracles | tojson }};
     const selectedCandidateIndex = {{ selected_candidate_index | tojson }};
+    const shouldRunCandidateCalculation = {{ should_calculate | tojson }};
     const daySelect = document.getElementById("benchmark-day");
     const benchmarkBatterySelect = document.getElementById("benchmark-battery");
     const chart = document.getElementById("benchmark-chart");
@@ -850,8 +886,11 @@ for t = 0 ... 95
     const ctx = chart.getContext("2d");
     const sampleBatterySelect = document.getElementById("sample-battery");
     const sampleBatteryButton = document.getElementById("btn-sample-battery");
+    const calculateButton = document.getElementById("btn-calculate");
     const batteryCapacityInput = document.getElementById("tf-bcap");
     const batteryPowerInput = document.getElementById("tf-bpow");
+    const oracleProgress = document.getElementById("oracle-progress");
+    const sizingTableBody = document.getElementById("sizing-table-body");
 
     const sampleBatteryCandidates = {{ sample_battery_candidates | tojson }};
 
@@ -870,6 +909,7 @@ for t = 0 ... 95
     ];
     const activeSeries = Object.fromEntries(seriesStyles.map((series) => [series.key, true]));
     let chartState = null;
+    let isCalculating = false;
 
     function formatNumber(value, digits = 0) {
       return Number(value).toLocaleString(undefined, {
@@ -929,7 +969,7 @@ for t = 0 ... 95
         const candidate = sampleBatteryCandidates[Number(sampleBatterySelect.value || 0)];
         batteryCapacityInput.value = candidate.battery_capacity_kWh;
         batteryPowerInput.value = candidate.battery_power_limit_kW;
-        sampleBatteryButton.closest("form").requestSubmit();
+        sampleBatteryButton.closest("form").requestSubmit(calculateButton || undefined);
       });
     }
 
@@ -945,6 +985,126 @@ for t = 0 ... 95
       const element = document.getElementById(id);
       if (element) {
         element.textContent = value;
+      }
+    }
+
+    function appendProgress(message, className = "") {
+      const line = document.createElement("span");
+      line.textContent = message;
+      if (className) {
+        line.className = className;
+      }
+      oracleProgress.appendChild(line);
+      oracleProgress.scrollTop = oracleProgress.scrollHeight;
+    }
+
+    function resetProgress() {
+      oracleProgress.innerHTML = "<strong>Battery calculation progress</strong>";
+    }
+
+    function sizingCell(index, name) {
+      const row = sizingTableBody.querySelector(`[data-candidate-index="${index}"]`);
+      return row ? row.querySelector(`[data-sizing-cell="${name}"]`) : null;
+    }
+
+    function setSizingCell(index, name, value) {
+      const cell = sizingCell(index, name);
+      if (cell) {
+        cell.textContent = value;
+      }
+    }
+
+    function updateSizingRow(index, candidate) {
+      const sizing = candidate.oracle.summary.sizing_economics || {};
+      setSizingCell(index, "annual", formatNumber(sizing.annual_saving_million_vnd || 0, 2));
+      setSizingCell(index, "npv", formatNumber(sizing.npv_billion_vnd || 0, 3));
+      setSizingCell(index, "payback", sizing.payback_years == null ? "Never" : formatNumber(sizing.payback_years, 2));
+      setSizingCell(
+        index,
+        "contract",
+        `${formatNumber(sizing.recommended_contract_max_kW || 0, 1)} kW (${formatNumber(sizing.oracle_peak_kW || 0, 1)} + 5%)`
+      );
+    }
+
+    function updateParetoStatus() {
+      const economics = candidateOracles.map((candidate) => (
+        candidate.oracle && candidate.oracle.summary
+          ? candidate.oracle.summary.sizing_economics || null
+          : null
+      ));
+
+      if (economics.some((sizing) => !sizing || sizing.pareto_status === "...")) {
+        return;
+      }
+
+      economics.forEach((sizing, index) => {
+        const annualSaving = Number(sizing.annual_saving_vnd || 0);
+        const npv = Number(sizing.npv_vnd || 0);
+        const dominated = economics.some((other, otherIndex) => (
+          otherIndex !== index
+          && Number(other.annual_saving_vnd || 0) >= annualSaving
+          && Number(other.npv_vnd || 0) >= npv
+          && (
+            Number(other.annual_saving_vnd || 0) > annualSaving
+            || Number(other.npv_vnd || 0) > npv
+          )
+        ));
+        const status = dominated ? "No" : "Yes";
+        sizing.pareto_status = status;
+        setSizingCell(index, "pareto", status);
+      });
+    }
+
+    async function loadCandidateOracles() {
+      if (isCalculating) {
+        return;
+      }
+
+      isCalculating = true;
+      if (calculateButton) {
+        calculateButton.disabled = true;
+        calculateButton.textContent = "Calculating...";
+      }
+
+      resetProgress();
+      appendProgress(`Starting ${candidateOracles.length} battery calculations...`);
+
+      try {
+        for (let index = 0; index < candidateOracles.length; index += 1) {
+          const label = candidateOracles[index].label;
+          appendProgress(`[${index + 1}/${candidateOracles.length}] Calculating ${label}`);
+          try {
+            const response = await fetch(`/candidate-oracle/${index}?t=${Date.now()}`);
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+            const payload = await response.json();
+            candidateOracles[payload.index] = payload.candidate;
+            updateSizingRow(payload.index, payload.candidate);
+            appendProgress(`[${payload.index + 1}/${candidateOracles.length}] Done ${payload.candidate.label}`, "done");
+
+            if (Number(benchmarkBatterySelect.value || 0) === payload.index) {
+              hideTooltip();
+              drawBenchmark();
+            }
+          } catch (error) {
+            appendProgress(`[${index + 1}/${candidateOracles.length}] Failed ${label}: ${error.message}`, "error");
+            setSizingCell(index, "annual", "Error");
+            setSizingCell(index, "npv", "Error");
+            setSizingCell(index, "payback", "Error");
+            setSizingCell(index, "contract", "Error");
+            setSizingCell(index, "pareto", "Error");
+          }
+        }
+
+        updateParetoStatus();
+        appendProgress("All battery calculations finished.", "done");
+      } finally {
+        isCalculating = false;
+        if (calculateButton) {
+          calculateButton.disabled = false;
+          calculateButton.textContent = "Calculate";
+        }
       }
     }
 
@@ -1312,6 +1472,9 @@ for t = 0 ... 95
       drawBenchmark();
     });
     drawBenchmark();
+    if (shouldRunCandidateCalculation) {
+      loadCandidateOracles();
+    }
   </script>
 </body>
 
