@@ -1,5 +1,7 @@
 from flask import Flask, Response, jsonify, render_template, request
 
+import dispatch_runner
+import dispatch_store
 from benchmark import build_benchmark
 from oracle_lp import build_oracle_lp
 from settings import (
@@ -89,6 +91,78 @@ def training_job_events(job_id):
     return Response(MANAGER.sse_events(job_id), mimetype="text/event-stream")
 
 
+@app.route("/api/dispatch/policies", methods=["GET"])
+def dispatch_policies():
+    latest = dispatch_store.latest_runs_by_policy()
+    rows = []
+    for checkpoint in list_checkpoints():
+        run = latest.get(checkpoint["name"])
+        rows.append(
+            {
+                **checkpoint,
+                "latest_run": run,
+                "latest_status": "saved" if run else "no saved trace",
+                "has_trace": bool(run and dispatch_store.get_traces(run["id"])),
+                "warning": None if run else "No saved trace exists for this policy yet.",
+            }
+        )
+    return jsonify({"policies": rows})
+
+
+@app.route("/api/dispatch/runs", methods=["GET"])
+def dispatch_runs():
+    return jsonify({"runs": dispatch_store.list_runs()})
+
+
+@app.route("/api/dispatch/policy-traces", methods=["GET"])
+def dispatch_policy_traces():
+    policy_names = _policy_names_from_query()
+    payload = {}
+    warnings = []
+    for policy_name in policy_names:
+        run = dispatch_store.latest_run_for_policy(policy_name)
+        if not run:
+            warning = f"{policy_name}: no saved trace exists yet."
+            warnings.append(warning)
+            payload[policy_name] = {"warning": warning, "days": []}
+            continue
+        traces = dispatch_store.get_traces(run["id"])
+        if not traces or policy_name not in traces:
+            warning = f"{policy_name}: saved trace is missing or malformed."
+            warnings.append(warning)
+            payload[policy_name] = {"warning": warning, "run_id": run["id"], "days": []}
+            continue
+        payload[policy_name] = {
+            "run_id": run["id"],
+            "days": traces.get(policy_name, []),
+            "kpi": run.get("kpi", {}).get(policy_name, {}),
+        }
+    return jsonify({"policies": payload, "warnings": warnings})
+
+
+@app.route("/api/dispatch/run", methods=["POST"])
+def dispatch_run():
+    payload = request.get_json(silent=True) or {}
+    policy_names = payload.get("policies") or []
+    if not isinstance(policy_names, list) or not policy_names:
+        return jsonify({"error": "Select at least one policy."}), 422
+
+    known = {checkpoint["name"] for checkpoint in list_checkpoints()}
+    unknown = [name for name in policy_names if name not in known]
+    if unknown:
+        return jsonify({"error": f"Unknown local policy: {', '.join(unknown)}"}), 422
+
+    results, warnings = dispatch_runner.run_policies(policy_names, PARAMETERS)
+    if not results:
+        return jsonify({"error": "No selected policy produced a dispatch trace.", "warnings": warnings}), 422
+    run_id = dispatch_store.save_run(
+        "Sizing Demo dispatch",
+        {"policies": list(results), "parameters": PARAMETERS},
+        results,
+    )
+    return jsonify({"run_id": run_id, "policies": list(results), "warnings": warnings})
+
+
 def _parameters_from_form():
     values = {
         field: request.form.get(field, "")
@@ -100,6 +174,16 @@ def _parameters_from_form():
     )
     values[BILLING_SUNDAY_FIELD] = BILLING_SUNDAY_FIELD in request.form
     return values
+
+
+def _policy_names_from_query():
+    raw = request.args.get("policies", "")
+    names = []
+    for name in raw.split(","):
+        clean = name.strip()
+        if clean:
+            names.append(clean)
+    return names
 
 
 def view_context():

@@ -565,6 +565,17 @@
       white-space: pre-wrap;
     }
 
+    .warning-panel {
+      background: #2a1f12;
+      border: 1px solid #854d0e;
+      border-radius: 8px;
+      color: #fed7aa;
+      display: none;
+      line-height: 1.5;
+      margin-top: 10px;
+      padding: 9px 11px;
+    }
+
     .training-chart {
       background: #0b1117;
       border: 1px solid #334155;
@@ -601,6 +612,7 @@
     <nav class="tabs" aria-label="Sizing Demo sections">
       <button class="tab-button active" type="button" data-tab-target="sizing-demo">Sizing Demo</button>
       <button class="tab-button" type="button" data-tab-target="training-lab">Training Lab</button>
+      <button class="tab-button" type="button" data-tab-target="dispatch-viewer">Dispatch Viewer</button>
     </nav>
 
     <section id="tab-sizing-demo" class="tab-panel active">
@@ -985,6 +997,51 @@ for t = 0 ... 95
         </section>
       </div>
     </section>
+
+    <section id="tab-dispatch-viewer" class="tab-panel">
+      <div class="dashboard-grid">
+        <section class="card">
+          <div class="section-head">
+            <h2>Dispatch Viewer</h2>
+            <div class="row">
+              <label>Day
+                <select id="dispatch-day"></select>
+              </label>
+              <label>Battery
+                <select id="dispatch-battery"></select>
+              </label>
+              <button id="btn-dispatch-run" class="primary" type="button">Create saved run for selected policies</button>
+            </div>
+          </div>
+          <div class="chart-wrap">
+            <canvas id="dispatch-chart"></canvas>
+            <div class="chart-tooltip" id="dispatch-tooltip" role="status" aria-live="polite"></div>
+          </div>
+          <div class="legend" id="dispatch-legend" aria-label="Dispatch chart line visibility controls"></div>
+          <div id="dispatch-day-info" class="info"></div>
+          <div id="dispatch-warnings" class="warning-panel" role="status" aria-live="polite"></div>
+        </section>
+
+        <section class="card">
+          <h2>Policies</h2>
+          <div class="sizing-table-wrap">
+            <table class="sizing-table">
+              <thead>
+                <tr>
+                  <th>Select</th>
+                  <th>Policy</th>
+                  <th>Algo</th>
+                  <th>E/P</th>
+                  <th>Latest run</th>
+                  <th>Warning</th>
+                </tr>
+              </thead>
+              <tbody id="dispatch-policy-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </section>
   </main>
 
   <script>
@@ -999,6 +1056,16 @@ for t = 0 ... 95
     const dayInfo = document.getElementById("benchmark-day-info");
     const legend = document.getElementById("benchmark-legend");
     const tooltip = document.getElementById("benchmark-tooltip");
+    const dispatchDaySelect = document.getElementById("dispatch-day");
+    const dispatchBatterySelect = document.getElementById("dispatch-battery");
+    const dispatchChart = document.getElementById("dispatch-chart");
+    const dispatchCtx = dispatchChart.getContext("2d");
+    const dispatchDayInfo = document.getElementById("dispatch-day-info");
+    const dispatchLegend = document.getElementById("dispatch-legend");
+    const dispatchTooltip = document.getElementById("dispatch-tooltip");
+    const dispatchPolicyTableBody = document.getElementById("dispatch-policy-table-body");
+    const dispatchRunButton = document.getElementById("btn-dispatch-run");
+    const dispatchWarnings = document.getElementById("dispatch-warnings");
     const ctx = chart.getContext("2d");
     const sampleBatterySelect = document.getElementById("sample-battery");
     const useSampleBatterySelect = document.getElementById("use-sample-battery");
@@ -1024,6 +1091,12 @@ for t = 0 ... 95
       { key: "oracle_soc", label: "SOC %", color: "#fde047", soc: true },
     ];
     const activeSeries = Object.fromEntries(seriesStyles.map((series) => [series.key, true]));
+    const dispatchActiveSeries = Object.fromEntries(seriesStyles.map((series) => [series.key, true]));
+    const dispatchSelectedPolicies = new Set();
+    const dispatchPolicyColors = ["#22d3ee", "#fb7185", "#a78bfa", "#facc15", "#4ade80", "#f97316", "#60a5fa", "#f472b6"];
+    let dispatchPolicies = [];
+    let dispatchPolicyTraces = {};
+    let dispatchChartState = null;
     let chartState = null;
     let isCalculating = false;
 
@@ -1040,6 +1113,7 @@ for t = 0 ... 95
         option.value = index;
         option.textContent = `Day ${day.day_index} (${day.day_type})`;
         daySelect.appendChild(option);
+        dispatchDaySelect.appendChild(option.cloneNode(true));
       });
     }
 
@@ -1052,6 +1126,7 @@ for t = 0 ... 95
           option.selected = true;
         }
         benchmarkBatterySelect.appendChild(option);
+        dispatchBatterySelect.appendChild(option.cloneNode(true));
       });
     }
 
@@ -1107,6 +1182,14 @@ for t = 0 ... 95
       chart.width = Math.round(rect.width * scale);
       chart.height = Math.round(rect.height * scale);
       ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    }
+
+    function resizeDispatchCanvas() {
+      const rect = dispatchChart.getBoundingClientRect();
+      const scale = window.devicePixelRatio || 1;
+      dispatchChart.width = Math.round(rect.width * scale);
+      dispatchChart.height = Math.round(rect.height * scale);
+      dispatchCtx.setTransform(scale, 0, 0, scale, 0, 0);
     }
 
     function setText(id, value) {
@@ -1610,6 +1693,349 @@ for t = 0 ... 95
       ctx.restore();
     }
 
+    function dispatchPolicyBaseColor(policyName) {
+      let hash = 0;
+      for (let i = 0; i < policyName.length; i += 1) {
+        hash = ((hash << 5) - hash + policyName.charCodeAt(i)) | 0;
+      }
+      return dispatchPolicyColors[Math.abs(hash) % dispatchPolicyColors.length];
+    }
+
+    function policyPrefix(name) {
+      return name.replace(/^policy_/, "").replace(/\.pt$/, "");
+    }
+
+    function selectedPolicyNames() {
+      return Array.from(dispatchSelectedPolicies);
+    }
+
+    function dispatchSeriesStyles() {
+      const styles = seriesStyles.map((series) => ({ ...series }));
+      selectedPolicyNames().forEach((policyName) => {
+        const label = policyPrefix(policyName);
+        const base = dispatchPolicyBaseColor(policyName);
+        styles.push(
+          { key: `policy:${policyName}:peak`, label: `${label} monthly DEADLY peak`, color: base, policyName, policyReference: true },
+          { key: `policy:${policyName}:grid`, label: `${label} grid after battery`, color: base, policyName, policyKey: "grid" },
+          { key: `policy:${policyName}:rolling_grid`, label: `${label} 30-minute rolling grid`, color: "#fda4af", policyName, policyKey: "rolling_grid" },
+          { key: `policy:${policyName}:discharge`, label: `${label} battery discharge`, color: "#fdba74", policyName, policyKey: "discharge" },
+          { key: `policy:${policyName}:charge`, label: `${label} battery charge`, color: "#67e8f9", policyName, policyCharge: true },
+          { key: `policy:${policyName}:soc`, label: `${label} SOC %`, color: "#fde047", policyName, policySoc: true },
+        );
+      });
+      styles.forEach((series) => {
+        if (dispatchActiveSeries[series.key] === undefined) {
+          dispatchActiveSeries[series.key] = true;
+        }
+      });
+      return styles;
+    }
+
+    function policyDay(policyName, dayIndex) {
+      const trace = dispatchPolicyTraces[policyName];
+      if (!trace || !Array.isArray(trace.days)) {
+        return null;
+      }
+      return trace.days.find((day) => day.day_index === dayIndex) || null;
+    }
+
+    function valuesForMax(series, day, oracleDay) {
+      if (series.reference) return [day.month_peak.value_kW];
+      if (series.oracleReference && oracleDay && oracleDay.month_peak) return [oracleDay.month_peak.value_kW];
+      if (series.oracleCharge && oracleDay) return combineCharge(oracleDay);
+      if (series.oracleKey && oracleDay) return oracleDay[series.oracleKey] || [];
+      if (series.soc || series.policySoc) return [];
+      if (series.policyName) {
+        const pDay = policyDay(series.policyName, day.day_index);
+        if (!pDay) return [];
+        if (series.policyReference && pDay.month_peak) return [pDay.month_peak.value_kW];
+        if (series.policyCharge) return combineCharge(pDay);
+        if (series.policyKey) return pDay[series.policyKey] || [];
+        return [];
+      }
+      return day[series.key] || [];
+    }
+
+    function drawDispatchLine(values, color, padding, plotWidth, plotHeight, maxY, dash = []) {
+      if (!values.length) return;
+      dispatchCtx.save();
+      dispatchCtx.strokeStyle = color;
+      dispatchCtx.lineWidth = 2;
+      dispatchCtx.setLineDash(dash);
+      dispatchCtx.beginPath();
+      values.forEach((value, index) => {
+        const x = padding.left + plotWidth * index / Math.max(1, values.length - 1);
+        const y = padding.top + plotHeight * (1 - value / maxY);
+        if (index === 0) dispatchCtx.moveTo(x, y);
+        else dispatchCtx.lineTo(x, y);
+      });
+      dispatchCtx.stroke();
+      dispatchCtx.restore();
+    }
+
+    function drawDispatchGrid(width, height, padding, plotWidth, plotHeight, maxY) {
+      dispatchCtx.strokeStyle = "#263241";
+      dispatchCtx.lineWidth = 1;
+      dispatchCtx.fillStyle = "#8496a8";
+      dispatchCtx.font = "12px Segoe UI, system-ui, sans-serif";
+      for (let tick = 0; tick <= 4; tick += 1) {
+        const y = padding.top + plotHeight * tick / 4;
+        const value = maxY * (1 - tick / 4);
+        dispatchCtx.beginPath();
+        dispatchCtx.moveTo(padding.left, y);
+        dispatchCtx.lineTo(width - padding.right, y);
+        dispatchCtx.stroke();
+        dispatchCtx.fillText(formatNumber(value), 10, y + 4);
+      }
+      [0, 6, 12, 18, 24].forEach((hour) => {
+        const x = padding.left + plotWidth * hour / 24;
+        dispatchCtx.beginPath();
+        dispatchCtx.moveTo(x, padding.top);
+        dispatchCtx.lineTo(x, height - padding.bottom);
+        dispatchCtx.stroke();
+        dispatchCtx.fillText(`${hour}:00`, x - 12, height - 18);
+      });
+      dispatchCtx.fillText("kW", 12, 18);
+      dispatchCtx.fillText("SOC %", width - 54, 18);
+      [0, 50, 100].forEach((value) => {
+        const y = padding.top + plotHeight * (1 - value / 100);
+        dispatchCtx.fillText(String(value), width - 42, y + 4);
+      });
+    }
+
+    function drawDispatchPeakLine(series, pDay, padding, plotWidth, plotHeight, maxY) {
+      const peak = pDay.month_peak;
+      if (!peak) return;
+      const value = peak.value_kW;
+      const y = padding.top + plotHeight * (1 - value / maxY);
+      dispatchCtx.save();
+      dispatchCtx.strokeStyle = series.color;
+      dispatchCtx.lineWidth = 2;
+      dispatchCtx.setLineDash(series.policyReference ? [3, 6] : [4, 5]);
+      dispatchCtx.beginPath();
+      dispatchCtx.moveTo(padding.left, y);
+      dispatchCtx.lineTo(padding.left + plotWidth, y);
+      dispatchCtx.stroke();
+      dispatchCtx.fillStyle = series.color;
+      dispatchCtx.font = "700 12px Segoe UI, system-ui, sans-serif";
+      dispatchCtx.fillText(`${series.label}: ${formatNumber(value, 1)} kW`, padding.left + 8, Math.max(18, y - 7));
+      dispatchCtx.restore();
+    }
+
+    function drawDispatchSoc(values, color, width, padding, plotWidth, plotHeight) {
+      if (!values.length) return;
+      dispatchCtx.save();
+      dispatchCtx.strokeStyle = color;
+      dispatchCtx.lineWidth = 2;
+      dispatchCtx.setLineDash([2, 4]);
+      dispatchCtx.beginPath();
+      values.forEach((value, index) => {
+        const x = padding.left + plotWidth * index / Math.max(1, values.length - 1);
+        const y = padding.top + plotHeight * (1 - value / 100);
+        if (index === 0) dispatchCtx.moveTo(x, y);
+        else dispatchCtx.lineTo(x, y);
+      });
+      dispatchCtx.stroke();
+      dispatchCtx.restore();
+    }
+
+    function drawDispatchViewer() {
+      if (!benchmark.days.length) return;
+      resizeDispatchCanvas();
+      const selectedCandidate = candidateOracles[Number(dispatchBatterySelect.value || 0)] || candidateOracles[0];
+      const activeOracle = selectedCandidate ? selectedCandidate.oracle : oracle;
+      const oracleDaysByIndex = new Map((activeOracle.days || []).map((day) => [day.day_index, day]));
+      const day = benchmark.days[Number(dispatchDaySelect.value || 0)];
+      const oracleDay = oracleDaysByIndex.get(day.day_index);
+      const rect = dispatchChart.getBoundingClientRect();
+      const width = rect.width;
+      const height = rect.height;
+      const padding = { top: 46, right: 18, bottom: 44, left: 58 };
+      const plotWidth = width - padding.left - padding.right;
+      const plotHeight = height - padding.top - padding.bottom;
+      const visibleSeries = dispatchSeriesStyles().filter((series) => dispatchActiveSeries[series.key]);
+      const maxY = Math.max(1, ...visibleSeries.flatMap((series) => valuesForMax(series, day, oracleDay))) * 1.08;
+
+      dispatchCtx.clearRect(0, 0, width, height);
+      dispatchCtx.fillStyle = "#111922";
+      dispatchCtx.fillRect(0, 0, width, height);
+      drawDispatchGrid(width, height, padding, plotWidth, plotHeight, maxY);
+
+      visibleSeries
+        .filter((series) => !series.reference && !series.oracleReference && !series.soc && !series.policyReference && !series.policySoc)
+        .forEach((series) => {
+          const pDay = series.policyName ? policyDay(series.policyName, day.day_index) : null;
+          if (series.policyCharge && pDay) drawDispatchLine(combineCharge(pDay), series.color, padding, plotWidth, plotHeight, maxY, [3, 4]);
+          else if (series.policyKey && pDay) drawDispatchLine(pDay[series.policyKey] || [], series.color, padding, plotWidth, plotHeight, maxY, [5, 5]);
+          else if (series.oracleCharge && oracleDay) drawDispatchLine(combineCharge(oracleDay), series.color, padding, plotWidth, plotHeight, maxY, [3, 4]);
+          else if (series.oracleKey && oracleDay) drawDispatchLine(oracleDay[series.oracleKey], series.color, padding, plotWidth, plotHeight, maxY, [6, 4]);
+          else if (!series.oracleKey && !series.oracleCharge && !series.policyName) drawDispatchLine(day[series.key], series.color, padding, plotWidth, plotHeight, maxY);
+        });
+      visibleSeries.filter((series) => series.reference).forEach((series) => drawDispatchPeakLine(series, day, padding, plotWidth, plotHeight, maxY));
+      visibleSeries.filter((series) => series.oracleReference && oracleDay && oracleDay.month_peak).forEach((series) => drawDispatchPeakLine(series, oracleDay, padding, plotWidth, plotHeight, maxY));
+      visibleSeries.filter((series) => series.policyReference).forEach((series) => {
+        const pDay = policyDay(series.policyName, day.day_index);
+        if (pDay) drawDispatchPeakLine(series, pDay, padding, plotWidth, plotHeight, maxY);
+      });
+      visibleSeries.filter((series) => series.soc && oracleDay).forEach((series) => drawDispatchSoc(oracleDay.soc || [], series.color, width, padding, plotWidth, plotHeight));
+      visibleSeries.filter((series) => series.policySoc).forEach((series) => {
+        const pDay = policyDay(series.policyName, day.day_index);
+        if (pDay) drawDispatchSoc(pDay.soc || [], series.color, width, padding, plotWidth, plotHeight);
+      });
+
+      const overlays = selectedPolicyNames().filter((name) => policyDay(name, day.day_index)).length;
+      dispatchDayInfo.textContent = `Day ${day.day_index}, ${selectedCandidate.label}: baseline/oracle context matches Sizing Demo. Policy overlays visible for ${overlays} selected policy trace${overlays === 1 ? "" : "s"}.`;
+      dispatchChartState = { day, oracleDay, padding, plotWidth, plotHeight, width, height, visibleSeries };
+    }
+
+    function renderDispatchLegend() {
+      dispatchLegend.innerHTML = dispatchSeriesStyles().map((series) => (
+        `<button class="legend-item" type="button" data-dispatch-series="${series.key}" aria-pressed="${dispatchActiveSeries[series.key]}">` +
+        `<span class="swatch" style="background:${series.color};color:${series.color}"></span>${series.label}</button>`
+      )).join("");
+      dispatchLegend.querySelectorAll("[data-dispatch-series]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const key = button.dataset.dispatchSeries;
+          dispatchActiveSeries[key] = !dispatchActiveSeries[key];
+          button.setAttribute("aria-pressed", String(dispatchActiveSeries[key]));
+          drawDispatchViewer();
+        });
+      });
+    }
+
+    function hideDispatchTooltip() {
+      dispatchTooltip.style.display = "none";
+    }
+
+    function valueForDispatchSeries(series, index, state) {
+      if (series.policyName) {
+        const pDay = policyDay(series.policyName, state.day.day_index);
+        if (!pDay) return null;
+        if (series.policyReference) return pDay.month_peak ? pDay.month_peak.value_kW : null;
+        if (series.policyCharge) return combineCharge(pDay)[index];
+        if (series.policyKey) return pDay[series.policyKey] ? pDay[series.policyKey][index] : null;
+        if (series.policySoc) return pDay.soc ? pDay.soc[index] : null;
+      }
+      return valueForSeries(series, index, state);
+    }
+
+    function showDispatchHoverStats(event) {
+      if (!dispatchChartState) {
+        hideDispatchTooltip();
+        return;
+      }
+      const rect = dispatchChart.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      const { padding, plotWidth, plotHeight, day, visibleSeries } = dispatchChartState;
+      if (x < padding.left || x > padding.left + plotWidth || y < padding.top || y > padding.top + plotHeight) {
+        hideDispatchTooltip();
+        return;
+      }
+      const slotCount = Math.max(day.load?.length || 0, day.grid?.length || 0, dispatchChartState.oracleDay?.grid?.length || 0);
+      const index = Math.max(0, Math.min(slotCount - 1, Math.round((x - padding.left) / plotWidth * (slotCount - 1))));
+      const rows = visibleSeries
+        .map((series) => ({ series, value: valueForDispatchSeries(series, index, dispatchChartState) }))
+        .filter((row) => Number.isFinite(row.value));
+      if (!rows.length) {
+        hideDispatchTooltip();
+        return;
+      }
+      dispatchTooltip.innerHTML = `<strong>Day ${day.day_index} at ${formatSlotTime(index, slotCount)}</strong>` + rows
+        .map((row) => `<div${row.series.soc || row.series.policySoc ? " class=\"tip-soc\"" : ""}><span>${row.series.label}</span><b>${formatNumber(row.value, 1)} ${row.series.soc || row.series.policySoc ? "%" : "kW"}</b></div>`)
+        .join("");
+      const wrapRect = dispatchChart.parentElement.getBoundingClientRect();
+      dispatchTooltip.style.display = "block";
+      const tipRect = dispatchTooltip.getBoundingClientRect();
+      const offsetX = event.clientX - wrapRect.left;
+      const offsetY = event.clientY - wrapRect.top;
+      dispatchTooltip.style.transform = `translate(${Math.min(Math.max(8, offsetX + 14), wrapRect.width - tipRect.width - 8)}px, ${Math.min(Math.max(8, offsetY + 14), wrapRect.height - tipRect.height - 8)}px)`;
+    }
+
+    async function dispatchApi(path, options = {}) {
+      const response = await fetch(path, options);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      return payload;
+    }
+
+    function renderDispatchWarnings(extraWarnings = []) {
+      const selectedWarnings = selectedPolicyNames()
+        .map((name) => dispatchPolicyTraces[name]?.warning)
+        .filter(Boolean);
+      const warnings = [...selectedWarnings, ...extraWarnings];
+      dispatchWarnings.style.display = warnings.length ? "block" : "none";
+      dispatchWarnings.innerHTML = warnings.map((warning) => `<div>${warning}</div>`).join("");
+    }
+
+    async function loadDispatchPolicies() {
+      const payload = await dispatchApi("/api/dispatch/policies");
+      dispatchPolicies = payload.policies || [];
+      dispatchPolicyTableBody.innerHTML = dispatchPolicies.map((policy) => {
+        const selected = dispatchSelectedPolicies.has(policy.name) ? "checked" : "";
+        const ep = `${policy.e_cap_kwh ?? "?"}/${policy.p_rated_kw ?? "?"}`;
+        const run = policy.latest_run ? new Date(policy.latest_run.created * 1000).toLocaleString() : "None";
+        return `<tr><td><input type="checkbox" data-dispatch-policy="${policy.name}" ${selected}></td>` +
+          `<td>${policy.name}</td><td>${policy.algo || "unknown"}</td><td>${ep}</td>` +
+          `<td>${run}</td><td>${policy.warning || policy.error || ""}</td></tr>`;
+      }).join("");
+      dispatchPolicyTableBody.querySelectorAll("[data-dispatch-policy]").forEach((checkbox) => {
+        checkbox.addEventListener("change", async () => {
+          if (checkbox.checked) dispatchSelectedPolicies.add(checkbox.dataset.dispatchPolicy);
+          else dispatchSelectedPolicies.delete(checkbox.dataset.dispatchPolicy);
+          await loadDispatchTraces();
+        });
+      });
+    }
+
+    async function loadDispatchTraces() {
+      const names = selectedPolicyNames();
+      if (!names.length) {
+        dispatchPolicyTraces = {};
+        renderDispatchLegend();
+        renderDispatchWarnings();
+        drawDispatchViewer();
+        return;
+      }
+      const payload = await dispatchApi(`/api/dispatch/policy-traces?policies=${encodeURIComponent(names.join(","))}`);
+      dispatchPolicyTraces = payload.policies || {};
+      renderDispatchLegend();
+      renderDispatchWarnings(payload.warnings || []);
+      drawDispatchViewer();
+    }
+
+    async function refreshDispatchViewer() {
+      dispatchDaySelect.value = daySelect.value;
+      dispatchBatterySelect.value = benchmarkBatterySelect.value;
+      await loadDispatchPolicies();
+      await loadDispatchTraces();
+    }
+
+    async function createDispatchRun() {
+      const names = selectedPolicyNames();
+      if (!names.length) {
+        renderDispatchWarnings(["Select at least one policy first."]);
+        return;
+      }
+      dispatchRunButton.disabled = true;
+      try {
+        const payload = await dispatchApi("/api/dispatch/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ policies: names }),
+        });
+        await loadDispatchPolicies();
+        await loadDispatchTraces();
+        renderDispatchWarnings(payload.warnings || []);
+      } catch (error) {
+        renderDispatchWarnings([error.message]);
+      } finally {
+        dispatchRunButton.disabled = false;
+      }
+    }
+
     function bindLegendControls() {
       legend.querySelectorAll("[data-series]").forEach((button) => {
         button.addEventListener("click", () => {
@@ -1633,6 +2059,10 @@ for t = 0 ... 95
           });
           if (target === "training-lab") {
             refreshTrainingLab();
+          } else if (target === "dispatch-viewer") {
+            hideTooltip();
+            hideDispatchTooltip();
+            refreshDispatchViewer();
           } else {
             hideTooltip();
             drawBenchmark();
@@ -1841,8 +2271,11 @@ for t = 0 ... 95
     fillDayOptions();
     fillBenchmarkBatteryOptions();
     bindLegendControls();
+    renderDispatchLegend();
     chart.addEventListener("mousemove", showHoverStats);
     chart.addEventListener("mouseleave", hideTooltip);
+    dispatchChart.addEventListener("mousemove", showDispatchHoverStats);
+    dispatchChart.addEventListener("mouseleave", hideDispatchTooltip);
     daySelect.addEventListener("change", () => {
       hideTooltip();
       drawBenchmark();
@@ -1851,9 +2284,22 @@ for t = 0 ... 95
       hideTooltip();
       drawBenchmark();
     });
+    dispatchDaySelect.addEventListener("change", () => {
+      hideDispatchTooltip();
+      drawDispatchViewer();
+    });
+    dispatchBatterySelect.addEventListener("change", () => {
+      hideDispatchTooltip();
+      drawDispatchViewer();
+    });
+    dispatchRunButton.addEventListener("click", createDispatchRun);
     window.addEventListener("resize", () => {
       hideTooltip();
+      hideDispatchTooltip();
       drawBenchmark();
+      if (document.getElementById("tab-dispatch-viewer").classList.contains("active")) {
+        drawDispatchViewer();
+      }
     });
     drawBenchmark();
     if (shouldRunCandidateCalculation) {
