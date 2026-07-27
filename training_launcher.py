@@ -157,7 +157,7 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
 
     USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    csv_path = export_training_csv(dataset_id, USER_DATA_DIR)
+    csv_path = export_training_csv(dataset_id, USER_DATA_DIR, min_days=val_days + test_days + 1)
     tariff_path = write_tariff_config(parameters, USER_DATA_DIR)
     spec = build_training_command(payload, csv_path, tariff_path)
 

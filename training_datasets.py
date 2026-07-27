@@ -118,9 +118,9 @@ def require_min_days(path: Path, min_days: int = 90) -> int:
     return n_days
 
 
-def export_training_csv(dataset_id: str, output_dir: Path, base_dir: Path = BASE_DIR) -> Path:
+def export_training_csv(dataset_id: str, output_dir: Path, base_dir: Path = BASE_DIR, min_days: int = 90) -> Path:
     source = get_dataset_path(dataset_id, base_dir)
-    require_min_days(source)
+    require_min_days(source, min_days)
     output_dir.mkdir(parents=True, exist_ok=True)
     target = output_dir / f"train_{sanitize_dataset_id(dataset_id)}.csv"
     start = date(2026, 1, 1)

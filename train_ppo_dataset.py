@@ -55,7 +55,10 @@ def month_blocks(days: list[DayData]) -> list[MonthData]:
     for day in days:
         key = str(day.date_iso)[:7]
         blocks.setdefault(key, MonthData(source=f"csv:{key}")).days.append(day)
-    return [month for _, month in sorted(blocks.items()) if len(month.days) >= 15]
+    months = [month for _, month in sorted(blocks.items()) if len(month.days) >= 15]
+    if months or not days:
+        return months
+    return [MonthData(days=days, source="csv:train_short")]
 
 
 def augment_month(
@@ -219,8 +222,25 @@ def main() -> None:
             flush=True,
         )
 
+    if not curve:
+        result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
+        val_cost = score_month(result["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
+        saving = (val_base - val_cost) / val_base * 100
+        gap = (val_cost - val_oracle) / val_oracle * 100
+        curve.append({"steps": steps, "val_cost_vnd": val_cost, "oracle_gap_pct": gap, "saving_vs_nobess_pct": saving})
+        best_val = val_cost
+        agent.save(RESULTS_DIR / f"policy_{tag}.pt")
+        print(
+            f"  step {steps:>7} | val {val_cost/1e6:8.1f}M | saving {saving:5.1f}% | "
+            f"gap {gap:6.1f}% | final short-run checkpoint",
+            flush=True,
+        )
+
     with (RESULTS_DIR / f"training_curve_{tag}.csv").open("w", newline="", encoding="utf-8") as f:
-        writer = _csv.DictWriter(f, fieldnames=list(curve[0].keys()))
+        writer = _csv.DictWriter(
+            f,
+            fieldnames=["steps", "val_cost_vnd", "oracle_gap_pct", "saving_vs_nobess_pct"],
+        )
         writer.writeheader()
         writer.writerows(curve)
 

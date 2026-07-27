@@ -26,7 +26,14 @@ from training_checkpoints import CHECKPOINT_DIR, _load_checkpoint_meta
 BASE_DIR = Path(__file__).resolve().parent
 
 from baselines import run_drl_policy  # noqa: E402
-from common import TOU_RULES, build_tariff_windows, load_system_config, score_month  # noqa: E402
+from common import (  # noqa: E402
+    TOU_RULES,
+    build_tariff_windows,
+    dt_from_steps_per_day,
+    load_system_config,
+    score_month,
+    steps_per_day_from_dt,
+)
 from grepo_agent import GREPOAgent  # noqa: E402
 from ppo_agent import PPOAgent  # noqa: E402
 from sadrbc import SADRBCConfig  # noqa: E402
@@ -90,6 +97,7 @@ def dataset_to_month(csv_path: Path = DATA_PATH) -> MonthData:
 def build_dispatch_config(parameters: dict[str, Any], e_cap_kwh: float, p_rated_kw: float):
     base = load_system_config()
     dt_hours = _to_float(parameters.get("dt"), base.dt)
+    dt_hours = dt_from_steps_per_day(steps_per_day_from_dt(dt_hours))
     windows = build_tariff_windows(
         str(parameters.get("billing_windows_expensive", "")),
         str(parameters.get("billing_windows_cheap", "")),

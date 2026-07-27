@@ -32,7 +32,10 @@ def steps_per_day_from_dt(dt_hours: float) -> int:
     if dt <= 0.0:
         raise ValueError(f"dt_hours must be positive, got {dt_hours!r}")
     steps = int(round(24.0 / dt))
-    if steps <= 0 or abs(steps * dt - 24.0) > 1e-6:
+    # CSV-detected values are rounded for the UI (for example 1 minute is
+    # shown as 0.016667), so allow a small accumulated rounding error.
+    tolerance_hours = max(1e-6, steps * 1e-6)
+    if steps <= 0 or abs(steps * dt - 24.0) > tolerance_hours:
         raise ValueError(f"dt_hours={dt_hours!r} does not divide a 24-hour day")
     return steps
 
