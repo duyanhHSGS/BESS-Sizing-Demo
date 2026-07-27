@@ -13,6 +13,15 @@ import math
 # =====================================================================
 # Default configuration (used when no config dict is supplied)
 # =====================================================================
+def _default_window(start_hour, end_hour, dt_hours=0.25):
+    steps_per_day = round(24.0 / dt_hours)
+    start = round(start_hour / dt_hours)
+    end = round(end_hour / dt_hours)
+    if end <= start:
+        end += steps_per_day
+    return [step % steps_per_day for step in range(start, end)]
+
+
 DEFAULT_CONFIG = {
     # BESS
     'E_cap_kWh':         500.0,
@@ -36,14 +45,14 @@ DEFAULT_CONFIG = {
     'P_target_user_kW':  350.0,
     'ENABLE_EXPORT':     False,
     'FIT_PRICE':         1200.0,
-    # Window indices (15-min steps; convention P_0 = 00:00)
-    'W1':       list(range(38, 46)),   # 09:30-11:30
-    'W2':       list(range(68, 80)),   # 17:00-20:00
-    'INTER':    list(range(46, 68)),   # 11:30-17:00
-    'OFF':      list(range(0, 16)) + list(range(88, 96)),  # 00:00-04:00 + 22:00-24:00
-    'W1_START': 38,
-    'W2_START': 68,
-    'OFF_PEAK_END_STEP': 16,
+    # Window indices derived from clock time at the configured fallback dt.
+    'W1':       _default_window(9.5, 11.5),
+    'W2':       _default_window(17.0, 20.0),
+    'INTER':    _default_window(11.5, 17.0),
+    'OFF':      _default_window(0.0, 4.0) + _default_window(22.0, 24.0),
+    'W1_START': round(9.5 / 0.25),
+    'W2_START': round(17.0 / 0.25),
+    'OFF_PEAK_END_STEP': round(4.0 / 0.25),
     # v13 C4: evening off-peak charge (22-24h) — feature flag.
     # Default False: keeps v12 behaviour (charge only in 00-04h block).
     # Set True only if BESS undersized for morning-only recharge or
@@ -209,10 +218,10 @@ def replan_trigger(minutes_since_plan, fc_err_pv, fc_err_load, soc_drift):
 
 def _validate_forecast(P_load, P_pv, name='forecast'):
     """v13 H5: validate forecast arrays — length 96, finite, non-negative."""
-    if len(P_load) != 96:
-        raise ValueError(f'{name}: P_load len={len(P_load)} (must be 96)')
-    if len(P_pv) != 96:
-        raise ValueError(f'{name}: P_pv len={len(P_pv)} (must be 96)')
+    if len(P_load) == 0:
+        raise ValueError(f'{name}: P_load is empty')
+    if len(P_load) != len(P_pv):
+        raise ValueError(f'{name}: P_load len={len(P_load)} but P_pv len={len(P_pv)}')
     for arr, lbl in ((P_load, 'P_load'), (P_pv, 'P_pv')):
         for i, v in enumerate(arr):
             if v is None or (isinstance(v, float) and math.isnan(v)):
@@ -228,11 +237,12 @@ def backward_pass(P_load, P_pv, P_target, cfg=None,
                   t_start=0, SOC_eod_target=None):
     """v13 C1: t_start lets a replan rebuild floor for [t_start..96]."""
     cfg = cfg or _DEFAULTS
-    SOC_floor = [0.0] * 97
+    n_steps = len(P_load)
+    SOC_floor = [0.0] * (n_steps + 1)
     if SOC_eod_target is None:
         SOC_eod_target = cfg.SOC_min + cfg.SOC_safety
-    SOC_floor[96] = SOC_eod_target
-    for t in range(95, t_start - 1, -1):
+    SOC_floor[n_steps] = SOC_eod_target
+    for t in range(n_steps - 1, t_start - 1, -1):
         p_shave = max(0, P_load[t] - P_pv[t] - P_target)
         if p_shave > 0:
             dSOC = -p_shave * cfg.dt / (cfg.E_cap * cfg.eta_dis)
@@ -250,7 +260,7 @@ def compute_pool2_extended(P_load, P_pv, P_rated_eff, cfg=None):
     """Pool 2 includes all PV surplus from start of day up to W2."""
     cfg = cfg or _DEFAULTS
     E_pool2 = 0.0
-    for t in range(0, cfg.W2_START):
+    for t in range(0, min(cfg.W2_START, len(P_load))):
         pv_du = max(0, P_pv[t] - P_load[t])
         E_pool2 += min(P_rated_eff, pv_du) * cfg.dt * cfg.eta_ch
     return E_pool2
@@ -258,17 +268,18 @@ def compute_pool2_extended(P_load, P_pv, P_rated_eff, cfg=None):
 
 def compute_E_shave_total(P_load, P_pv, P_target, cfg=None):
     cfg = cfg or _DEFAULTS
-    return sum(max(0, P_load[t] - P_pv[t] - P_target) * cfg.dt for t in range(96))
+    return sum(max(0, P_load[t] - P_pv[t] - P_target) * cfg.dt for t in range(len(P_load)))
 
 
 def compute_E_shave_window(P_load, P_pv, P_target, window, cfg=None):
     cfg = cfg or _DEFAULTS
-    return sum(max(0, P_load[t] - P_pv[t] - P_target) * cfg.dt for t in window)
+    return sum(max(0, P_load[t] - P_pv[t] - P_target) * cfg.dt for t in window if t < len(P_load))
 
 
-def compute_E_dis_max_window(P_rated_eff, window, cfg=None):
+def compute_E_dis_max_window(P_rated_eff, window, cfg=None, n_steps=None):
     cfg = cfg or _DEFAULTS
-    return P_rated_eff * cfg.eta_dis * cfg.dt * len(window)
+    valid_steps = [t for t in window if n_steps is None or t < n_steps]
+    return P_rated_eff * cfg.eta_dis * cfg.dt * len(valid_steps)
 
 
 def classify_case(E_pool2_delivered, E_dis_max_17_22, E_shave_17_22):
@@ -322,12 +333,13 @@ def determine_off_peak_charge_target(SOC_floor, day_type, day_type_next,
     cfg = cfg or _DEFAULTS
     is_off_today = day_type in ('weekend', 'holiday')
     is_off_tmrw  = day_type_next in ('weekend', 'holiday')
+    off_end = min(cfg.OFF_PEAK_END_STEP, len(SOC_floor) - 1)
     if is_off_today and is_off_tmrw:
         return cfg.SOC_eod
     if is_off_today and not is_off_tmrw:
-        return min(cfg.SOC_max, SOC_floor[cfg.OFF_PEAK_END_STEP] + cfg.SOC_SAFETY_BUFFER)
+        return min(cfg.SOC_max, SOC_floor[off_end] + cfg.SOC_SAFETY_BUFFER)
     delta_SOC_arb = (W1_arb_planned + W2_arb_offpeak) / (cfg.E_cap * cfg.eta_dis)
-    SOC_target = SOC_floor[cfg.OFF_PEAK_END_STEP] + delta_SOC_arb + cfg.SOC_SAFETY_BUFFER
+    SOC_target = SOC_floor[off_end] + delta_SOC_arb + cfg.SOC_SAFETY_BUFFER
     return min(cfg.SOC_max, SOC_target)
 
 
@@ -348,15 +360,16 @@ def forward_dispatch(P_load, P_pv, SOC_floor, P_target,
                      p_grid_history=None):
     """v13 C1: t_start/SOC_start enable intra-day replan."""
     cfg = cfg or _DEFAULTS
-    SOC = list(SOC_history) if SOC_history else [0.0] * 97
-    p_bess = list(p_bess_history) if p_bess_history else [0.0] * 96
-    p_grid = list(p_grid_history) if p_grid_history else [0.0] * 96
+    n_steps = len(P_load)
+    SOC = list(SOC_history) if SOC_history else [0.0] * (n_steps + 1)
+    p_bess = list(p_bess_history) if p_bess_history else [0.0] * n_steps
+    p_grid = list(p_grid_history) if p_grid_history else [0.0] * n_steps
     if SOC_start is None:
         SOC_start = cfg.SOC_eod
     SOC[t_start] = SOC_start
     blackout_steps = blackout_steps or set()
 
-    for t in range(t_start, 96):
+    for t in range(t_start, n_steps):
         if t in blackout_steps:
             P_net = max(0, P_load[t] - P_pv[t])
             min_SOC = cfg.SOC_min_emergency
@@ -398,7 +411,7 @@ def forward_dispatch(P_load, P_pv, SOC_floor, P_target,
             P_net_t = max(0, P_load[t] - P_pv[t])
             p_dis = min(P_rated_eff * cfg.eta_dis, P_net_t)
             new_SOC = SOC[t] - p_dis * cfg.dt / (cfg.E_cap * cfg.eta_dis)
-            min_SOC_required = SOC_floor[t + 1] if t + 1 < 96 else cfg.SOC_eod
+            min_SOC_required = SOC_floor[t + 1] if t + 1 < n_steps else cfg.SOC_eod
             if new_SOC < min_SOC_required:
                 p_dis = max(0, (SOC[t] - min_SOC_required) * cfg.E_cap * cfg.eta_dis / cfg.dt)
             p_bess[t] = +p_dis
@@ -428,17 +441,18 @@ def compute_kpi(P_load, P_pv, SOC, p_bess, p_grid, day_type, case=None,
                 cfg=None, days_in_month=None):
     """v13 H3+H4: throughput-based cycle counter + days_in_month prorate."""
     cfg = cfg or _DEFAULTS
+    n_steps = min(len(P_load), len(P_pv), len(p_bess), len(p_grid))
     if days_in_month is None:
         days_in_month = 30      # backward-compat default
     PMax_today    = compute_PMax_30min_rolling(p_grid, cfg.dt)
-    energy_cost   = sum(max(0, p_grid[t]) * cfg.dt * tariff_for_step(t, cfg) for t in range(96))
+    energy_cost   = sum(max(0, p_grid[t]) * cfg.dt * tariff_for_step(t, cfg) for t in range(n_steps))
     capacity_cost = PMax_today * cfg.T_cap / float(days_in_month)
     # H3 FIX: cycle = discharged_kWh / E_cap (industry-standard EFC)
-    discharged_kWh = sum(max(0, p_bess[t]) * cfg.dt for t in range(96))
+    discharged_kWh = sum(max(0, p_bess[t]) * cfg.dt for t in range(n_steps))
     cycle_today   = discharged_kWh / cfg.E_cap if cfg.E_cap > 0 else 0.0
-    pv_total      = sum(P_pv[t] * cfg.dt for t in range(96))
-    pv_used       = sum(min(P_load[t], P_pv[t]) * cfg.dt for t in range(96))
-    pv_to_bess    = sum(-p_bess[t] * cfg.dt for t in range(96)
+    pv_total      = sum(P_pv[t] * cfg.dt for t in range(n_steps))
+    pv_used       = sum(min(P_load[t], P_pv[t]) * cfg.dt for t in range(n_steps))
+    pv_to_bess    = sum(-p_bess[t] * cfg.dt for t in range(n_steps)
                         if p_bess[t] < 0 and P_pv[t] > P_load[t])
     pv_curtailed  = max(0.0, pv_total - pv_used - pv_to_bess)
     fit_revenue = pv_curtailed * cfg.FIT_PRICE if cfg.ENABLE_EXPORT else 0.0
@@ -451,7 +465,7 @@ def compute_kpi(P_load, P_pv, SOC, p_bess, p_grid, day_type, case=None,
         'total_cost':   round(total_cost, 0),
         'cycle':        round(cycle_today, 3),
         'pv_curtailed': round(pv_curtailed, 2),
-        'SOC_eod':      round(SOC[96], 4),
+        'SOC_eod':      round(SOC[n_steps], 4),
         'case':         case if case else '-',
     }
 
@@ -459,11 +473,12 @@ def compute_kpi(P_load, P_pv, SOC, p_bess, p_grid, day_type, case=None,
 def baseline_kpi(P_load, P_pv, cfg=None, days_in_month=None):
     """v13 H4: days_in_month prorate."""
     cfg = cfg or _DEFAULTS
+    n_steps = min(len(P_load), len(P_pv))
     if days_in_month is None:
         days_in_month = 30
-    p_grid = [max(0, P_load[t] - P_pv[t]) for t in range(96)]
+    p_grid = [max(0, P_load[t] - P_pv[t]) for t in range(n_steps)]
     PMax = compute_PMax_30min_rolling(p_grid, cfg.dt)
-    energy_cost = sum(p_grid[t] * cfg.dt * tariff_for_step(t, cfg) for t in range(96))
+    energy_cost = sum(p_grid[t] * cfg.dt * tariff_for_step(t, cfg) for t in range(n_steps))
     capacity_cost = PMax * cfg.T_cap / float(days_in_month)
     return {
         'PMax_base':          round(PMax, 2),
@@ -500,6 +515,7 @@ def phase3_strategic_plan(P_load, P_pv, day_type, day_type_next=None,
             cfg._h1_warned = True
     if validate:
         _validate_forecast(P_load, P_pv, name='phase3')
+    n_steps = len(P_load)
     if PMax_running_month is None:
         PMax_running_month = cfg.P_target_user
     cycle_3day = cycle_3day if cycle_3day is not None else []
@@ -511,7 +527,7 @@ def phase3_strategic_plan(P_load, P_pv, day_type, day_type_next=None,
     if blackout_steps is None:
         blackout_steps = set()
     if detect_blackout(V_grid, cfg.V_NOMINAL, cfg.V_BLACKOUT_TH):
-        blackout_steps = set(range(96))
+        blackout_steps = set(range(n_steps))
     UPS_mode = bool(blackout_steps)
 
     P_target_eff = max(cfg.P_target_user, PMax_running_month)
@@ -519,10 +535,10 @@ def phase3_strategic_plan(P_load, P_pv, day_type, day_type_next=None,
 
     if (P_rated_eff <= 0
             or early_infeasible(P_load, P_pv, P_target_eff, P_rated_eff, cfg)
-            or SOC_floor[16] > cfg.SOC_max):
+            or SOC_floor[min(cfg.OFF_PEAK_END_STEP, n_steps)] > cfg.SOC_max):
         case_id = 'INFEAS'
-        soc_trace = [cfg.SOC_eod] * 97
-        p_bess_trace = [0.0] * 96
+        soc_trace = [cfg.SOC_eod] * (n_steps + 1)
+        p_bess_trace = [0.0] * n_steps
         return {
             'execution': {
                 'p_plan': _build_p_plan(p_bess_trace),
@@ -564,8 +580,8 @@ def phase3_strategic_plan(P_load, P_pv, day_type, day_type_next=None,
     E_pool2     = compute_pool2_extended(P_load, P_pv, P_rated_eff, cfg)
     E_shave_W2  = compute_E_shave_window(P_load, P_pv, P_target_eff, cfg.W2, cfg)
     E_shave_total = compute_E_shave_total(P_load, P_pv, P_target_eff, cfg)
-    E_dis_W2    = compute_E_dis_max_window(P_rated_eff, cfg.W2, cfg)
-    E_dis_W1    = compute_E_dis_max_window(P_rated_eff, cfg.W1, cfg)
+    E_dis_W2    = compute_E_dis_max_window(P_rated_eff, cfg.W2, cfg, n_steps)
+    E_dis_W1    = compute_E_dis_max_window(P_rated_eff, cfg.W1, cfg, n_steps)
     case_id     = classify_case(E_pool2, E_dis_W2, E_shave_W2)
     BESS_useful = (cfg.SOC_max - cfg.SOC_min) * cfg.E_cap * cfg.eta_dis  # max usable from full charge
 
@@ -737,9 +753,10 @@ class SADRBCRunner:
         case_id = phase3_out['replan_ref']['case_id']
         if case_id == 'INFEAS':
             # v13 C2 FIX: BESS idle on infeas day still incurs full cost.
-            soc_trace    = [self.cfg.SOC_eod] * 97
-            p_bess_trace = [0.0] * 96
-            p_grid_trace = [max(0, P_load[t] - P_pv[t]) for t in range(96)]
+            n_steps = min(len(P_load), len(P_pv))
+            soc_trace    = [self.cfg.SOC_eod] * (n_steps + 1)
+            p_bess_trace = [0.0] * n_steps
+            p_grid_trace = [max(0, P_load[t] - P_pv[t]) for t in range(n_steps)]
             kpi_actual = compute_kpi(P_load, P_pv, soc_trace,
                                      p_bess_trace, p_grid_trace,
                                      day_type, case='INFEAS', cfg=self.cfg,
@@ -790,8 +807,9 @@ class SADRBCRunner:
                       T_battery=30.0, V_grid=1.0, blackout_steps=None,
                       plan_timestamp=None):
         """Recompute the plan from t_now to 96 (replan)."""
-        if not (1 <= t_now < 96):
-            raise ValueError(f'step_intraday: t_now={t_now} (1..95)')
+        n_steps = min(len(P_load_actual), len(P_pv_actual), len(P_load_fc), len(P_pv_fc))
+        if not (1 <= t_now < n_steps):
+            raise ValueError(f'step_intraday: t_now={t_now} (1..{n_steps - 1})')
         P_load = list(P_load_actual[:t_now]) + list(P_load_fc[t_now:])
         P_pv   = list(P_pv_actual[:t_now])  + list(P_pv_fc[t_now:])
         _validate_forecast(P_load, P_pv, name='replan')
@@ -843,12 +861,14 @@ class SADRBCRunner:
             plan_timestamp=plan_timestamp, cfg=self.cfg)
         case_id = phase3_0['replan_ref']['case_id']
         replan_log = []
+        n_steps = min(len(P_load_actual), len(P_pv_actual), len(P_load_forecast), len(P_pv_forecast))
+        one_hour_steps = max(1, int(round(1.0 / self.cfg.dt)))
 
         if case_id == 'INFEAS':
-            soc_trace    = [self.cfg.SOC_eod] * 97
-            p_bess_trace = [0.0] * 96
+            soc_trace    = [self.cfg.SOC_eod] * (n_steps + 1)
+            p_bess_trace = [0.0] * n_steps
             p_grid_trace = [max(0, P_load_actual[t] - P_pv_actual[t])
-                            for t in range(96)]
+                            for t in range(n_steps)]
             kpi = compute_kpi(P_load_actual, P_pv_actual, soc_trace,
                               p_bess_trace, p_grid_trace,
                               day_type, case='INFEAS', cfg=self.cfg)
@@ -866,7 +886,7 @@ class SADRBCRunner:
         plan_soc_initial = list(phase3_0['execution']['SOC_plan'])
 
         steps_since_replan = 0
-        for t in range(96):
+        for t in range(n_steps):
             p_bess_t = p_bess_trace[t]
             # Recompute SOC update using planned p_bess (exec follows plan).
             if p_bess_t < 0:
@@ -889,10 +909,10 @@ class SADRBCRunner:
             else:
                 p_grid_trace[t] = max(0, net_load - p_bess_t)
             steps_since_replan += 1
-            if t + 1 >= 96:
+            if t + 1 >= n_steps:
                 break
             t_next = t + 1
-            window_end = min(t_next + 4, 96)
+            window_end = min(t_next + one_hour_steps, n_steps)
             sum_load_fc = sum(P_load_forecast[t_next:window_end]) or 1.0
             sum_pv_fc   = sum(P_pv_forecast[t_next:window_end])   or 1.0
             sum_load_ac = sum(P_load_actual[t_next:window_end])
@@ -901,7 +921,7 @@ class SADRBCRunner:
             fc_err_pv   = (sum_pv_ac   - sum_pv_fc)   / sum_pv_fc
             soc_drift = abs(soc_trace[t_next] - plan_soc_initial[t_next])
             tier = replan_trigger(
-                minutes_since_plan=steps_since_replan * 15,
+                minutes_since_plan=steps_since_replan * self.cfg.dt * 60,
                 fc_err_pv=fc_err_pv, fc_err_load=fc_err_load,
                 soc_drift=soc_drift)
             need_replan = (tier == 'TIER3_URGENT' or tier == 'TIER2'
@@ -927,7 +947,7 @@ class SADRBCRunner:
                     plan_timestamp=plan_timestamp)
                 if phase3_new['replan_ref']['case_id'] != 'INFEAS':
                     new_pbess = phase3_new['execution']['p_plan']
-                    for k in range(t_next, 96):
+                    for k in range(t_next, n_steps):
                         p_bess_trace[k] = new_pbess[k]
                 steps_since_replan = 0
 

@@ -10,12 +10,14 @@ import numpy as np
 
 from baselines import run_drl_policy, run_no_bess, run_oracle
 from bess_env import BESSEnv
-from common import RESULTS_DIR, STEPS_PER_DAY, load_system_config, make_bess_config, score_month
+from benchmark import _rolling_30_minute_average
+from common import RESULTS_DIR, load_system_config, make_bess_config, score_month
+from settings import DEFAULT_PARAMETERS
 from ppo_agent import PPOAgent, RolloutBuffer
 from scenario_gen import DayData, MonthData
 
 
-ROLLOUT = 96 * 32
+ROLLOUT_DAYS = 32
 
 
 def load_csv_days(path: Path) -> list[DayData]:
@@ -24,9 +26,12 @@ def load_csv_days(path: Path) -> list[DayData]:
         for row in _csv.DictReader(f):
             day = by_day.setdefault(
                 row["date_iso"],
-                {"load": np.zeros(STEPS_PER_DAY), "pv": np.zeros(STEPS_PER_DAY), "day_type": row["day_type"]},
+                {"load": [], "pv": [], "day_type": row["day_type"]},
             )
             step = int(row["step"])
+            while len(day["load"]) <= step:
+                day["load"].append(0.0)
+                day["pv"].append(0.0)
             day["load"][step] = float(row["P_load_kW"])
             day["pv"][step] = float(row["P_pv_kW"])
     days = []
@@ -34,8 +39,8 @@ def load_csv_days(path: Path) -> list[DayData]:
         data = by_day[iso]
         days.append(
             DayData(
-                load=data["load"],
-                pv=data["pv"],
+                load=np.asarray(data["load"], dtype=np.float64),
+                pv=np.asarray(data["pv"], dtype=np.float64),
                 day_type=data["day_type"],
                 weather="csv",
                 day_index=len(days) + 1,
@@ -70,8 +75,9 @@ def augment_month(
                 err[step] = rho * err[step - 1] + white * rng.standard_normal()
             return err
 
-        load = np.maximum(0.0, day.load * (1 + _ar1(STEPS_PER_DAY, sigma_load)))
-        pv = np.maximum(0.0, day.pv * (1 + _ar1(STEPS_PER_DAY, sigma_pv)))
+        n_steps = len(day.load)
+        load = np.maximum(0.0, day.load * (1 + _ar1(n_steps, sigma_load)))
+        pv = np.maximum(0.0, day.pv * (1 + _ar1(n_steps, sigma_pv)))
         out.days.append(
             DayData(
                 load=load,
@@ -100,19 +106,21 @@ def main() -> None:
     days = load_csv_days(Path(args.csv))
     if len(days) < 90:
         raise SystemExit(f"Need at least 90 days for train/val/test split; found {len(days)}")
+    csv_dt = 24.0 / len(days[0].load)
 
     test_days, val_days = days[-30:], days[-60:-30]
     train_days = days[:-60]
     peak = max(float(day.load.max()) for day in days)
     p_ref = math.ceil(peak / 500.0) * 500.0
     daily_peaks = [
-        float(np.convolve(np.maximum(0.0, day.load - day.pv), [0.5, 0.5], mode="valid").max(initial=0.0))
+        max(_rolling_30_minute_average(np.maximum(0.0, day.load - day.pv), 24.0 / len(day.load)), default=0.0)
         for day in train_days
     ]
     d_run0 = 0.5 * float(np.mean(daily_peaks))
 
     base = load_system_config()
     cfg = make_bess_config(base, args.e_cap, args.p_rated, base.P_target_user)
+    cfg.dt = csv_dt
     billing = args.billing
     if args.tariff_json:
         import json
@@ -123,10 +131,19 @@ def main() -> None:
         cfg.price_mid = float(tariff.get("price_mid", cfg.price_mid))
         cfg.price_off = float(tariff.get("price_off", cfg.price_off))
         cfg.T_cap = float(tariff.get("t_cap", cfg.T_cap))
-        for key, value in build_tariff_windows(tariff["peak_windows"], tariff["off_windows"]).items():
+        for key, value in build_tariff_windows(tariff["peak_windows"], tariff["off_windows"], cfg.dt).items():
             setattr(cfg, key, value)
         billing = tariff.get("billing_mode", billing)
         TOU_RULES["sunday_no_peak"] = bool(tariff.get("sunday_no_peak", False))
+    else:
+        from common import build_tariff_windows
+
+        for key, value in build_tariff_windows(
+            DEFAULT_PARAMETERS["billing_windows_expensive"],
+            DEFAULT_PARAMETERS["billing_windows_cheap"],
+            cfg.dt,
+        ).items():
+            setattr(cfg, key, value)
     if billing == "tou":
         cfg.T_cap = 0.0
 
@@ -149,7 +166,7 @@ def main() -> None:
         "train_csv": str(args.csv),
         "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
     }
-    buffer = RolloutBuffer(ROLLOUT, env.obs_dim)
+    buffer = RolloutBuffer(len(days[0].load) * ROLLOUT_DAYS, env.obs_dim)
 
     val_base = score_month(run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
     val_oracle = score_month(run_oracle(val_month, cfg)["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]

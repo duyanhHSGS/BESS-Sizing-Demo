@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from common import STEPS_PER_DAY, DT_HOURS, tariff_vector
+from common import DT_HOURS, STEPS_PER_DAY, dt_from_steps_per_day, steps_per_day_from_dt, tariff_vector
 from scenario_gen import MonthData
 
 OBS_DIM = 13
@@ -77,7 +77,7 @@ def _ar1_noise_series(actual: np.ndarray, sigma: float, rho: float,
 
 
 class BESSEnv:
-    """Month-long episode: 30 days x 96 steps. Forecast-free observation."""
+    """Month-long episode using the selected data resolution."""
 
     def __init__(self, cfg, p_ref_kw: float = 500.0,
                  degradation_vnd_per_kwh: float = 50.0,
@@ -91,8 +91,12 @@ class BESSEnv:
                  dt_hours: float = DT_HOURS):
         # ĐỘ PHÂN GIẢI tham số hóa: 96×15' (mặc định) hoặc 1440×1'
         # (chế độ bài báo GREPO). Ngày dữ liệu phải có đúng n_steps mẫu.
+        if dt_hours == DT_HOURS and getattr(cfg, "dt", DT_HOURS) != DT_HOURS:
+            dt_hours = float(cfg.dt)
+            n_steps = steps_per_day_from_dt(dt_hours)
         self.n_steps = int(n_steps)
         self.dt = float(dt_hours)
+        cfg.dt = self.dt
         assert abs(self.n_steps * self.dt - 24.0) < 1e-9,             "n_steps × dt phải = 24h"
         # cửa sổ billing 30 phút = bao nhiêu mẫu ở độ phân giải này
         self.roll_k = max(2, int(round(0.5 / self.dt)))
@@ -115,14 +119,13 @@ class BESSEnv:
         self._fc_rng = np.random.default_rng(fc_seed)
         self._fc_load = self._fc_pv = None
         base_tar = tariff_vector(cfg)              # 96 mức 15'
-        rep = self.n_steps // STEPS_PER_DAY
-        self._tar_base = np.repeat(base_tar, rep) if rep > 1 else base_tar
+        self._tar_base = base_tar
         # Chủ nhật không cao điểm (quy tắc EVN, bật qua TOU_RULES):
         # vector riêng, hoán đổi tại biên ngày trong reset()/step()
         from common import TOU_RULES, cfg_no_peak
         if TOU_RULES.get("sunday_no_peak"):
             sun = tariff_vector(cfg_no_peak(cfg))
-            self._tar_sun = np.repeat(sun, rep) if rep > 1 else sun
+            self._tar_sun = sun
         else:
             self._tar_sun = self._tar_base
         self.tariff = self._tar_base
@@ -135,6 +138,18 @@ class BESSEnv:
     # ------------------------------------------------------------------
     def reset(self, month: MonthData, soc_init: float | None = None) -> np.ndarray:
         self.month = month
+        if month.days:
+            detected_steps = len(month.days[0].load)
+            if detected_steps <= 0:
+                raise ValueError("month contains an empty day")
+            if detected_steps != self.n_steps:
+                self.n_steps = detected_steps
+                self.dt = dt_from_steps_per_day(self.n_steps)
+                self.cfg.dt = self.dt
+                self.roll_k = max(1, int(round(0.5 / self.dt)))
+                self._tar_base = tariff_vector(self.cfg)
+                from common import TOU_RULES, cfg_no_peak
+                self._tar_sun = tariff_vector(cfg_no_peak(self.cfg)) if TOU_RULES.get("sunday_no_peak") else self._tar_base
         self.day = 0
         self.t = 0
         self.soc = float(soc_init if soc_init is not None else self.cfg.SOC_eod)
@@ -243,8 +258,8 @@ class BESSEnv:
         d, cg, cp = self.project_action(action, load, pv)
         grid = eff + cg - d                            # >= 0 by construction
         soc_before = self.soc
-        self.soc = self.soc + (cg + cp) * DT_HOURS * cfg.eta_ch / cfg.E_cap \
-                   - d * DT_HOURS / (cfg.eta_dis * cfg.E_cap)
+        self.soc = self.soc + (cg + cp) * self.dt * cfg.eta_ch / cfg.E_cap \
+                   - d * self.dt / (cfg.eta_dis * cfg.E_cap)
         # numerical guard only — projection already bounds SOC
         self.soc = min(cfg.SOC_max, max(cfg.SOC_min, self.soc))
 

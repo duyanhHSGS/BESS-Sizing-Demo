@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from common import DATA_DIR, STEPS_PER_DAY, DT_HOURS
+from common import DATA_DIR, DT_HOURS, STEPS_PER_DAY, steps_per_day_from_dt
 
 SUNRISE_H, SUNSET_H = 6.0, 18.0
 
@@ -31,8 +31,8 @@ WEATHER_MIX = [
 
 @dataclass
 class DayData:
-    load: np.ndarray            # 96-step kW
-    pv: np.ndarray              # 96-step kW
+    load: np.ndarray            # daily kW samples
+    pv: np.ndarray              # daily kW samples
     day_type: str               # working | weekend | holiday
     weather: str
     day_index: int = 0
@@ -62,7 +62,11 @@ def load_real_month() -> MonthData:
         with open(path, encoding="utf-8") as f:
             for r in csv.DictReader(f):
                 d, t = int(r["day_index"]), int(r["step"])
-                out.setdefault(d, np.zeros(STEPS_PER_DAY))[t] = float(r[col])
+                if d not in out:
+                    out[d] = []
+                while len(out[d]) <= t:
+                    out[d].append(0.0)
+                out[d][t] = float(r[col])
         return out
 
     loads = _read_series(DATA_DIR / "load_30days.csv", "P_load_kW")
@@ -70,7 +74,7 @@ def load_real_month() -> MonthData:
     month = MonthData(source="real")
     for d in sorted(cal):
         dt_, wx = cal[d]
-        month.days.append(DayData(load=loads[d], pv=pvs[d],
+        month.days.append(DayData(load=np.asarray(loads[d], dtype=np.float64), pv=np.asarray(pvs[d], dtype=np.float64),
                                   day_type=dt_, weather=wx, day_index=d))
     return month
 
@@ -78,24 +82,24 @@ def load_real_month() -> MonthData:
 # ---------------------------------------------------------------------------
 # SIMULATOR — load profiles (mirrors data_generation/generate_load.py)
 # ---------------------------------------------------------------------------
-def _working_load(rng: np.random.Generator, scale: float) -> np.ndarray:
-    h = np.arange(STEPS_PER_DAY) * DT_HOURS
+def _working_load(rng: np.random.Generator, scale: float, n_steps: int, dt_hours: float) -> np.ndarray:
+    h = np.arange(n_steps) * dt_hours
     base = np.select(
         [h < 5, h < 7, h < 12, h < 13, h < 17, h < 18, h < 22],
         [100.0, 200.0 + 200.0 * (h - 5.0) / 2.0, 500.0, 250.0,
          500.0, 300.0, 150.0],
         default=100.0,
     ) * scale
-    noise = rng.normal(0.0, 0.05, STEPS_PER_DAY) * base
+    noise = rng.normal(0.0, 0.05, n_steps) * base
     val = np.maximum(0.0, base + noise)
     # motor startup spikes during production hours
-    spike_mask = (h >= 7) & (h < 17) & (rng.random(STEPS_PER_DAY) < 0.06)
+    spike_mask = (h >= 7) & (h < 17) & (rng.random(n_steps) < 0.06)
     val[spike_mask] += 50.0 * scale
     return val
 
 
-def _flat_load(rng, level_kw, sigma):
-    return np.maximum(0.0, rng.normal(level_kw, sigma, STEPS_PER_DAY))
+def _flat_load(rng, level_kw, sigma, n_steps: int):
+    return np.maximum(0.0, rng.normal(level_kw, sigma, n_steps))
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +112,8 @@ def _bell(h, peak_kw, peak_h=12.0, sigma_h=2.6):
 
 
 def _pv_profile(rng: np.random.Generator, weather: str,
-                pv_scale: float) -> np.ndarray:
-    h = np.arange(STEPS_PER_DAY) * DT_HOURS
+                pv_scale: float, n_steps: int, dt_hours: float) -> np.ndarray:
+    h = np.arange(n_steps) * dt_hours
     if weather == "sunny_normal":
         v = _bell(h, rng.uniform(350, 420))
         rel = 0.10
@@ -130,11 +134,13 @@ def _pv_profile(rng: np.random.Generator, weather: str,
 
 
 def generate_sim_month(seed: int, n_days: int = 30, load_scale: float = 1.0,
-                       pv_scale: float = 1.0,
-                       holiday_prob: float = 0.03) -> MonthData:
+                        pv_scale: float = 1.0,
+                        holiday_prob: float = 0.03,
+                        dt_hours: float = DT_HOURS) -> MonthData:
     """One synthetic month. Weekly pattern starts on Monday; weather is
     sampled i.i.d. from WEATHER_MIX (matches the real month's mix)."""
     rng = np.random.default_rng(seed)
+    n_steps = steps_per_day_from_dt(dt_hours)
     names = [w for w, _ in WEATHER_MIX]
     probs = np.array([p for _, p in WEATHER_MIX])
     month = MonthData(source=f"sim_seed{seed}")
@@ -148,12 +154,12 @@ def generate_sim_month(seed: int, n_days: int = 30, load_scale: float = 1.0,
             day_type = "working"
         weather = str(rng.choice(names, p=probs))
         if day_type == "working":
-            load = _working_load(rng, load_scale)
+            load = _working_load(rng, load_scale, n_steps, dt_hours)
         elif day_type == "weekend":
-            load = _flat_load(rng, 100.0 * load_scale, 5.0 * load_scale)
+            load = _flat_load(rng, 100.0 * load_scale, 5.0 * load_scale, n_steps)
         else:
-            load = _flat_load(rng, 80.0 * load_scale, 4.0 * load_scale)
-        pv = _pv_profile(rng, weather, pv_scale)
+            load = _flat_load(rng, 80.0 * load_scale, 4.0 * load_scale, n_steps)
+        pv = _pv_profile(rng, weather, pv_scale, n_steps, dt_hours)
         month.days.append(DayData(load=load, pv=pv, day_type=day_type,
                                   weather=weather, day_index=d + 1))
     return month

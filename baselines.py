@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from common import STEPS_PER_DAY, DT_HOURS
+from common import rolling_pmax_day
 from scenario_gen import MonthData
 from lp_core import build_eff_load, solve_day_lp
 
@@ -30,9 +30,10 @@ def run_no_bess(month: MonthData, cfg) -> dict:
     grids, socs, pbs = [], [], []
     for day in month.days:
         g = np.maximum(0.0, day.load - day.pv)
+        n_steps = len(g)
         grids.append(g)
-        socs.append(np.full(STEPS_PER_DAY + 1, cfg.SOC_eod))
-        pbs.append(np.zeros(STEPS_PER_DAY))
+        socs.append(np.full(n_steps + 1, cfg.SOC_eod))
+        pbs.append(np.zeros(n_steps))
     return _result(grids, socs, pbs)
 
 
@@ -43,10 +44,17 @@ def _cfg_to_dict(cfg) -> dict:
         "eta_ch": cfg.eta_ch, "eta_dis": cfg.eta_dis,
         "soc_min": cfg.SOC_min, "soc_max": cfg.SOC_max,
         "soc_safety_buffer": cfg.SOC_safety,
+        "soc_eod": cfg.SOC_eod,
+        "soc_min_emergency": cfg.SOC_min_emergency,
+        "dt_hours": cfg.dt,
         "price_peak": cfg.price_peak, "price_mid": cfg.price_mid,
         "price_off": cfg.price_off, "T_cap": cfg.T_cap,
         "FIT_PRICE": cfg.FIT_PRICE, "ENABLE_EXPORT": cfg.ENABLE_EXPORT,
         "P_target_user_kW": cfg.P_target_user,
+        "W1": list(cfg.W1), "W2": list(cfg.W2),
+        "INTER": list(cfg.INTER), "OFF": list(cfg.OFF),
+        "W1_START": cfg.W1_START, "W2_START": cfg.W2_START,
+        "OFF_PEAK_END_STEP": cfg.OFF_PEAK_END_STEP,
     }
 
 
@@ -87,9 +95,10 @@ def run_oracle(month: MonthData, cfg,
             peak_floor=peak_floor)
         if res["status"] != "OK":                  # defensive: idle fallback
             g = np.maximum(0.0, day.load - day.pv)
+            n_steps = len(g)
             grids.append(g)
-            socs.append(np.full(STEPS_PER_DAY + 1, soc))
-            pbs.append(np.zeros(STEPS_PER_DAY))
+            socs.append(np.full(n_steps + 1, soc))
+            pbs.append(np.zeros(n_steps))
             continue
         g = np.maximum(0.0, np.asarray(res["p_grid"]))
         grids.append(g)
@@ -97,8 +106,7 @@ def run_oracle(month: MonthData, cfg,
         pbs.append(np.asarray(res["p_bess"]))
         soc = float(res["soc"][-1])
         # running monthly peak on the same 30-min rolling metric
-        roll = np.convolve(g, np.ones(2) / 2, mode="valid")
-        peak_floor = max(peak_floor, float(roll.max(initial=0.0)))
+        peak_floor = max(peak_floor, rolling_pmax_day(g, cfg.dt))
     return _result(grids, socs, pbs)
 
 

@@ -20,6 +20,8 @@ import time
 import numpy as np
 
 from common import RESULTS_DIR, load_system_config, make_bess_config, score_month
+from benchmark import _rolling_30_minute_average
+from settings import DEFAULT_PARAMETERS
 from scenario_gen import generate_sim_month, MonthData
 from bess_env import BESSEnv, OBS_DIM
 from grepo_agent import GREPOAgent
@@ -38,15 +40,18 @@ def _load_csv_days(path):
     with open(path, encoding="utf-8") as f:
         for r in _csv.DictReader(f):
             d = by_day.setdefault(r["date_iso"], {
-                "load": np.zeros(96), "pv": np.zeros(96),
+                "load": [], "pv": [],
                 "day_type": r["day_type"]})
             t = int(r["step"])
+            while len(d["load"]) <= t:
+                d["load"].append(0.0)
+                d["pv"].append(0.0)
             d["load"][t] = float(r["P_load_kW"])
             d["pv"][t] = float(r["P_pv_kW"])
     days = []
     for iso in sorted(by_day):
         v = by_day[iso]
-        days.append(DayData(load=v["load"], pv=v["pv"],
+        days.append(DayData(load=np.asarray(v["load"], dtype=np.float64), pv=np.asarray(v["pv"], dtype=np.float64),
                             day_type=v["day_type"], weather="tb",
                             day_index=len(days) + 1, date_iso=iso))
     return days
@@ -87,7 +92,7 @@ def main():
         cfg.price_mid = float(tariff.get("price_mid", cfg.price_mid))
         cfg.price_off = float(tariff.get("price_off", cfg.price_off))
         cfg.T_cap = float(tariff.get("t_cap", cfg.T_cap))
-        for key, value in build_tariff_windows(tariff.get("peak_windows", ""), tariff.get("off_windows", "")).items():
+        for key, value in build_tariff_windows(tariff.get("peak_windows", ""), tariff.get("off_windows", ""), cfg.dt).items():
             setattr(cfg, key, value)
         TOU_RULES["sunday_no_peak"] = bool(tariff.get("sunday_no_peak", False))
         if tariff.get("billing_mode") == "tou":
@@ -97,13 +102,31 @@ def main():
     if args.csv:
         import math
         csv_days = _load_csv_days(args.csv)
+        if csv_days:
+            cfg.dt = 24.0 / len(csv_days[0].load)
+            if args.tariff_json:
+                import json as _json
+                from pathlib import Path
+                from common import build_tariff_windows
+
+                tariff = _json.loads(Path(args.tariff_json).read_text(encoding="utf-8"))
+                for key, value in build_tariff_windows(tariff.get("peak_windows", ""), tariff.get("off_windows", ""), cfg.dt).items():
+                    setattr(cfg, key, value)
+            else:
+                from common import build_tariff_windows
+
+                for key, value in build_tariff_windows(
+                    DEFAULT_PARAMETERS["billing_windows_expensive"],
+                    DEFAULT_PARAMETERS["billing_windows_cheap"],
+                    cfg.dt,
+                ).items():
+                    setattr(cfg, key, value)
         if len(csv_days) < 90:
             raise SystemExit(f"CSV chỉ {len(csv_days)} ngày — cần ≥90")
         peak = max(float(d.load.max()) for d in csv_days)
         p_ref = math.ceil(peak / 500.0) * 500.0
         # floor data-driven như PPO (fix bug site peaky)
-        peaks = [float(np.convolve(np.maximum(0, d.load - d.pv), [.5, .5],
-                                   mode="valid").max(initial=0.0))
+        peaks = [max(_rolling_30_minute_average(np.maximum(0, d.load - d.pv), cfg.dt), default=0.0)
                  for d in csv_days[:-60]]
         d_run0 = 0.5 * float(np.mean(peaks))
         train_days = csv_days[:-60]
@@ -112,7 +135,7 @@ def main():
     else:
         p_ref = 500.0
         d_run0 = None
-        val_month = generate_sim_month(VAL_SEED)
+        val_month = generate_sim_month(VAL_SEED, dt_hours=cfg.dt)
     tag = args.tag or f"grepo_{cfg.E_cap:.0f}kwh_{cfg.P_rated_nominal:.0f}kw"
 
     agent = GREPOAgent(OBS_DIM, n_group=args.group, seed=args.seed,
@@ -142,7 +165,8 @@ def main():
         else:
             if it % 10 == 0:
                 day_pool_month = generate_sim_month(
-                    TRAIN_SEED0 + args.seed * 1000 + it // 10)
+                    TRAIN_SEED0 + args.seed * 1000 + it // 10,
+                    dt_hours=cfg.dt)
             day = day_pool_month.days[rng.integers(len(day_pool_month.days))]
         episode = MonthData(days=[day], source="grepo_day")
         soc_init = float(rng.uniform(cfg.SOC_min + cfg.SOC_safety,

@@ -46,6 +46,23 @@ def count_days(path: Path) -> int:
     return len(days)
 
 
+def detect_resolution_minutes(path: Path) -> int:
+    counts: dict[int, int] = {}
+    with path.open(newline="", encoding="utf-8-sig") as csv_file:
+        reader = csv.DictReader(csv_file)
+        missing = [header for header in REQUIRED_HEADERS if header not in (reader.fieldnames or [])]
+        if missing:
+            raise DatasetError(f"{path.name} missing columns: {', '.join(missing)}")
+        for row in reader:
+            day = int(row["day_index"])
+            counts[day] = counts.get(day, 0) + 1
+    step_counts = list(counts.values())
+    if not step_counts:
+        raise DatasetError(f"{path.name} has no rows")
+    steps_per_day = max(set(step_counts), key=step_counts.count)
+    return round(24 * 60 / steps_per_day)
+
+
 def list_datasets(base_dir: Path = BASE_DIR) -> list[dict]:
     out = []
     for dataset_id, path in _dataset_paths(base_dir).items():
@@ -53,10 +70,12 @@ def list_datasets(base_dir: Path = BASE_DIR) -> list[dict]:
             continue
         try:
             n_days = count_days(path)
+            res_min = detect_resolution_minutes(path)
             status = "ok"
             error = ""
         except Exception as exc:  # noqa: BLE001
             n_days = 0
+            res_min = 0
             status = "error"
             error = str(exc)
         out.append(
@@ -65,7 +84,7 @@ def list_datasets(base_dir: Path = BASE_DIR) -> list[dict]:
                 "source": path.name,
                 "path": str(path),
                 "n_days": n_days,
-                "res_min": 15,
+                "res_min": res_min,
                 "status": status,
                 "error": error,
             }

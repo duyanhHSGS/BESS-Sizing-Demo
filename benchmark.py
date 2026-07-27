@@ -128,9 +128,11 @@ def _detect_dt_from_rows(rows):
         steps_by_day.setdefault(row["day_index"], set()).add(row["step"])
     step_counts = [len(steps) for steps in steps_by_day.values() if steps]
     if not step_counts:
-        return 0.25
+        raise ValueError("Cannot detect dt: CSV has no day/step rows")
     steps_per_day = max(set(step_counts), key=step_counts.count)
-    return round(24.0 / steps_per_day, 6) if steps_per_day else 0.25
+    if not steps_per_day:
+        raise ValueError("Cannot detect dt: steps_per_day is zero")
+    return round(24.0 / steps_per_day, 6)
 
 
 def _group_days(rows, dt):

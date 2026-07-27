@@ -27,7 +27,25 @@ from sadrbc import SADRBCConfig, tariff_for_step  # noqa: E402
 STEPS_PER_DAY = 96
 DT_HOURS = 0.25
 DEMAND_WINDOW_HOURS = 0.5
-ROLL_WIN = 2          # Default 30-min billing window = 2 x 15-min slots
+def steps_per_day_from_dt(dt_hours: float) -> int:
+    dt = float(dt_hours)
+    if dt <= 0.0:
+        raise ValueError(f"dt_hours must be positive, got {dt_hours!r}")
+    steps = int(round(24.0 / dt))
+    if steps <= 0 or abs(steps * dt - 24.0) > 1e-6:
+        raise ValueError(f"dt_hours={dt_hours!r} does not divide a 24-hour day")
+    return steps
+
+
+def dt_from_steps_per_day(steps_per_day: int) -> float:
+    steps = int(steps_per_day)
+    if steps <= 0:
+        raise ValueError(f"steps_per_day must be positive, got {steps_per_day!r}")
+    return 24.0 / steps
+
+
+def rolling_window_steps(dt_hours: float, window_hours: float = DEMAND_WINDOW_HOURS) -> int:
+    return max(1, int(round(float(window_hours) / max(float(dt_hours), 1e-9))))
 
 # ---------------------------------------------------------------------------
 # 2026 Vietnam market CAPEX (same source as sizing/sizing_matrix_2026.py)
@@ -92,6 +110,9 @@ def make_bess_config(base: SADRBCConfig, e_cap_kwh: float,
         "soc_min": base.SOC_min,
         "soc_max": base.SOC_max,
         "soc_safety_buffer": base.SOC_safety,
+        "soc_eod": base.SOC_eod,
+        "soc_min_emergency": base.SOC_min_emergency,
+        "dt_hours": base.dt,
         "price_peak": base.price_peak,
         "price_mid": base.price_mid,
         "price_off": base.price_off,
@@ -111,7 +132,7 @@ def build_tariff_windows(peak_ranges: str, off_ranges: str, dt_hours: float = DT
     SADRBCConfig. Tối đa 2 khung cao điểm (sáng→W1, chiều/tối→W2);
     1 khung → W1 rỗng. VD kịch bản mới:
         peak "17:30-22:30", off "00:00-06:00"."""
-    steps_per_day = max(1, int(round(24.0 / max(float(dt_hours), 1e-9))))
+    steps_per_day = steps_per_day_from_dt(dt_hours)
 
     def to_steps(rng: str) -> list[int]:
         a, b = rng.strip().split("-")
@@ -120,11 +141,7 @@ def build_tariff_windows(peak_ranges: str, off_ranges: str, dt_hours: float = DT
         s1 = round((h1 + m1 / 60.0) / dt_hours)
         s2 = round((h2 + m2 / 60.0) / dt_hours)
         if s2 <= s1:
-            s2 += 96                       # qua nửa đêm
-        if s2 <= s1:
-            s2 += steps_per_day - 96
-        if s2 > s1 + steps_per_day:
-            s2 -= 96 - steps_per_day
+            s2 += steps_per_day
         return [s % steps_per_day for s in range(s1, s2)]
 
     peaks = [to_steps(r) for r in peak_ranges.split(",") if r.strip()]
@@ -148,7 +165,7 @@ def build_tariff_windows(peak_ranges: str, off_ranges: str, dt_hours: float = DT
 
 
 def tariff_vector(cfg: SADRBCConfig) -> np.ndarray:
-    steps_per_day = max(1, int(round(24.0 / max(float(cfg.dt), 1e-9))))
+    steps_per_day = steps_per_day_from_dt(cfg.dt)
     return np.array([tariff_for_step(t, cfg) for t in range(steps_per_day)],
                     dtype=np.float64)
 
@@ -191,7 +208,7 @@ def tariff_vector_day(cfg: SADRBCConfig, day) -> np.ndarray:
 def rolling_pmax_day(p_grid_day: np.ndarray, dt_hours: float = DT_HOURS) -> float:
     """Max 30-min rolling average of one day's grid import (kW)."""
     g = np.maximum(0.0, np.asarray(p_grid_day, dtype=np.float64))
-    roll_win = max(1, int(round(DEMAND_WINDOW_HOURS / max(float(dt_hours), 1e-9))))
+    roll_win = rolling_window_steps(dt_hours)
     if len(g) < roll_win:
         return float(g.max(initial=0.0))
     roll = np.convolve(g, np.ones(roll_win) / roll_win, mode="valid")
@@ -200,7 +217,7 @@ def rolling_pmax_day(p_grid_day: np.ndarray, dt_hours: float = DT_HOURS) -> floa
 
 def score_month(p_grid_days: list[np.ndarray], cfg: SADRBCConfig,
                 days: list | None = None) -> dict:
-    """Monthly bill on the shared cost model. Input: list of 96-step grids.
+    """Monthly bill on the shared cost model. Input: list of daily grids.
     `days` (list DayData, cùng thứ tự với grids): cho quy tắc lịch —
     Chủ nhật không cao điểm khi TOU_RULES['sunday_no_peak'] bật."""
     tar = tariff_vector(cfg)
@@ -212,6 +229,11 @@ def score_month(p_grid_days: list[np.ndarray], cfg: SADRBCConfig,
         g = np.maximum(0.0, np.asarray(g, dtype=np.float64))
         t = tar_sun if (days is not None and i < len(days)
                         and is_sunday(days[i])) else tar
+        if len(t) != len(g):
+            raise ValueError(
+                f"Tariff length {len(t)} does not match grid length {len(g)}; "
+                "set cfg.dt from the selected data resolution."
+            )
         energy += float(np.sum(g * t) * cfg.dt)
         pmax = max(pmax, rolling_pmax_day(g, cfg.dt))
     demand = pmax * cfg.T_cap

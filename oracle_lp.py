@@ -413,6 +413,7 @@ def _planner_annualized_saving(base_days, parameters):
     for key, value in build_tariff_windows(
         str(parameters.get("billing_windows_expensive", "")),
         str(parameters.get("billing_windows_cheap", "")),
+        _to_float(parameters.get("dt"), cfg.dt),
     ).items():
         setattr(cfg, key, value)
     TOU_RULES["sunday_no_peak"] = bool(parameters.get("billing_sunday"))

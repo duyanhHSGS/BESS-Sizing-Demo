@@ -34,13 +34,13 @@ from scipy.optimize import linprog
 # Demand charge is billed monthly but the v13 harness amortises it per day
 # (capacity_cost = PMax_today · T_cap / days_in_month). We mirror that here
 # so the LP optimises the SAME objective the harness scores.
-WIN = 2  # 30-min billing window = 2 × 15-min slots (round(0.5 / 0.25))
 
 
 def build_eff_load(P_load, P_pv):
     """Return (eff_load, pv_surplus) arrays of length 96."""
-    eff_load = [max(0.0, P_load[t] - P_pv[t]) for t in range(96)]
-    pv_surplus = [max(0.0, P_pv[t] - P_load[t]) for t in range(96)]
+    n_steps = min(len(P_load), len(P_pv))
+    eff_load = [max(0.0, P_load[t] - P_pv[t]) for t in range(n_steps)]
+    pv_surplus = [max(0.0, P_pv[t] - P_load[t]) for t in range(n_steps)]
     return eff_load, pv_surplus
 
 
@@ -72,8 +72,12 @@ def solve_day_lp(eff_load, pv_surplus, cfg, demand_rate_per_kW,
     dict with status, and (if feasible) per-slot d, cg, cp, soc(97), Ppk,
     p_bess(96, +dis/-chg harness sign), p_grid(96).
     """
+    from benchmark import _demand_windows
     from sadrbc import tariff_for_step
 
+    steps = min(len(eff_load), len(pv_surplus))
+    eff_load = list(eff_load[:steps])
+    pv_surplus = list(pv_surplus[:steps])
     E = cfg.E_cap
     dt = cfg.dt
     P_rated = cfg.P_rated_nominal
@@ -83,20 +87,20 @@ def solve_day_lp(eff_load, pv_surplus, cfg, demand_rate_per_kW,
     soc_min = cfg.SOC_min
     soc_lo = soc_min + soc_floor_frac * (soc_max - soc_min)
 
-    tariff = [tariff_for_step(t, cfg) for t in range(96)]
+    tariff = [tariff_for_step(t, cfg) for t in range(steps)]
 
     # Variable layout
-    ID, ICG, ICP, ISOC, IPK = 0, 96, 192, 288, 384
+    ID, ICG, ICP, ISOC, IPK = 0, steps, steps * 2, steps * 3, steps * 4
     use_excess = peak_floor is not None
-    IPKX = 385                       # Ppk_excess (monthly mode only)
-    n = 386 if use_excess else 385
+    IPKX = IPK + 1                    # Ppk_excess (monthly mode only)
+    n = IPKX + 1 if use_excess else IPK + 1
 
     def soc_idx(k):  # soc[k], k = 1..96
         return ISOC + (k - 1)
 
     # ---- Objective (minimise) ----
     c = np.zeros(n)
-    for t in range(96):
+    for t in range(steps):
         c[ICG + t] += tariff[t] * dt          # buying energy to charge
         c[ID + t] += -tariff[t] * dt          # discharging displaces a grid buy
         # cp (free PV) has zero energy cost; degradation applies to throughput
@@ -112,11 +116,11 @@ def solve_day_lp(eff_load, pv_surplus, cfg, demand_rate_per_kW,
     # dropped from the objective and re-added when reporting cost.
 
     # ---- Equality: SOC dynamics, t = 0..95 ----
-    A_eq = np.zeros((96, n))
-    b_eq = np.zeros(96)
+    A_eq = np.zeros((steps, n))
+    b_eq = np.zeros(steps)
     a = eta_c * dt / E          # charge gain per kW
     b = dt / (eta_d * E)        # discharge drain per kW
-    for t in range(96):
+    for t in range(steps):
         A_eq[t, soc_idx(t + 1)] = 1.0
         if t >= 1:
             A_eq[t, soc_idx(t)] = -1.0
@@ -128,23 +132,25 @@ def solve_day_lp(eff_load, pv_surplus, cfg, demand_rate_per_kW,
     # ---- Inequalities A_ub x ≤ b_ub ----
     rows, bvec = [], []
     # (a) no export: d[t] - cg[t] ≤ eff_load[t]
-    for t in range(96):
+    for t in range(steps):
         r = np.zeros(n)
         r[ID + t] = 1.0
         r[ICG + t] = -1.0
         rows.append(r)
         bvec.append(eff_load[t])
     # (b) 30-min rolling-avg peak: 0.5(g[t]+g[t+1]) ≤ Ppk
-    for t in range(96 - WIN + 1):
+    for window in _demand_windows(steps, dt):
         r = np.zeros(n)
-        for k in (t, t + 1):
-            r[ICG + k] += 0.5
-            r[ID + k] += -0.5
+        eff_weighted = 0.0
+        for k, weight in window:
+            r[ICG + k] += weight
+            r[ID + k] += -weight
+            eff_weighted += weight * eff_load[k]
         r[IPK] = -1.0
         rows.append(r)
-        bvec.append(-0.5 * (eff_load[t] + eff_load[t + 1]))
+        bvec.append(-eff_weighted)
     # (c) charge power: cg[t] + cp[t] ≤ P_rated
-    for t in range(96):
+    for t in range(steps):
         r = np.zeros(n)
         r[ICG + t] = 1.0
         r[ICP + t] = 1.0
@@ -162,13 +168,13 @@ def solve_day_lp(eff_load, pv_surplus, cfg, demand_rate_per_kW,
 
     # ---- Bounds ----
     bounds = [(None, None)] * n
-    for t in range(96):
+    for t in range(steps):
         bounds[ID + t] = (0.0, P_rated)
         bounds[ICG + t] = (0.0, P_rated)
         bounds[ICP + t] = (0.0, min(P_rated, pv_surplus[t]))
-    for k in range(1, 97):
+    for k in range(1, steps + 1):
         lo = soc_lo
-        if k == 96:
+        if k == steps:
             lo = max(soc_lo, soc_end_min)
         bounds[soc_idx(k)] = (lo, soc_max)
     bounds[IPK] = (0.0, None)
@@ -181,14 +187,14 @@ def solve_day_lp(eff_load, pv_surplus, cfg, demand_rate_per_kW,
         return {"status": "INFEAS", "message": res.message}
 
     x = res.x
-    d = [float(x[ID + t]) for t in range(96)]
-    cg = [float(x[ICG + t]) for t in range(96)]
-    cp = [float(x[ICP + t]) for t in range(96)]
-    soc = [soc_init] + [float(x[soc_idx(k)]) for k in range(1, 97)]
+    d = [float(x[ID + t]) for t in range(steps)]
+    cg = [float(x[ICG + t]) for t in range(steps)]
+    cp = [float(x[ICP + t]) for t in range(steps)]
+    soc = [soc_init] + [float(x[soc_idx(k)]) for k in range(1, steps + 1)]
     Ppk = float(x[IPK])
 
-    p_bess = [d[t] - (cg[t] + cp[t]) for t in range(96)]      # +dis / -chg
-    p_grid = [eff_load[t] + cg[t] - d[t] for t in range(96)]  # ≥ 0
+    p_bess = [d[t] - (cg[t] + cp[t]) for t in range(steps)]      # +dis / -chg
+    p_grid = [eff_load[t] + cg[t] - d[t] for t in range(steps)]  # >= 0
     # Clamp tiny numerical negatives from the solver.
     p_grid = [max(0.0, g) if g > -1e-6 else g for g in p_grid]
 
