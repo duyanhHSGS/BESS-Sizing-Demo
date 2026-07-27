@@ -1,4 +1,4 @@
-"""lp_core.py — shared 96-slot daily LP for BESS+PV dispatch.
+"""lp_core.py  shared 96-slot daily LP for BESS+PV dispatch.
 
 Used by BOTH LP-PF (perfect-foresight upper bound) and Option 2's
 day-ahead planner. The objective and constraints are written to match
@@ -6,24 +6,24 @@ EXACTLY the cost model that ``sadrbc.compute_kpi`` scores, so any plan
 produced here can be fairly compared against SADRBC v13 on the same
 30-day harness:
 
-  * energy cost   = Σ tariff[t]·max(0,grid[t])·Δt
-  * capacity cost = (T_cap / days_in_month) · PMax,
+  * energy cost   =  tariff[t]max(0,grid[t])t
+  * capacity cost = (T_cap / days_in_month)  PMax,
                     PMax = max 30-min ROLLING-AVERAGE of grid import
-  * zero export   = grid[t] ≥ 0 ∀t (TT05/2025, ENABLE_EXPORT=False)
+  * zero export   = grid[t]  0 t (TT05/2025, ENABLE_EXPORT=False)
 
 Effective-load convention (WHY): PV first offsets load on site; only the
 net demand reaches the meter. Excess PV (pv>load) is free energy that may
-only charge the battery or be curtailed — never exported.
+only charge the battery or be curtailed  never exported.
 
   eff_load[t]    = max(0, load[t] - pv[t])      # net demand after PV
   pv_surplus[t]  = max(0, pv[t] - load[t])      # free PV for charging
 
 Decision variables (per 96-slot day):
-  d[t]   ≥ 0  discharge to load                       (kW)
-  cg[t]  ≥ 0  charge from grid (costs energy)         (kW)
-  cp[t]  ≥ 0  charge from free PV surplus (cost-free)  (kW), ≤ pv_surplus[t]
+  d[t]    0  discharge to load                       (kW)
+  cg[t]   0  charge from grid (costs energy)         (kW)
+  cp[t]   0  charge from free PV surplus (cost-free)  (kW),  pv_surplus[t]
   soc[k]      state of charge fraction, k = 1..96
-  Ppk    ≥ 0  billed peak (30-min rolling avg of grid) (kW)
+  Ppk     0  billed peak (30-min rolling avg of grid) (kW)
 
   grid[t] = eff_load[t] + cg[t] - d[t]
 """
@@ -32,7 +32,7 @@ import numpy as np
 from scipy.optimize import linprog
 
 # Demand charge is billed monthly but the v13 harness amortises it per day
-# (capacity_cost = PMax_today · T_cap / days_in_month). We mirror that here
+# (capacity_cost = PMax_today  T_cap / days_in_month). We mirror that here
 # so the LP optimises the SAME objective the harness scores.
 
 
@@ -61,7 +61,7 @@ def solve_day_lp(eff_load, pv_surplus, cfg, demand_rate_per_kW,
                                 (0 = LP-PF loosest bound; 0.10 = Option 2 reserve)
     degradation_vnd_per_kwh : float  optional throughput penalty (battery health)
     peak_floor : float or None  if set, only the peak ABOVE this floor is billed
-                                (Option 2's `P_peak >= month_peak_so_far` design —
+                                (Option 2's `P_peak >= month_peak_so_far` design 
                                 under real monthly-max EVN billing, today's demand
                                 charge is the MARGINAL increment over the month's
                                 running peak, so days that don't set a new monthly
@@ -112,7 +112,7 @@ def solve_day_lp(eff_load, pv_surplus, cfg, demand_rate_per_kW,
         c[IPK] = 1e-3                          # tiny pin so Ppk tracks the true peak
     else:
         c[IPK] = demand_rate_per_kW
-    # NOTE: the constant Σ tariff·eff_load·dt (baseline net-load energy) is
+    # NOTE: the constant  tariffeff_loaddt (baseline net-load energy) is
     # dropped from the objective and re-added when reporting cost.
 
     # ---- Equality: SOC dynamics, t = 0..95 ----
@@ -129,16 +129,16 @@ def solve_day_lp(eff_load, pv_surplus, cfg, demand_rate_per_kW,
         A_eq[t, ID + t] = +b
         b_eq[t] = soc_init if t == 0 else 0.0
 
-    # ---- Inequalities A_ub x ≤ b_ub ----
+    # ---- Inequalities A_ub x  b_ub ----
     rows, bvec = [], []
-    # (a) no export: d[t] - cg[t] ≤ eff_load[t]
+    # (a) no export: d[t] - cg[t]  eff_load[t]
     for t in range(steps):
         r = np.zeros(n)
         r[ID + t] = 1.0
         r[ICG + t] = -1.0
         rows.append(r)
         bvec.append(eff_load[t])
-    # (b) 30-min rolling-avg peak: 0.5(g[t]+g[t+1]) ≤ Ppk
+    # (b) 30-min rolling-avg peak: 0.5(g[t]+g[t+1])  Ppk
     for window in _demand_windows(steps, dt):
         r = np.zeros(n)
         eff_weighted = 0.0
@@ -149,14 +149,14 @@ def solve_day_lp(eff_load, pv_surplus, cfg, demand_rate_per_kW,
         r[IPK] = -1.0
         rows.append(r)
         bvec.append(-eff_weighted)
-    # (c) charge power: cg[t] + cp[t] ≤ P_rated
+    # (c) charge power: cg[t] + cp[t]  P_rated
     for t in range(steps):
         r = np.zeros(n)
         r[ICG + t] = 1.0
         r[ICP + t] = 1.0
         rows.append(r)
         bvec.append(P_rated)
-    # (d) monthly mode: Ppk_excess ≥ Ppk − peak_floor  ⇔  Ppk − Ppk_excess ≤ floor
+    # (d) monthly mode: Ppk_excess  Ppk  peak_floor    Ppk  Ppk_excess  floor
     if use_excess:
         r = np.zeros(n)
         r[IPK] = 1.0

@@ -1,4 +1,4 @@
-"""ppo_agent.py — compact PPO (clipped surrogate, GAE) for the BESS CMDP.
+"""ppo_agent.py  compact PPO (clipped surrogate, GAE) for the BESS CMDP.
 
 The network is deliberately small (2x64 MLP) so a policy step stays far
 below the 500 ms edge cycle-time budget on a Raspberry Pi class CPU.
@@ -66,7 +66,7 @@ class PPOAgent:
         self.gamma, self.lam, self.clip = gamma, lam, clip
         self.epochs, self.minibatch = epochs, minibatch
         self.ent_coef, self.vf_coef = ent_coef, vf_coef
-        self.meta = {}          # deployment context (p_ref_kw, obs_variant…)
+        self.meta = {}          # deployment context (p_ref_kw, obs_variant)
 
     # ------------------------------------------------------------------
     @torch.no_grad()

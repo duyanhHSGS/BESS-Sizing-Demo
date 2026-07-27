@@ -1,4 +1,4 @@
-# Sizing Demo — BESS + Solar PV Sizing Tool
+# Sizing Demo  BESS + Solar PV Sizing Tool
 
 A lightweight Flask web application that benchmarks battery energy storage system (BESS) performance against an Oracle Linear Programming (LP) solver. It uses real industrial load and PV data from Youngone to simulate energy cost savings, peak shaving, and battery wear.
 
@@ -37,8 +37,8 @@ pip install -r requirements.txt
 
 This installs:
 
-* **Flask** (>= 2.0.0) — web framework
-* **SciPy** (>= 1.7.0) — LP solver (HiGHS method)
+* **Flask** (>= 2.0.0)  web framework
+* **SciPy** (>= 1.7.0)  LP solver (HiGHS method)
 
 ---
 
@@ -64,10 +64,10 @@ Expected output:
 
 Navigate to [http://127.0.0.1:5000](http://127.0.0.1:5000) in your browser to access:
 
-* **Benchmark tab** — baseline cost without a battery
-* **Oracle LP tab** — theoretical optimum dispatch using perfect foresight
-* **Settings form** — configurable battery parameters, tariff, and cost assumptions
-* **Save Parameters button** — recalculates both benchmarks based on updated inputs
+* **Benchmark tab**  baseline cost without a battery
+* **Oracle LP tab**  theoretical optimum dispatch using perfect foresight
+* **Settings form**  configurable battery parameters, tariff, and cost assumptions
+* **Save Parameters button**  recalculates both benchmarks based on updated inputs
 
 ---
 
@@ -75,15 +75,15 @@ Navigate to [http://127.0.0.1:5000](http://127.0.0.1:5000) in your browser to ac
 
 ```text
 Sizing_Demo/
-├── app.py                     # Flask entry point
-├── benchmark.py               # No-battery baseline calculator
-├── oracle_lp.py               # LP optimal dispatch (SciPy)
-├── settings.py                # Default parameters & form fields
-├── templates/
-│   └── index.html             # UI template
-├── offline_data_Youngone.csv  # Industrial dataset (required)
-├── requirements.txt           # Python dependencies
-└── README.md                  # Project documentation
+ app.py                     # Flask entry point
+ benchmark.py               # No-battery baseline calculator
+ oracle_lp.py               # LP optimal dispatch (SciPy)
+ settings.py                # Default parameters & form fields
+ templates/
+    index.html             # UI template
+ offline_data_Youngone.csv  # Industrial dataset (required)
+ requirements.txt           # Python dependencies
+ README.md                  # Project documentation
 
 ```
 
@@ -99,8 +99,8 @@ All configurations can be adjusted through the web form. Default values are defi
 | ------------------------ | ------- | ---------------------------------------- |
 | `battery_capacity_kWh`   | 1000    | Usable battery capacity (kWh)            |
 | `battery_power_limit_kW` | 500     | Max charge/discharge power (kW)          |
-| `charge_efficiency`      | 0.95    | Charging efficiency (0–1)                |
-| `discharge_efficiency`   | 0.95    | Discharging efficiency (0–1)             |
+| `charge_efficiency`      | 0.95    | Charging efficiency (01)                |
+| `discharge_efficiency`   | 0.95    | Discharging efficiency (01)             |
 | `billing_expensive`      | 2759    | Peak energy price (VND/kWh)              |
 | `billing_peak_penalty`   | 285414  | Demand charge (VND/kW) for 2-tariff mode |
 

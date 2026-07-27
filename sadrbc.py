@@ -53,7 +53,7 @@ DEFAULT_CONFIG = {
     'W1_START': round(9.5 / 0.25),
     'W2_START': round(17.0 / 0.25),
     'OFF_PEAK_END_STEP': round(4.0 / 0.25),
-    # v13 C4: evening off-peak charge (22-24h) — feature flag.
+    # v13 C4: evening off-peak charge (22-24h)  feature flag.
     # Default False: keeps v12 behaviour (charge only in 00-04h block).
     # Set True only if BESS undersized for morning-only recharge or
     # next-day forecast indicates tight headroom.
@@ -217,7 +217,7 @@ def replan_trigger(minutes_since_plan, fc_err_pv, fc_err_load, soc_drift):
 
 
 def _validate_forecast(P_load, P_pv, name='forecast'):
-    """v13 H5: validate forecast arrays — length 96, finite, non-negative."""
+    """v13 H5: validate forecast arrays  length 96, finite, non-negative."""
     if len(P_load) == 0:
         raise ValueError(f'{name}: P_load is empty')
     if len(P_load) != len(P_pv):
@@ -382,7 +382,7 @@ def forward_dispatch(P_load, P_pv, SOC_floor, P_target,
               and SOC[t] < SOC_target_4am and not rest_mode):
             # v13 C4: morning OFF (00-04) always charges. Evening OFF
             # (22-24) charges only if ENABLE_EVENING_CHARGE flag is set
-            # (default off — current sizing makes morning sufficient).
+            # (default off  current sizing makes morning sufficient).
             p_ch = min(P_rated_eff,
                        (SOC_target_4am - SOC[t]) * cfg.E_cap / (cfg.eta_ch * cfg.dt))
             headroom = P_target - P_load[t]
@@ -502,8 +502,8 @@ def phase3_strategic_plan(P_load, P_pv, day_type, day_type_next=None,
     """v13: t_start/SOC_start/history enable intra-day replan (C1)."""
     cfg = cfg or _DEFAULTS
     if day_type_next is None:
-        # v13 H1: warn — caller should pass day_type_next explicitly so
-        # weekend→working transition is handled correctly. Falling back
+        # v13 H1: warn  caller should pass day_type_next explicitly so
+        # weekendworking transition is handled correctly. Falling back
         # to 'working' may inflate SOC_target_4am unnecessarily.
         day_type_next = 'working'
         if not getattr(cfg, '_h1_warned', False):

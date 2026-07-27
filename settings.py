@@ -1,4 +1,4 @@
-"""System-wide simulation parameters — merged from config/system_config.json."""
+"""System-wide simulation parameters  merged from config/system_config.json."""
 
 # BESS and tariff defaults (used by every optimizer via load_system_config)
 SYSTEM_CONFIG = {

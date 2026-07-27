@@ -1,4 +1,4 @@
-"""grepo_agent.py — Group Relative Enhancement Policy Optimization.
+"""grepo_agent.py  Group Relative Enhancement Policy Optimization.
 
 Faithful implementation of Hu et al. 2026 (Applied Energy 417:128017),
 Section 2.2.2, Eq. (24)-(31):
@@ -10,7 +10,7 @@ Section 2.2.2, Eq. (24)-(31):
     G_hat (26); critic fits G_hat by MSE (27).
   * Hybrid baseline B = (1-beta)*V + beta*mu_tilde where mu_tilde is the
     normalised group-mean return sequence (28)-(29).
-  * Advantage A_hat = G_hat - detach(B)  (30) — no GAE.
+  * Advantage A_hat = G_hat - detach(B)  (30)  no GAE.
   * PPO clipped surrogate (24) + c * value loss, joint Adam update over
     K epochs (31). Gaussian policy with FIXED std lambda (Sec 2.2.2.4),
     actor/critic MLPs 256-128 with Tanh activations, actor mean squashed
@@ -74,7 +74,7 @@ class GREPOAgent:
                       d_run_init=None):
         """Rollout N_g episodes on the SAME episode data (identical exogenous
         trajectory + initial state; Sec 2.2.2.2). Per the paper, an episode
-        is ONE DAY (their T=1440 at 1-min; ours T=96 at 15-min) — pass a
+        is ONE DAY (their T=1440 at 1-min; ours T=96 at 15-min)  pass a
         1-day MonthData. Returns stacked arrays [N_g, T, ...]."""
         obs_g, act_g, logp_g, rew_g = [], [], [], []
         for i in range(self.n_group):

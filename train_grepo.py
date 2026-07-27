@@ -1,4 +1,4 @@
-"""train_grepo.py — train the GREPO agent (Hu et al. 2026) on simulator data.
+"""train_grepo.py  train the GREPO agent (Hu et al. 2026) on simulator data.
 
 Faithful to the paper's episode design: ONE EPISODE = ONE DAY (their
 T=1440 at 1-min resolution; ours T=96 at 15-min). Each iteration samples a
@@ -33,7 +33,7 @@ VAL_EVERY = 10
 
 
 def _load_csv_days(path):
-    """Nạp CSV cache site (date_iso,day_type,step,P_load_kW,P_pv_kW)."""
+    """Np CSV cache site (date_iso,day_type,step,P_load_kW,P_pv_kW)."""
     import csv as _csv
     from scenario_gen import DayData
     by_day: dict = {}
@@ -66,12 +66,12 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--tag", type=str, default="")
     ap.add_argument("--csv", type=str, default=None,
-                    help="train trên dữ liệu site thật (CSV cache) thay "
-                         "vì simulator; tự split train/val như train PPO")
+                    help="train trn d liu site tht (CSV cache) thay "
+                         "v simulator; t split train/val nh train PPO")
     ap.add_argument("--beta", type=float, default=0.5,
-                    help="trọng số hybrid baseline Eq.28")
+                    help="trng s hybrid baseline Eq.28")
     ap.add_argument("--std", type=float, default=0.30,
-                    help="std cố định lambda của policy Gaussian")
+                    help="std c nh lambda ca policy Gaussian")
     ap.add_argument("--tariff-json", type=str, default="",
                     help="Sizing Demo tariff_config.json path.")
     ap.add_argument("--val-days", type=int, default=30,
@@ -101,7 +101,7 @@ def main():
         TOU_RULES["sunday_no_peak"] = bool(tariff.get("sunday_no_peak", False))
         if tariff.get("billing_mode") == "tou":
             cfg.T_cap = 0.0
-    # ---- nguồn dữ liệu: simulator (mặc định) hoặc CSV site thật ----
+    # ---- ngun d liu: simulator (mc nh) hoc CSV site tht ----
     csv_days = None
     if args.csv:
         import math
@@ -132,7 +132,7 @@ def main():
             raise SystemExit(f"CSV has {len(csv_days)} days; need more than {split_days}")
         peak = max(float(d.load.max()) for d in csv_days)
         p_ref = math.ceil(peak / 500.0) * 500.0
-        # floor data-driven như PPO (fix bug site peaky)
+        # floor data-driven nh PPO (fix bug site peaky)
         peaks = [max(_rolling_30_minute_average(np.maximum(0, d.load - d.pv), cfg.dt), default=0.0)
                  for d in csv_days[:-split_days]]
         d_run0 = 0.5 * float(np.mean(peaks))
@@ -147,7 +147,7 @@ def main():
 
     agent = GREPOAgent(OBS_DIM, n_group=args.group, seed=args.seed,
                        beta=args.beta, std=args.std)
-    # meta trước validation đầu tiên để env val dùng đúng floor/p_ref
+    # meta trc validation u tin  env val dng ng floor/p_ref
     agent.meta = {"p_ref_kw": p_ref, "algo": "grepo"}
     if d_run0 is not None:
         agent.meta["d_run_init_kw"] = d_run0
@@ -178,7 +178,7 @@ def main():
         episode = MonthData(days=[day], source="grepo_day")
         soc_init = float(rng.uniform(cfg.SOC_min + cfg.SOC_safety,
                                      cfg.SOC_max))
-        if d_run0 is not None:      # site thật: floor data-driven ± jitter
+        if d_run0 is not None:      # site tht: floor data-driven  jitter
             d_run_init = float(d_run0 * rng.uniform(0.8, 1.5))
         else:
             d_run_init = float(rng.uniform(0.5, 0.9) * p_ref)

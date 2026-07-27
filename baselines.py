@@ -1,10 +1,10 @@
-"""baselines.py — the benchmark set required by the evaluation protocol.
+"""baselines.py  the benchmark set required by the evaluation protocol.
 
   NO-BESS      : grid = max(0, load - pv). Lower reference for savings.
   SADRBC v13   : the production rule-based controller (algorithm/sadrbc.py),
                  fed the day's actuals as its forecast (its best case).
   ORACLE LP-PF : perfect-foresight LP (benchmark_compare/lp_core.py) chained
-                 day-by-day in MONTHLY billing mode — each day pays only the
+                 day-by-day in MONTHLY billing mode  each day pays only the
                  marginal increment of the running monthly peak. This is the
                  optimistic performance estimator of the planning layer.
 

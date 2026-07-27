@@ -1,8 +1,8 @@
-"""bess_env.py — CMDP environment for forecast-free BESS dispatch.
+"""bess_env.py  CMDP environment for forecast-free BESS dispatch.
 
 Design follows the two-layer framework in CoSoLyThuyet_DRL_BESS_Sizing.html
 (Hu et al. 2026): the agent sees only real-time measurements (load, PV, SOC,
-tariff, running monthly peak) — NO forecast — and outputs one continuous
+tariff, running monthly peak)  NO forecast  and outputs one continuous
 action a in [-1, 1] mapped to a desired BESS power.
 
 HARD-CONSTRAINT SAFETY PROJECTION (never learned, always enforced):
@@ -22,11 +22,11 @@ SPARSE DEMAND-CHARGE SHAPING:
   Summed over the month this telescopes to exactly T_cap * (D_peak - D_run0).
   D_run is initialised at d_run_init_frac * p_ref (not 0): any realistic
   monthly peak exceeds that floor, so the telescoped sum differs from the
-  true bill only by a policy-independent constant — but the first-day ramp
+  true bill only by a policy-independent constant  but the first-day ramp
   no longer produces huge spurious penalty spikes that destabilise the
   value function.
 
-POTENTIAL-BASED SOC SHAPING (Ng et al. 1999 — preserves the optimal policy):
+POTENTIAL-BASED SOC SHAPING (Ng et al. 1999  preserves the optimal policy):
   Phi(s) = usable stored energy * eta_dis * price_mid. The agent receives
   gamma*Phi(s') - Phi(s) each step, which gives IMMEDIATE credit for
   storing energy whose payoff (peak discharge) is otherwise ~68 steps away.
@@ -47,7 +47,7 @@ PEAK-SAFE CHARGING PROJECTION:
   peak (cg <= max(0, d_run - eff_load)). Charging is deferrable, and at
   T_cap = 235k VND/kW a self-inflicted peak always dominates the ~7k
   VND/kWh/day arbitrage value it could enable, so this cut never removes
-  the optimum — and it deletes the catastrophic exploration spikes that
+  the optimum  and it deletes the catastrophic exploration spikes that
   destabilised early training.
 """
 from __future__ import annotations
@@ -64,7 +64,7 @@ REWARD_SCALE = 1e6          # rewards in millions of VND
 
 def _ar1_noise_series(actual: np.ndarray, sigma: float, rho: float,
                       rng: np.random.Generator) -> np.ndarray:
-    """Multiplicative AR(1) forecast error — same model Tool A/benchmark
+    """Multiplicative AR(1) forecast error  same model Tool A/benchmark
     uses for the SADRBC forecast, so both controllers see equal quality."""
     if sigma <= 0:
         return actual.copy()
@@ -89,24 +89,24 @@ class BESSEnv:
                  fc_rho: float = 0.9, fc_seed: int = 12345,
                  n_steps: int = STEPS_PER_DAY,
                  dt_hours: float = DT_HOURS):
-        # ĐỘ PHÂN GIẢI tham số hóa: 96×15' (mặc định) hoặc 1440×1'
-        # (chế độ bài báo GREPO). Ngày dữ liệu phải có đúng n_steps mẫu.
+        #  PHN GII tham s ha: 9615' (mc nh) hoc 14401'
+        # (ch  bi bo GREPO). Ngy d liu phi c ng n_steps mu.
         if dt_hours == DT_HOURS and getattr(cfg, "dt", DT_HOURS) != DT_HOURS:
             dt_hours = float(cfg.dt)
             n_steps = steps_per_day_from_dt(dt_hours)
         self.n_steps = int(n_steps)
         self.dt = float(dt_hours)
         cfg.dt = self.dt
-        assert abs(self.n_steps * self.dt - 24.0) < 1e-9,             "n_steps × dt phải = 24h"
-        # cửa sổ billing 30 phút = bao nhiêu mẫu ở độ phân giải này
+        assert abs(self.n_steps * self.dt - 24.0) < 1e-9,             "n_steps  dt phi = 24h"
+        # ca s billing 30 pht = bao nhiu mu   phn gii ny
         self.roll_k = max(2, int(round(0.5 / self.dt)))
         self.cfg = cfg
         self.p_ref = float(p_ref_kw)
         self.deg = float(degradation_vnd_per_kwh)
-        # Floor khởi tạo đỉnh tháng: PHẢI THẤP HƠN đỉnh tối ưu của site,
-        # nếu không agent không bao giờ nhận tín hiệu học cắt đỉnh (bug
-        # thực tế site Tande: 0.6×p_ref = 900 kW > đỉnh tối ưu ~490 kW).
-        # Ưu tiên giá trị tuyệt đối data-driven từ trainer; frac là fallback.
+        # Floor khi to nh thng: PHI THP HN nh ti u ca site,
+        # nu khng agent khng bao gi nhn tn hiu hc ct nh (bug
+        # thc t site Tande: 0.6p_ref = 900 kW > nh ti u ~490 kW).
+        # u tin gi tr tuyt i data-driven t trainer; frac l fallback.
         self.d_run_init = (float(d_run_init_kw) if d_run_init_kw is not None
                            else float(d_run_init_frac) * self.p_ref)
         self.gamma = float(gamma)
@@ -118,10 +118,10 @@ class BESSEnv:
         self.fc_rho = fc_rho
         self._fc_rng = np.random.default_rng(fc_seed)
         self._fc_load = self._fc_pv = None
-        base_tar = tariff_vector(cfg)              # 96 mức 15'
+        base_tar = tariff_vector(cfg)              # 96 mc 15'
         self._tar_base = base_tar
-        # Chủ nhật không cao điểm (quy tắc EVN, bật qua TOU_RULES):
-        # vector riêng, hoán đổi tại biên ngày trong reset()/step()
+        # Ch nht khng cao im (quy tc EVN, bt qua TOU_RULES):
+        # vector ring, hon i ti bin ngy trong reset()/step()
         from common import TOU_RULES, cfg_no_peak
         if TOU_RULES.get("sunday_no_peak"):
             sun = tariff_vector(cfg_no_peak(cfg))
@@ -160,7 +160,7 @@ class BESSEnv:
         self.log_grid = [np.zeros(self.n_steps) for _ in month.days]
         self.log_soc = [np.zeros(self.n_steps + 1) for _ in month.days]
         self.log_pbess = [np.zeros(self.n_steps) for _ in month.days]
-        self._buf = []          # rolling 30' grid thật
+        self._buf = []          # rolling 30' grid tht
         self._buf_nb = []       # rolling 30' grid no-BESS
         self.log_soc[0][0] = self.soc
         self._set_day_tariff()
@@ -186,10 +186,10 @@ class BESSEnv:
         1 h (t+1..t+4) and the following 2 h (t+5..t+12), /p_ref."""
         fc_eff = np.maximum(0.0, self._fc_load - self._fc_pv)
         out = []
-        q = self.n_steps // 24  # số mẫu / giờ
+        q = self.n_steps // 24  # s mu / gi
         for lo, hi in ((t + 1, t + 1 + q), (t + 1 + q, t + 1 + 3 * q)):
             lo, hi = min(lo, self.n_steps), min(hi, self.n_steps)
-            if lo >= hi:                       # end of day → hold last value
+            if lo >= hi:                       # end of day  hold last value
                 out += [fc_eff[-1] / self.p_ref, self._fc_pv[-1] / self.p_ref]
             else:
                 out += [float(fc_eff[lo:hi].mean()) / self.p_ref,
@@ -203,7 +203,7 @@ class BESSEnv:
         load, pv = day.load[t], day.pv[t]
         eff = max(0.0, load - pv)
         sur = max(0.0, pv - load)
-        t_next = min(t + self.n_steps // 24, self.n_steps - 1)  # 1h tới
+        t_next = min(t + self.n_steps // 24, self.n_steps - 1)  # 1h ti
         ang = 2.0 * np.pi * t / self.n_steps
         base = [
             np.sin(ang), np.cos(ang),
@@ -260,7 +260,7 @@ class BESSEnv:
         soc_before = self.soc
         self.soc = self.soc + (cg + cp) * self.dt * cfg.eta_ch / cfg.E_cap \
                    - d * self.dt / (cfg.eta_dis * cfg.E_cap)
-        # numerical guard only — projection already bounds SOC
+        # numerical guard only  projection already bounds SOC
         self.soc = min(cfg.SOC_max, max(cfg.SOC_min, self.soc))
 
         # --- costs (actual, for logging/scoring) ------------------------
@@ -271,7 +271,7 @@ class BESSEnv:
             self._buf.pop(0)
             self._buf_nb.pop(0)
         if len(self._buf) < self.roll_k:
-            d_t = 0.0                    # chưa đủ cửa sổ 30' đầu ngày
+            d_t = 0.0                    # cha  ca s 30' u ngy
             d_t_nb = 0.0
         else:
             d_t = float(np.mean(self._buf))

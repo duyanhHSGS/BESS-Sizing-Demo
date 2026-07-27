@@ -1,4 +1,4 @@
-"""common.py — shared paths, config mapping, tariff helpers and the
+"""common.py  shared paths, config mapping, tariff helpers and the
 monthly-billing scorer used by EVERY method (DRL, SADRBC, Oracle, No-BESS)
 so comparisons are scored on one identical cost model.
 
@@ -50,17 +50,17 @@ def rolling_window_steps(dt_hours: float, window_hours: float = DEMAND_WINDOW_HO
 # ---------------------------------------------------------------------------
 # 2026 Vietnam market CAPEX (same source as sizing/sizing_matrix_2026.py)
 # ---------------------------------------------------------------------------
-CAPEX_BESS_PER_KWH = 5_000_000.0   # VND/kWh — LFP container class
-CAPEX_BESS_PER_KW = 4_000_000.0    # VND/kW  — PCS / installation
+CAPEX_BESS_PER_KWH = 5_000_000.0   # VND/kWh  LFP container class
+CAPEX_BESS_PER_KW = 4_000_000.0    # VND/kW   PCS / installation
 OPEX_PCT_PER_YEAR = 0.02           # of CAPEX, maintenance + insurance
 DISCOUNT_RATE = 0.08
 PROJECT_YEARS = 10
 
-# Tham số tài chính GHI ĐÈ ĐƯỢC từ UI (Tool C /api/config/tariff).
-# realization: tỷ lệ hiện thực hóa — tiết kiệm THỰC THI (DRL/v13 qua plant
-# thật) so với ước lượng Oracle perfect-foresight dùng trong sizing.
-# Đo thực nghiệm: Crystal ~0.86, Tande ~0.54, Namduoc ~0.75 → mặc định
-# thận trọng 0.6; nên cập nhật theo benchmark từng site.
+# Tham s ti chnh GHI  C t UI (Tool C /api/config/tariff).
+# realization: t l hin thc ha  tit kim THC THI (DRL/v13 qua plant
+# tht) so vi c lng Oracle perfect-foresight dng trong sizing.
+# o thc nghim: Crystal ~0.86, Tande ~0.54, Namduoc ~0.75  mc nh
+# thn trng 0.6; nn cp nht theo benchmark tng site.
 FIN = {
     "capex_per_kwh": CAPEX_BESS_PER_KWH,
     "capex_per_kw": CAPEX_BESS_PER_KW,
@@ -100,8 +100,8 @@ def load_system_config() -> SADRBCConfig:
 def make_bess_config(base: SADRBCConfig, e_cap_kwh: float,
                      p_rated_kw: float, p_target_kw: float) -> SADRBCConfig:
     """Clone `base` tariff/SOC/TOU-window settings with a different BESS
-    size. Windows PHẢI được copy — nếu không, biểu giá tùy chỉnh (VD khung
-    cao điểm mới 17:30–22:30) sẽ âm thầm quay về mặc định TT16."""
+    size. Windows PHI c copy  nu khng, biu gi ty chnh (VD khung
+    cao im mi 17:3022:30) s m thm quay v mc nh TT16."""
     return SADRBCConfig({
         "E_cap_kWh": e_cap_kwh,
         "P_rated_kW": p_rated_kw,
@@ -128,9 +128,9 @@ def make_bess_config(base: SADRBCConfig, e_cap_kwh: float,
 
 
 def build_tariff_windows(peak_ranges: str, off_ranges: str, dt_hours: float = DT_HOURS) -> dict:
-    """Đổi chuỗi khung giờ "HH:MM-HH:MM,..." thành step-lists 15′ cho
-    SADRBCConfig. Tối đa 2 khung cao điểm (sáng→W1, chiều/tối→W2);
-    1 khung → W1 rỗng. VD kịch bản mới:
+    """i chui khung gi "HH:MM-HH:MM,..." thnh step-lists 15 cho
+    SADRBCConfig. Ti a 2 khung cao im (sngW1, chiu/tiW2);
+    1 khung  W1 rng. VD kch bn mi:
         peak "17:30-22:30", off "00:00-06:00"."""
     steps_per_day = steps_per_day_from_dt(dt_hours)
 
@@ -156,7 +156,7 @@ def build_tariff_windows(peak_ranges: str, off_ranges: str, dt_hours: float = DT
         w1, w2 = peaks[0], peaks[-1]
     all_peak = set(w1) | set(w2)
     inter = [t for t in range(steps_per_day) if t not in all_peak and t not in set(offs)]
-    # bước kết thúc khối OFF buổi sáng (v13 sạc đêm tới mốc này)
+    # bc kt thc khi OFF bui sng (v13 sc m ti mc ny)
     morning = sorted(t for t in offs if t < steps_per_day // 2)
     off_end = (morning[-1] + 1) if morning else round(4.0 / dt_hours)
     return {"W1": w1, "W2": w2, "OFF": sorted(set(offs)), "INTER": inter,
@@ -170,14 +170,14 @@ def tariff_vector(cfg: SADRBCConfig) -> np.ndarray:
                     dtype=np.float64)
 
 
-# Quy tắc TOU theo lịch (EVN: Chủ nhật KHÔNG có giờ cao điểm — giờ đó
-# tính giá bình thường). Bật/tắt từ cấu hình biểu giá Tool C.
+# Quy tc TOU theo lch (EVN: Ch nht KHNG c gi cao im  gi 
+# tnh gi bnh thng). Bt/tt t cu hnh biu gi Tool C.
 TOU_RULES = {"sunday_no_peak": False}
 
 
 def is_sunday(day) -> bool:
-    """DayData → có phải Chủ nhật không (dựa date_iso; thiếu ngày → False,
-    dữ liệu simulator không có lịch thật nên không áp quy tắc)."""
+    """DayData  c phi Ch nht khng (da date_iso; thiu ngy  False,
+    d liu simulator khng c lch tht nn khng p quy tc)."""
     iso = getattr(day, "date_iso", None)
     if not iso:
         return False
@@ -189,8 +189,8 @@ def is_sunday(day) -> bool:
 
 
 def cfg_no_peak(cfg: SADRBCConfig) -> SADRBCConfig:
-    """Clone cfg với khung cao điểm rỗng (giờ cao điểm → giá bình thường)
-    — dùng cho ngày Chủ nhật khi TOU_RULES['sunday_no_peak'] bật."""
+    """Clone cfg vi khung cao im rng (gi cao im  gi bnh thng)
+     dng cho ngy Ch nht khi TOU_RULES['sunday_no_peak'] bt."""
     c = make_bess_config(cfg, cfg.E_cap, cfg.P_rated_nominal,
                          cfg.P_target_user)
     old_peak = set(c.W1) | set(c.W2)
@@ -218,8 +218,8 @@ def rolling_pmax_day(p_grid_day: np.ndarray, dt_hours: float = DT_HOURS) -> floa
 def score_month(p_grid_days: list[np.ndarray], cfg: SADRBCConfig,
                 days: list | None = None) -> dict:
     """Monthly bill on the shared cost model. Input: list of daily grids.
-    `days` (list DayData, cùng thứ tự với grids): cho quy tắc lịch —
-    Chủ nhật không cao điểm khi TOU_RULES['sunday_no_peak'] bật."""
+    `days` (list DayData, cng th t vi grids): cho quy tc lch 
+    Ch nht khng cao im khi TOU_RULES['sunday_no_peak'] bt."""
     tar = tariff_vector(cfg)
     tar_sun = (tariff_vector(cfg_no_peak(cfg))
                if TOU_RULES.get("sunday_no_peak") and days else tar)

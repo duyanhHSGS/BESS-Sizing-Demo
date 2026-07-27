@@ -997,51 +997,51 @@ Pareto frontier? = whether this candidate is non-dominated among the selected cu
         <h3>Objective</h3>
         <pre class="formula">MINIMIZE:
 
-  [t=196] (
-      EnergyPrice(t)  dt  (
+  Σ[t=1→96] (
+      EnergyPrice(t) × dt × (
           GridCharge(t) - BatteryDischarge(t)
       )
   )
-      <span class="formula-note"> Net energy cost</span>
+      <span class="formula-note">← Net energy cost</span>
 
-+ [t=196] (
-      BatteryWearCost  dt  (
++ Σ[t=1→96] (
+      BatteryWearCost × dt × (
           BatteryDischarge(t)
         + GridCharge(t)
         + SolarCharge(t)
       )
   )
-      <span class="formula-note"> Battery getting old</span>
+      <span class="formula-note">← Battery getting old</span>
 
-+ DemandChargeRate  PeakGrid
-      <span class="formula-note"> Monthly demand charge</span></pre>
++ DemandChargeRate × PeakGrid
+      <span class="formula-note">← Monthly demand charge</span></pre>
       </div>
 
       <div class="math-block" style="margin-top:14px">
         <h3>Constraints</h3>
         <pre class="formula">GridImport(t)
   = EffectiveLoad(t) + GridCharge(t) - BatteryDischarge(t)
-   0
-      <span class="formula-note"> No electricity export</span>
+  ≥ 0
+      <span class="formula-note">← No electricity export</span>
 
 BatterySOC(t+1)
   = BatterySOC(t)
-  + (ChargeEfficiency  dt / BatteryCapacity)  GridCharge(t)
-  + (ChargeEfficiency  dt / BatteryCapacity)  SolarCharge(t)
-  - (dt / (DischargeEfficiency  BatteryCapacity))  BatteryDischarge(t)
-      <span class="formula-note"> Battery SOC update</span>
+  + (ChargeEfficiency × dt / BatteryCapacity) × GridCharge(t)
+  + (ChargeEfficiency × dt / BatteryCapacity) × SolarCharge(t)
+  - (dt / (DischargeEfficiency × BatteryCapacity)) × BatteryDischarge(t)
+      <span class="formula-note">← Battery SOC update</span>
 
-0  BatteryDischarge(t)  BatteryPowerLimit
-0  GridCharge(t)  BatteryPowerLimit
-0  SolarCharge(t)  BatteryPowerLimit
-0  SolarCharge(t)  SolarSurplus(t)
+0 ≤ BatteryDischarge(t) ≤ BatteryPowerLimit
+0 ≤ GridCharge(t) ≤ BatteryPowerLimit
+0 ≤ SolarCharge(t) ≤ BatteryPowerLimit
+0 ≤ SolarCharge(t) ≤ SolarSurplus(t)
 
-MinimumSOC  BatterySOC(t)  MaximumSOC
-BatterySOC(96)  RequiredFinalSOC
+MinimumSOC ≤ BatterySOC(t) ≤ MaximumSOC
+BatterySOC(96) ≥ RequiredFinalSOC
 
-0.5  (GridImport(t) + GridImport(t+1))  PeakGrid
+0.5 × (GridImport(t) + GridImport(t+1)) ≤ PeakGrid
 for t = 0 ... 95
-      <span class="formula-note"> 30-minute rolling average demand</span></pre>
+      <span class="formula-note">← 30-minute rolling average demand</span></pre>
       </div>
     </section>
     </section>

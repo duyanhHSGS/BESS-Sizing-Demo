@@ -1,107 +1,107 @@
 MINIMIZE:
 
-    Σ[t=1→96] (
+    [t=196] (
         EnergyPrice(t)
-        × dt
-        × (
+         dt
+         (
             GridCharge(t)
             - BatteryDischarge(t)
         )
     )
-        ← Net energy cost
+         Net energy cost
 
-  + Σ[t=1→96] (
+  + [t=196] (
         BatteryWearCost
-        × dt
-        × (
+         dt
+         (
             BatteryDischarge(t)
             + GridCharge(t)
             + SolarCharge(t)
         )
     )
-        ← Battery getting old
+         Battery getting old
 
-  + DemandChargeRate × PeakGrid
-        ← Monthly demand charge
+  + DemandChargeRate  PeakGrid
+         Monthly demand charge
 
 
-──────────────────────────────────────────────────────────
+
 Subject to
-──────────────────────────────────────────────────────────
+
 
 GridImport(t)
     = EffectiveLoad(t)
     + GridCharge(t)
     - BatteryDischarge(t)
-    ≥ 0
-        ← No electricity export
+     0
+         No electricity export
 
 
 BatterySOC(t+1)
     =
     BatterySOC(t)
 
-    + (ChargeEfficiency × dt / BatteryCapacity)
-        × GridCharge(t)
+    + (ChargeEfficiency  dt / BatteryCapacity)
+         GridCharge(t)
 
-    + (ChargeEfficiency × dt / BatteryCapacity)
-        × SolarCharge(t)
+    + (ChargeEfficiency  dt / BatteryCapacity)
+         SolarCharge(t)
 
-    - (dt / (DischargeEfficiency × BatteryCapacity))
-        × BatteryDischarge(t)
+    - (dt / (DischargeEfficiency  BatteryCapacity))
+         BatteryDischarge(t)
 
-        ← Battery SOC update
+         Battery SOC update
 
 
-0 ≤ BatteryDischarge(t) ≤ BatteryPowerLimit
+0  BatteryDischarge(t)  BatteryPowerLimit
 
-0 ≤ GridCharge(t) ≤ BatteryPowerLimit
+0  GridCharge(t)  BatteryPowerLimit
 
-0 ≤ SolarCharge(t) ≤ BatteryPowerLimit
+0  SolarCharge(t)  BatteryPowerLimit
 
-0 ≤ SolarCharge(t) ≤ SolarSurplus(t)
+0  SolarCharge(t)  SolarSurplus(t)
 
-MinimumSOC ≤ BatterySOC(t) ≤ MaximumSOC
+MinimumSOC  BatterySOC(t)  MaximumSOC
 
-BatterySOC(96) ≥ RequiredFinalSOC
+BatterySOC(96)  RequiredFinalSOC
 
-0.5 × (
+0.5  (
     GridImport(t)
     + GridImport(t+1)
 )
-≤ PeakGrid             ONLY if dt is 15 mins
+ PeakGrid             ONLY if dt is 15 mins
 
 for t = 0 ... 95
 
-        ← 30-minute rolling average demand
+         30-minute rolling average demand
 
 
-──────────────────────────────────────────────────────────
+
 Decision Variables
-──────────────────────────────────────────────────────────
+
 
 BatteryDischarge(t)
-    Battery → Load (kW)
+    Battery  Load (kW)
 
 GridCharge(t)
-    Grid → Battery (kW)
+    Grid  Battery (kW)
 
 SolarCharge(t)
-    PV Surplus → Battery (kW)
+    PV Surplus  Battery (kW)
 
 GridImport(t)
     Power imported from the grid (kW)
 
 BatterySOC(t)
-    Battery state of charge (0–1)
+    Battery state of charge (01)
 
 PeakGrid
     Monthly billed peak demand (kW)
 
 
-──────────────────────────────────────────────────────────
+
 Derived Variables
-──────────────────────────────────────────────────────────
+
 
 EffectiveLoad(t)
     = max(0, Load(t) - PV(t))
@@ -110,9 +110,9 @@ SolarSurplus(t)
     = max(0, PV(t) - Load(t))
 
 
-──────────────────────────────────────────────────────────
+
 Parameters
-──────────────────────────────────────────────────────────
+
 
 Load(t)
     Building load (kW)

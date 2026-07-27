@@ -1,12 +1,12 @@
-"""scenario_gen.py — two data sources for the experimental protocol.
+"""scenario_gen.py  two data sources for the experimental protocol.
 
-1. REAL   : the measured 30-day dataset in data/ (held out — evaluation only).
+1. REAL   : the measured 30-day dataset in data/ (held out  evaluation only).
 2. SIMULATOR: parameterised synthetic month generator that reproduces the
    statistical structure of data_generation/generate_{load,pv}.py (1-shift
    factory, 500 kWp PV, weather mix) but is fully seedable so the DRL agent
    trains on an unlimited stream of unseen days.
 
-Training NEVER sees the real dataset — that is the core of the
+Training NEVER sees the real dataset  that is the core of the
 sim-to-real evaluation design.
 """
 from __future__ import annotations
@@ -80,7 +80,7 @@ def load_real_month() -> MonthData:
 
 
 # ---------------------------------------------------------------------------
-# SIMULATOR — load profiles (mirrors data_generation/generate_load.py)
+# SIMULATOR  load profiles (mirrors data_generation/generate_load.py)
 # ---------------------------------------------------------------------------
 def _working_load(rng: np.random.Generator, scale: float, n_steps: int, dt_hours: float) -> np.ndarray:
     h = np.arange(n_steps) * dt_hours
@@ -103,7 +103,7 @@ def _flat_load(rng, level_kw, sigma, n_steps: int):
 
 
 # ---------------------------------------------------------------------------
-# SIMULATOR — PV profiles (mirrors data_generation/generate_pv.py)
+# SIMULATOR  PV profiles (mirrors data_generation/generate_pv.py)
 # ---------------------------------------------------------------------------
 def _bell(h, peak_kw, peak_h=12.0, sigma_h=2.6):
     v = peak_kw * np.exp(-((h - peak_h) ** 2) / (2 * sigma_h ** 2))
@@ -123,7 +123,7 @@ def _pv_profile(rng: np.random.Generator, weather: str,
     elif weather == "rainy_heavy":
         v = _bell(h, rng.uniform(40, 80), sigma_h=3.5)
         rel = 0.30
-    else:  # sunny_morning_only — strong morning, collapses after midday
+    else:  # sunny_morning_only  strong morning, collapses after midday
         v = _bell(h, 300.0, peak_h=10.0, sigma_h=2.0)
         after = h >= 12.0
         v[after] = np.minimum(v[after], 50.0)
