@@ -189,6 +189,13 @@
       margin-top: 8px;
     }
 
+    .cache-notice {
+      border-left: 3px solid #38bdf8;
+      color: #bae6fd;
+      margin-top: 8px;
+      padding-left: 10px;
+    }
+
     .mode-pick {
       display: flex;
       flex-wrap: wrap;
@@ -714,6 +721,11 @@
         <button class="primary" type="submit" name="form_action" value="save">Apply CSV</button>
       </div>
       <div class="info">Selected CSV: {{ selected_data_csv }}. Detected time step dt is {{ dt }} h.</div>
+      {% if exact_oracle_cache_exists %}
+      <div class="info cache-notice">This selected CSV file already has cached Oracle LP for the current inputs, and the app is using it right now. If you want to calculate again, click Calculate.</div>
+      {% elif csv_has_oracle_cache %}
+      <div class="info cache-notice">This selected CSV file has cached Oracle LP from another input combo. Save matching inputs to use it, or click Calculate to make a fresh cache.</div>
+      {% endif %}
 
       <h2>Battery operation inputs</h2>
       <div class="row">
@@ -1157,6 +1169,8 @@ for t = 0 ... 95
     const candidateOracles = {{ candidate_oracles | tojson }};
     const selectedCandidateIndex = {{ selected_candidate_index | tojson }};
     const shouldRunCandidateCalculation = {{ should_calculate | tojson }};
+    const exactOracleCacheExists = {{ exact_oracle_cache_exists | tojson }};
+    const csvHasOracleCache = {{ csv_has_oracle_cache | tojson }};
     const daySelect = document.getElementById("benchmark-day");
     const benchmarkBatterySelect = document.getElementById("benchmark-battery");
     const chart = document.getElementById("benchmark-chart");
@@ -1521,6 +1535,15 @@ for t = 0 ... 95
       });
     }
 
+    function refreshCachedSizingRows() {
+      candidateOracles.forEach((candidate, index) => {
+        if (candidate.oracle && candidate.oracle.summary && candidate.oracle.summary.solved_day_count) {
+          updateSizingRow(index, candidate);
+        }
+      });
+      updateParetoStatus();
+    }
+
     function annualizedSavingsFromBillDiff(summary) {
       const billDiff = Number(benchmark.summary.total_bill_vnd || 0) - Number(summary.total_bill_vnd || 0);
       const dayCount = Math.max(1, Number(benchmark.summary.day_count || benchmark.days.length || 0));
@@ -1578,14 +1601,17 @@ for t = 0 ... 95
           const label = candidateOracles[index].label;
           appendProgress(`[${index + 1}/${candidateOracles.length}] Calculating ${label}`);
           try {
-            const response = await fetch(`/candidate-oracle/${index}?t=${Date.now()}`);
+            const response = await fetch(`/candidate-oracle/${index}?force=1&t=${Date.now()}`);
             if (!response.ok) {
               throw new Error(`HTTP ${response.status}`);
             }
             const payload = await response.json();
             candidateOracles[payload.index] = payload.candidate;
             updateSizingRow(payload.index, payload.candidate);
-            appendProgress(`[${payload.index + 1}/${candidateOracles.length}] Done ${payload.candidate.label}`, "done");
+            const cacheMode = payload.candidate.oracle && payload.candidate.oracle.cache && payload.candidate.oracle.cache.hit
+              ? "loaded cached"
+              : "calculated fresh";
+            appendProgress(`[${payload.index + 1}/${candidateOracles.length}] Done ${payload.candidate.label} (${cacheMode})`, "done");
 
             if (Number(benchmarkBatterySelect.value || 0) === payload.index) {
               hideTooltip();
@@ -2593,6 +2619,17 @@ for t = 0 ... 95
       }
     });
     drawBenchmark();
+    refreshCachedSizingRows();
+    if (!shouldRunCandidateCalculation) {
+      resetProgress();
+      if (exactOracleCacheExists) {
+        appendProgress("Selected CSV already has cached Oracle LP for these inputs. Using cached results. Click Calculate to calculate again.", "done");
+      } else if (csvHasOracleCache) {
+        appendProgress("Selected CSV has Oracle LP cache for another input combo. Change inputs back or click Calculate for a fresh cache.");
+      } else {
+        appendProgress("Waiting to start...");
+      }
+    }
     if (shouldRunCandidateCalculation) {
       loadCandidateOracles();
     }

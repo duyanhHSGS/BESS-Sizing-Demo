@@ -2,6 +2,7 @@ from flask import Flask, Response, jsonify, render_template, request
 
 import dispatch_runner
 import dispatch_store
+import oracle_cache
 from benchmark import (
     build_benchmark,
     detect_dt_hours,
@@ -47,10 +48,11 @@ def candidate_oracle(index):
         return jsonify({"error": "Candidate index out of range."}), 404
 
     candidate = candidates[index]
+    force = request.args.get("force") == "1"
     return jsonify(
         {
             "index": index,
-            "candidate": _candidate_oracle(PARAMETERS, candidate),
+            "candidate": _candidate_oracle(PARAMETERS, candidate, force=force),
         }
     )
 
@@ -198,13 +200,19 @@ def view_context():
     PARAMETERS["selected_data_csv"] = selected_data_filename(PARAMETERS)
     PARAMETERS["dt"] = str(detect_dt_hours(selected_data_path(PARAMETERS)))
     benchmark = build_benchmark(PARAMETERS)
+    candidate_oracles = _cached_candidate_oracles()
     return {
         **PARAMETERS,
         "data_csv_files": list_data_csvs(),
         "benchmark": benchmark,
-        "oracle": _pending_oracle(),
+        "oracle": candidate_oracles[0]["oracle"] if candidate_oracles else _pending_oracle(),
         "sample_battery_candidates": SAMPLE_BATTERY_CANDIDATES,
-        "candidate_oracles": _pending_candidate_oracles(),
+        "candidate_oracles": candidate_oracles,
+        "csv_has_oracle_cache": oracle_cache.selected_csv_has_cache(PARAMETERS),
+        "exact_oracle_cache_exists": any(
+            candidate.get("oracle", {}).get("cache", {}).get("hit")
+            for candidate in candidate_oracles
+        ),
         "selected_candidate_index": _selected_candidate_index(PARAMETERS),
         "checked_2tc": "checked" if PARAMETERS["billing_mode"] == "2tc" else "",
         "checked_tou": "checked" if PARAMETERS["billing_mode"] == "tou" else "",
@@ -212,7 +220,7 @@ def view_context():
     }
 
 
-def _candidate_oracle(parameters, candidate):
+def _candidate_oracle(parameters, candidate, *, force=False):
     candidate_parameters = {
         **parameters,
         "battery_capacity_kWh": str(candidate["battery_capacity_kWh"]),
@@ -220,18 +228,29 @@ def _candidate_oracle(parameters, candidate):
     }
     return {
         **candidate,
-        "oracle": build_oracle_lp(candidate_parameters),
+        "oracle": oracle_cache.get_or_build_oracle_lp(
+            candidate_parameters,
+            build_oracle_lp,
+            force=force,
+        ),
     }
 
 
-def _pending_candidate_oracles():
-    return [
-        {
-            **candidate,
-            "oracle": _pending_oracle(),
+def _cached_candidate_oracles():
+    candidates = []
+    for candidate in _active_battery_candidates(PARAMETERS):
+        candidate_parameters = {
+            **PARAMETERS,
+            "battery_capacity_kWh": str(candidate["battery_capacity_kWh"]),
+            "battery_power_limit_kW": str(candidate["battery_power_limit_kW"]),
         }
-        for candidate in _active_battery_candidates(PARAMETERS)
-    ]
+        candidates.append(
+            {
+                **candidate,
+                "oracle": oracle_cache.cached_oracle_lp(candidate_parameters) or _pending_oracle(),
+            }
+        )
+    return candidates
 
 
 def _active_battery_candidates(parameters):
