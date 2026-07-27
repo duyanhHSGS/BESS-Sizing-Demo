@@ -26,7 +26,8 @@ from sadrbc import SADRBCConfig, tariff_for_step  # noqa: E402
 
 STEPS_PER_DAY = 96
 DT_HOURS = 0.25
-ROLL_WIN = 2          # 30-min billing window = 2 x 15-min slots
+DEMAND_WINDOW_HOURS = 0.5
+ROLL_WIN = 2          # Default 30-min billing window = 2 x 15-min slots
 
 # ---------------------------------------------------------------------------
 # 2026 Vietnam market CAPEX (same source as sizing/sizing_matrix_2026.py)
@@ -105,20 +106,26 @@ def make_bess_config(base: SADRBCConfig, e_cap_kwh: float,
     })
 
 
-def build_tariff_windows(peak_ranges: str, off_ranges: str) -> dict:
+def build_tariff_windows(peak_ranges: str, off_ranges: str, dt_hours: float = DT_HOURS) -> dict:
     """Đổi chuỗi khung giờ "HH:MM-HH:MM,..." thành step-lists 15′ cho
     SADRBCConfig. Tối đa 2 khung cao điểm (sáng→W1, chiều/tối→W2);
     1 khung → W1 rỗng. VD kịch bản mới:
         peak "17:30-22:30", off "00:00-06:00"."""
+    steps_per_day = max(1, int(round(24.0 / max(float(dt_hours), 1e-9))))
+
     def to_steps(rng: str) -> list[int]:
         a, b = rng.strip().split("-")
         h1, m1 = map(int, a.split(":"))
         h2, m2 = map(int, b.split(":"))
-        s1 = h1 * 4 + m1 // 15
-        s2 = h2 * 4 + m2 // 15
+        s1 = round((h1 + m1 / 60.0) / dt_hours)
+        s2 = round((h2 + m2 / 60.0) / dt_hours)
         if s2 <= s1:
             s2 += 96                       # qua nửa đêm
-        return [s % 96 for s in range(s1, s2)]
+        if s2 <= s1:
+            s2 += steps_per_day - 96
+        if s2 > s1 + steps_per_day:
+            s2 -= 96 - steps_per_day
+        return [s % steps_per_day for s in range(s1, s2)]
 
     peaks = [to_steps(r) for r in peak_ranges.split(",") if r.strip()]
     offs: list[int] = []
@@ -131,17 +138,18 @@ def build_tariff_windows(peak_ranges: str, off_ranges: str) -> dict:
     else:
         w1, w2 = peaks[0], peaks[-1]
     all_peak = set(w1) | set(w2)
-    inter = [t for t in range(96) if t not in all_peak and t not in set(offs)]
+    inter = [t for t in range(steps_per_day) if t not in all_peak and t not in set(offs)]
     # bước kết thúc khối OFF buổi sáng (v13 sạc đêm tới mốc này)
-    morning = sorted(t for t in offs if t < 48)
-    off_end = (morning[-1] + 1) if morning else 16
+    morning = sorted(t for t in offs if t < steps_per_day // 2)
+    off_end = (morning[-1] + 1) if morning else round(4.0 / dt_hours)
     return {"W1": w1, "W2": w2, "OFF": sorted(set(offs)), "INTER": inter,
             "W1_START": (w1[0] if w1 else w2[0]), "W2_START": w2[0],
             "OFF_PEAK_END_STEP": off_end}
 
 
 def tariff_vector(cfg: SADRBCConfig) -> np.ndarray:
-    return np.array([tariff_for_step(t, cfg) for t in range(STEPS_PER_DAY)],
+    steps_per_day = max(1, int(round(24.0 / max(float(cfg.dt), 1e-9))))
+    return np.array([tariff_for_step(t, cfg) for t in range(steps_per_day)],
                     dtype=np.float64)
 
 
@@ -180,12 +188,13 @@ def tariff_vector_day(cfg: SADRBCConfig, day) -> np.ndarray:
     return tariff_vector(cfg)
 
 
-def rolling_pmax_day(p_grid_day: np.ndarray) -> float:
+def rolling_pmax_day(p_grid_day: np.ndarray, dt_hours: float = DT_HOURS) -> float:
     """Max 30-min rolling average of one day's grid import (kW)."""
     g = np.maximum(0.0, np.asarray(p_grid_day, dtype=np.float64))
-    if len(g) < ROLL_WIN:
+    roll_win = max(1, int(round(DEMAND_WINDOW_HOURS / max(float(dt_hours), 1e-9))))
+    if len(g) < roll_win:
         return float(g.max(initial=0.0))
-    roll = np.convolve(g, np.ones(ROLL_WIN) / ROLL_WIN, mode="valid")
+    roll = np.convolve(g, np.ones(roll_win) / roll_win, mode="valid")
     return float(roll.max(initial=0.0))
 
 
@@ -203,8 +212,8 @@ def score_month(p_grid_days: list[np.ndarray], cfg: SADRBCConfig,
         g = np.maximum(0.0, np.asarray(g, dtype=np.float64))
         t = tar_sun if (days is not None and i < len(days)
                         and is_sunday(days[i])) else tar
-        energy += float(np.sum(g * t) * DT_HOURS)
-        pmax = max(pmax, rolling_pmax_day(g))
+        energy += float(np.sum(g * t) * cfg.dt)
+        pmax = max(pmax, rolling_pmax_day(g, cfg.dt))
     demand = pmax * cfg.T_cap
     return {
         "energy_cost_vnd": energy,

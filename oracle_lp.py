@@ -1,6 +1,7 @@
 from benchmark import (
     _annotate_day_billing,
     _day_energy_cost,
+    _demand_windows,
     _demand_charge,
     _group_days,
     _load_rows,
@@ -8,15 +9,12 @@ from benchmark import (
     _month_start_day,
     _prices_for_day,
     _rounded_series,
+    _rolling_30_minute_average,
     _to_float,
     selected_data_path,
 )
 
 import numpy as np
-
-
-DEMAND_WINDOW_HOURS = 0.5
-FLOAT_EPSILON = 1e-9
 
 
 def build_oracle_lp(parameters):
@@ -298,7 +296,7 @@ def _build_summary(base_days, oracle_days, parameters, dt):
     seer_factor = _clamp(_to_float(parameters.get("billing_real_saving_factor"), 1.0), 0.0, 1.0)
     total_bill = after_energy + after_demand + wear_cost
     month_count = len({_month_start_day(day["day_index"]) for day in base_days})
-    oracle_annual_saving = _planner_annualized_saving(base_days, parameters)
+    oracle_annual_saving = _annualized_monthly_saving(base_days, solved_days, parameters, dt)
     seer_annual_saving = max(0.0, oracle_annual_saving) * seer_factor
     sizing_economics = _sizing_economics(
         parameters,
@@ -523,39 +521,11 @@ def _refresh_rolling_peaks(days, dt):
         day["peak_grid_kW"] = round(max(rolling_grid, default=0.0), 2)
 
 
-def _demand_windows(steps, dt):
-    return [_demand_window(step, steps, dt) for step in range(steps)]
-
-
-def _demand_window(start, steps, dt):
-    available_hours = max(0.0, (steps - start) * dt)
-    window_hours = min(DEMAND_WINDOW_HOURS, available_hours)
-    if window_hours <= 0.0:
-        return [(start, 1.0)]
-
-    window = []
-    remaining_hours = window_hours
-    step = start
-    while step < steps and remaining_hours > FLOAT_EPSILON:
-        covered_hours = min(dt, remaining_hours)
-        window.append((step, covered_hours / window_hours))
-        remaining_hours -= covered_hours
-        step += 1
-    return window
-
-
 def _flatten(days, key):
     values = []
     for day in days:
         values.extend(day[key])
     return values
-
-
-def _rolling_30_minute_average(values, dt):
-    averages = []
-    for window in _demand_windows(len(values), dt):
-        averages.append(sum(values[step] * weight for step, weight in window))
-    return averages
 
 
 def _empty_summary():

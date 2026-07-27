@@ -7,6 +7,8 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DEFAULT_DATA_FILENAME = "offline_data_Youngone.csv"
 DATA_PATH = DATA_DIR / DEFAULT_DATA_FILENAME
+DEMAND_WINDOW_HOURS = 0.5
+FLOAT_EPSILON = 1e-9
 
 
 def list_data_csvs():
@@ -147,7 +149,7 @@ def _group_days(rows, dt):
         pv = [point["pv_kW"] for point in points]
         grid = [max(0.0, point["load_kW"] - point["pv_kW"]) for point in points]
         surplus = [max(0.0, point["pv_kW"] - point["load_kW"]) for point in points]
-        rolling_grid = _rolling_average(grid, 2)
+        rolling_grid = _rolling_30_minute_average(grid, dt)
 
         days.append(
             {
@@ -267,6 +269,35 @@ def _rolling_average(values, window):
         chunk = values[index : index + window]
         averages.append(sum(chunk) / len(chunk))
     return averages
+
+
+def _rolling_30_minute_average(values, dt):
+    values = list(values)
+    averages = []
+    for window in _demand_windows(len(values), dt):
+        averages.append(sum(values[step] * weight for step, weight in window))
+    return averages
+
+
+def _demand_windows(steps, dt):
+    return [_demand_window(step, steps, dt) for step in range(steps)]
+
+
+def _demand_window(start, steps, dt):
+    available_hours = max(0.0, (steps - start) * dt)
+    window_hours = min(DEMAND_WINDOW_HOURS, available_hours)
+    if window_hours <= 0.0:
+        return [(start, 1.0)]
+
+    window = []
+    remaining_hours = window_hours
+    step = start
+    while step < steps and remaining_hours > FLOAT_EPSILON:
+        covered_hours = min(dt, remaining_hours)
+        window.append((step, covered_hours / window_hours))
+        remaining_hours -= covered_hours
+        step += 1
+    return window
 
 
 def _time_labels(step_count, dt):

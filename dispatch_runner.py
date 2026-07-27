@@ -16,7 +16,7 @@ from benchmark import (
     _month_peaks,
     _month_start_day,
     _rounded_series,
-    _rolling_average,
+    _rolling_30_minute_average,
     _to_float,
     selected_data_path,
 )
@@ -89,9 +89,11 @@ def dataset_to_month(csv_path: Path = DATA_PATH) -> MonthData:
 
 def build_dispatch_config(parameters: dict[str, Any], e_cap_kwh: float, p_rated_kw: float):
     base = load_system_config()
+    dt_hours = _to_float(parameters.get("dt"), base.dt)
     windows = build_tariff_windows(
         str(parameters.get("billing_windows_expensive", "")),
         str(parameters.get("billing_windows_cheap", "")),
+        dt_hours,
     )
     TOU_RULES["sunday_no_peak"] = bool(parameters.get("billing_sunday"))
     return SADRBCConfig(
@@ -105,7 +107,7 @@ def build_dispatch_config(parameters: dict[str, Any], e_cap_kwh: float, p_rated_
             "soc_safety_buffer": base.SOC_safety,
             "soc_eod": _to_float(parameters.get("required_final_soc"), base.SOC_eod),
             "soc_min_emergency": base.SOC_min_emergency,
-            "dt_hours": _to_float(parameters.get("dt"), base.dt),
+            "dt_hours": dt_hours,
             "price_peak": _to_float(parameters.get("billing_expensive"), base.price_peak),
             "price_mid": _to_float(parameters.get("billing_normal"), base.price_mid),
             "price_off": _to_float(parameters.get("billing_cheap"), base.price_off),
@@ -212,16 +214,21 @@ def policy_result_to_days(
 ) -> list[dict[str, Any]]:
     days = []
     for index, day in enumerate(month.days):
-        grid = np.maximum(0.0, np.asarray(rollout["p_grid_days"][index], dtype=np.float64))[:96]
-        p_bess = np.asarray(rollout["p_bess_days"][index], dtype=np.float64)[:96]
+        expected_steps = len(day.load)
+        grid = np.maximum(0.0, np.asarray(rollout["p_grid_days"][index], dtype=np.float64))[:expected_steps]
+        p_bess = np.asarray(rollout["p_bess_days"][index], dtype=np.float64)[:expected_steps]
         soc_raw = np.asarray(rollout["soc_days"][index], dtype=np.float64)
-        soc = soc_raw[:96] if len(soc_raw) >= 96 else np.pad(soc_raw, (0, 96 - len(soc_raw)), mode="edge")
+        soc = (
+            soc_raw[:expected_steps]
+            if len(soc_raw) >= expected_steps
+            else np.pad(soc_raw, (0, expected_steps - len(soc_raw)), mode="edge")
+        )
         day_row = {
             "day_index": day.day_index,
             "day_type": day.day_type,
             "date_iso": day.date_iso,
             "grid": _rounded_series(grid),
-            "rolling_grid": _rounded_series(_rolling_average(list(grid), 2)),
+            "rolling_grid": _rounded_series(_rolling_30_minute_average(grid, cfg.dt)),
             "discharge": _rounded_series(np.maximum(0.0, p_bess)),
             "grid_charge": _rounded_series(np.maximum(0.0, -p_bess)),
             "solar_charge": [0.0 for _ in range(len(grid))],
