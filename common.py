@@ -2,7 +2,7 @@
 monthly-billing scorer used by EVERY method (DRL, SADRBC, Oracle, No-BESS)
 so comparisons are scored on one identical cost model.
 
-Cost model (EVN 2-part tariff, TT16/2014 params from system_config.json):
+Cost model (EVN 2-part tariff, TT16/2014 params from settings.SYSTEM_CONFIG):
   energy_cost  = sum_t tariff[t] * max(0, grid[t]) * dt        (dense)
   demand_cost  = T_cap * PMax_month
   PMax_month   = max over days of the 30-min ROLLING-AVERAGE grid import
@@ -11,8 +11,9 @@ Cost model (EVN 2-part tariff, TT16/2014 params from system_config.json):
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from settings import SYSTEM_CONFIG
 
 import numpy as np
 
@@ -51,11 +52,11 @@ FIN = {
 }
 
 
-def load_system_config(path: Path | None = None) -> SADRBCConfig:
-    """Map config/system_config.json onto a SADRBCConfig."""
-    path = path or (ROOT / "config" / "system_config.json")
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    b, tr, op = raw["BESS"], raw["Tariff"], raw["Operation"]
+def load_system_config() -> SADRBCConfig:
+    """Map settings.SYSTEM_CONFIG onto a SADRBCConfig (no file I/O)."""
+    b = SYSTEM_CONFIG["BESS"]
+    tr = SYSTEM_CONFIG["Tariff"]
+    op = SYSTEM_CONFIG["Operation"]
     cfg = {
         "E_cap_kWh": b["E_cap_kWh"],
         "P_rated_kW": b["P_rated_kW"],
