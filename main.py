@@ -2,7 +2,13 @@ from flask import Flask, Response, jsonify, render_template, request
 
 import dispatch_runner
 import dispatch_store
-from benchmark import build_benchmark
+from benchmark import (
+    build_benchmark,
+    detect_dt_hours,
+    list_data_csvs,
+    selected_data_filename,
+    selected_data_path,
+)
 from oracle_lp import build_oracle_lp
 from settings import (
     BILLING_MODE_FIELD,
@@ -168,6 +174,8 @@ def _parameters_from_form():
         field: request.form.get(field, "")
         for field in FORM_FIELDS
     }
+    values["selected_data_csv"] = selected_data_filename(values)
+    values["dt"] = str(detect_dt_hours(selected_data_path(values)))
     values[BILLING_MODE_FIELD] = request.form.get(
         BILLING_MODE_FIELD,
         DEFAULT_PARAMETERS[BILLING_MODE_FIELD],
@@ -187,9 +195,12 @@ def _policy_names_from_query():
 
 
 def view_context():
+    PARAMETERS["selected_data_csv"] = selected_data_filename(PARAMETERS)
+    PARAMETERS["dt"] = str(detect_dt_hours(selected_data_path(PARAMETERS)))
     benchmark = build_benchmark(PARAMETERS)
     return {
         **PARAMETERS,
+        "data_csv_files": list_data_csvs(),
         "benchmark": benchmark,
         "oracle": _pending_oracle(),
         "sample_battery_candidates": SAMPLE_BATTERY_CANDIDATES,

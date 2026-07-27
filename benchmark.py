@@ -5,12 +5,41 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
-DATA_PATH = DATA_DIR / "offline_data_Youngone.csv"
+DEFAULT_DATA_FILENAME = "offline_data_Youngone.csv"
+DATA_PATH = DATA_DIR / DEFAULT_DATA_FILENAME
+
+
+def list_data_csvs():
+    return sorted(path.name for path in DATA_DIR.glob("*.csv") if path.is_file())
+
+
+def selected_data_filename(parameters):
+    csv_files = list_data_csvs()
+    requested = Path(str(parameters.get("selected_data_csv") or DEFAULT_DATA_FILENAME)).name
+    if requested in csv_files:
+        return requested
+    if DEFAULT_DATA_FILENAME in csv_files:
+        return DEFAULT_DATA_FILENAME
+    return csv_files[0] if csv_files else DEFAULT_DATA_FILENAME
+
+
+def selected_data_path(parameters):
+    filename = selected_data_filename(parameters)
+    path = (DATA_DIR / filename).resolve()
+    if DATA_DIR.resolve() not in path.parents:
+        raise ValueError(f"CSV path escapes data folder: {filename}")
+    return path
+
+
+def detect_dt_hours(path):
+    rows = _load_rows(path)
+    return _detect_dt_from_rows(rows)
 
 
 def build_benchmark(parameters):
-    dt = _to_float(parameters.get("dt"), 0.25)
-    rows = _load_rows(DATA_PATH)
+    csv_path = selected_data_path(parameters)
+    rows = _load_rows(csv_path)
+    dt = _detect_dt_from_rows(rows)
     days = _group_days(rows, dt)
     total_load_kWh = sum(day["load_kWh"] for day in days)
     total_pv_kWh = sum(day["pv_kWh"] for day in days)
@@ -49,6 +78,7 @@ def build_benchmark(parameters):
 
     return {
         "dt": dt,
+        "csv_filename": csv_path.name,
         "time_labels": _time_labels(_max_step_count(days), dt),
         "days": days,
         "summary": {
@@ -88,6 +118,17 @@ def _load_rows(path):
             }
             for row in reader
         ]
+
+
+def _detect_dt_from_rows(rows):
+    steps_by_day = {}
+    for row in rows:
+        steps_by_day.setdefault(row["day_index"], set()).add(row["step"])
+    step_counts = [len(steps) for steps in steps_by_day.values() if steps]
+    if not step_counts:
+        return 0.25
+    steps_per_day = max(set(step_counts), key=step_counts.count)
+    return round(24.0 / steps_per_day, 6) if steps_per_day else 0.25
 
 
 def _group_days(rows, dt):

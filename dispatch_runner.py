@@ -18,6 +18,7 @@ from benchmark import (
     _rounded_series,
     _rolling_average,
     _to_float,
+    selected_data_path,
 )
 from training_checkpoints import CHECKPOINT_DIR, _load_checkpoint_meta
 
@@ -170,7 +171,7 @@ def run_policy_dispatch(
         p_rated = _to_float(parameters.get("battery_power_limit_kW"), 0.0)
         warnings.append(f"{checkpoint_name}: missing E/P metadata, using current UI sizing")
     cfg = build_dispatch_config(parameters, float(e_cap), float(p_rated))
-    month = month or dataset_to_month()
+    month = month or dataset_to_month(selected_data_path(parameters))
     p_ref = float(meta.get("p_ref_kw") or _policy_reference_kw(month))
     rollout = run_drl_policy(month, cfg, agent, p_ref_kw=p_ref)
     days = policy_result_to_days(month, rollout, cfg, parameters)
@@ -189,7 +190,7 @@ def run_policies(
     parameters: dict[str, Any],
     checkpoint_dir: Path = CHECKPOINT_DIR,
 ) -> tuple[dict[str, Any], list[str]]:
-    month = dataset_to_month()
+    month = dataset_to_month(selected_data_path(parameters))
     results = {}
     warnings = []
     for policy_name in policy_names:

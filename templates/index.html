@@ -178,6 +178,12 @@
       line-height: 1.7;
     }
 
+    .detected-input {
+      background: #111923;
+      color: #a7f3d0;
+      cursor: default;
+    }
+
     .saved {
       color: #34d399;
       margin-top: 8px;
@@ -352,6 +358,10 @@
       padding: 2px 8px;
     }
 
+    .bill-card + .bill-card {
+      margin-top: 2px;
+    }
+
     .bill-card h3 {
       color: #e5edf5;
       font-size: 12px;
@@ -372,6 +382,21 @@
       color: var(--text);
       font-weight: 600;
       white-space: nowrap;
+    }
+
+    .bill-card-extra {
+      border-top: 1px solid var(--border);
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+      padding-top: 10px;
+    }
+
+    .bill-card-extra h4 {
+      color: var(--muted);
+      font-size: 11px;
+      margin: 0;
+      text-transform: uppercase;
     }
 
     .graph-actions {
@@ -676,6 +701,20 @@
 
     <section id="tab-sizing-demo" class="tab-panel active">
     <form class="card" method="post" action="/set-parameters">
+      <h2>CSV data</h2>
+      <div class="row">
+        <label><span class="field-name">Selected CSV data<span class="hint" tabindex="0" data-tip="Choose a CSV from Sizing_Demo/data. The app reads P_load_kW and P_pv_kW from this file.">?</span></span>
+          <select id="selected-data-csv" name="selected_data_csv">
+            {% for csv_file in data_csv_files %}
+            <option value="{{ csv_file }}" {% if csv_file == selected_data_csv %}selected{% endif %}>{{ csv_file }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label><span class="field-name">Detected dt (h)<span class="hint" tabindex="0" data-tip="Detected automatically from the selected CSV: dt = 24 hours divided by the number of steps in a normal day.">?</span></span><input class="detected-input" type="number" id="tf-dt" name="dt" step="0.000001" value="{{ dt }}" readonly aria-readonly="true"></label>
+        <button class="primary" type="submit" name="form_action" value="save">Apply CSV</button>
+      </div>
+      <div class="info">Selected CSV: {{ selected_data_csv }}. Detected time step dt is {{ dt }} h.</div>
+
       <h2>Battery operation inputs</h2>
       <div class="row">
         <label><span class="field-name">Battery capacity (kWh)<span class="hint" tabindex="0" data-tip="BatteryCapacity: how much energy the battery can store. A bigger kWh value is like a bigger backpack for saving energy.">?</span></span><input type="number" id="tf-bcap" name="battery_capacity_kWh" step="10" min="0"
@@ -686,7 +725,6 @@
             value="{{ charge_efficiency }}"></label>
         <label><span class="field-name">Discharge efficiency<span class="hint" tabindex="0" data-tip="DischargeEfficiency: the fraction of stored energy that comes back out usefully. 0.95 means 95% reaches the load.">?</span></span><input type="number" id="tf-deff" name="discharge_efficiency" step="0.01" min="0"
             max="1" value="{{ discharge_efficiency }}"></label>
-        <label><span class="field-name">Time step dt (h)<span class="hint" tabindex="0" data-tip="dt: how long one CSV step lasts, in hours. 0.25 means one row is 15 minutes, so four rows make one hour.">?</span></span><input type="number" id="tf-dt" name="dt" step="0.01" min="0" value="{{ dt }}"></label>
         <button id="btn-custom-battery" class="primary" type="submit" name="form_action" value="save">Save this custom battery</button>
       </div>
       <div class="sample-row">
@@ -711,8 +749,7 @@
         <label><span class="field-name">Required final SOC<span class="hint" tabindex="0" data-tip="RequiredFinalSOC: the minimum battery fill level wanted at the end of the simulated day or horizon.">?</span></span><input type="number" id="tf-finalsoc" name="required_final_soc" step="0.01" min="0"
             max="1" value="{{ required_final_soc }}"></label>
       </div>
-      <div class="info">Load(t) and PV(t) come from the CSV columns P_load_kW and P_pv_kW. The CSV time rows use dt to
-        convert power snapshots into energy.</div>
+      <div class="info">Load(t) and PV(t) come from the selected CSV columns P_load_kW and P_pv_kW. The detected dt converts power snapshots into energy.</div>
 
       <h2>Electric bill and battery price inputs</h2>
       <div class="mode-pick" id="tf-mode-pick">
@@ -828,7 +865,7 @@
         </div>
         <div class="metric-row summary-main">
           <div class="metric"><span class="metric-label">FACT: Oracle LP solved<span class="hint" tabindex="0" data-tip="True when SciPy/linprog solved at least one month. False means the Oracle result is not a valid optimized battery answer.">?</span></span><b id="summary-solved">{{ "True" if oracle.summary.solved_day_count else "False" }}</b></div>
-          <div class="metric"><span class="metric-label">Days in CSV<span class="hint" tabindex="0" data-tip="Count of unique day_index values loaded from offline_data_Youngone.csv.">?</span></span><b>{{ benchmark.summary.day_count }}</b></div>
+          <div class="metric"><span class="metric-label">Days in CSV<span class="hint" tabindex="0" data-tip="Count of unique day_index values loaded from the selected CSV.">?</span></span><b>{{ benchmark.summary.day_count }}</b></div>
           <div class="metric"><span class="metric-label">Total load<span class="hint" tabindex="0" data-tip="Total load = sum of P_load_kW * dt across all CSV rows.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_load_kWh) }} kWh</b></div>
           <div class="metric"><span class="metric-label">Total PV<span class="hint" tabindex="0" data-tip="Total PV = sum of P_pv_kW * dt across all CSV rows.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_pv_kWh) }} kWh</b></div>
         </div>
@@ -933,7 +970,7 @@ Pareto frontier? = whether this candidate is non-dominated among the selected cu
             <div><dt>BatteryPowerLimit</dt><dd>Maximum battery charge/discharge power, in kW.</dd></div>
             <div><dt>ChargeEfficiency</dt><dd>Fraction of charging energy that becomes stored energy.</dd></div>
             <div><dt>DischargeEfficiency</dt><dd>Fraction of stored energy that comes back out usefully.</dd></div>
-            <div><dt>dt</dt><dd>Time step in hours. Current default is 0.25 h.</dd></div>
+            <div><dt>dt</dt><dd>Time step in hours, detected automatically from the selected CSV. Current dt is {{ dt }} h.</dd></div>
             <div><dt>EnergyPrice(t)</dt><dd>Electricity tariff at time t, in VND/kWh.</dd></div>
             <div><dt>DemandChargeRate</dt><dd>Capacity charge, in VND/kW.</dd></div>
             <div><dt>BatteryWearCost</dt><dd>Battery degradation cost, in VND/kWh throughput.</dd></div>
@@ -1215,6 +1252,27 @@ for t = 0 ... 95
       return `<section class="bill-card"><h3>${escapeHtml(title)}</h3>${body}${noteHtml}</section>`;
     }
 
+    function billCardWithExtras(title, rows, extraRows, note = "", extraTitle = "Comparison extras") {
+      const body = rows.map(([label, value]) => (
+        `<div><span>${escapeHtml(label)}</span><b>${formatBillDisplay(value)}</b></div>`
+      )).join("");
+      const extras = extraRows.map(([label, value]) => (
+        `<div><span>${escapeHtml(label)}</span><b>${formatBillDisplay(value)}</b></div>`
+      )).join("");
+      const noteHtml = note ? `<div><span>${escapeHtml(note)}</span><b></b></div>` : "";
+      return (
+        `<section class="bill-card">`
+        + `<h3>${escapeHtml(title)}</h3>`
+        + body
+        + `<div class="bill-card-extra">`
+        + `<h4>${escapeHtml(extraTitle)}</h4>`
+        + extras
+        + `</div>`
+        + noteHtml
+        + `</section>`
+      );
+    }
+
     function selectedDayBillRows(day) {
       return [
         ["Energy only", billValue(day, "energy_bill_vnd")],
@@ -1239,13 +1297,13 @@ for t = 0 ... 95
       return `<section class="bill-card"><h3>${escapeHtml(title)}</h3>${body}</section>`;
     }
 
-    function savingRows(baseDay, compareDay, oracleDay = null) {
-      const baseProrated = billValue(baseDay, "bill_with_prorated_peak_vnd");
-      const compareProrated = billValue(compareDay, "bill_with_prorated_peak_vnd");
-      const oracleProrated = billValue(oracleDay, "bill_with_prorated_peak_vnd");
-      const saving = baseProrated == null || compareProrated == null ? null : baseProrated - compareProrated;
-      const oracleSaving = baseProrated == null || oracleProrated == null ? null : baseProrated - oracleProrated;
-      const extraVsOracle = compareProrated == null || oracleProrated == null ? null : compareProrated - oracleProrated;
+    function savingRows(baseDay, compareDay, oracleDay = null, billField = "bill_with_prorated_peak_vnd") {
+      const baseBill = billValue(baseDay, billField);
+      const compareBill = billValue(compareDay, billField);
+      const oracleBill = billValue(oracleDay, billField);
+      const saving = baseBill == null || compareBill == null ? null : baseBill - compareBill;
+      const oracleSaving = baseBill == null || oracleBill == null ? null : baseBill - oracleBill;
+      const extraVsOracle = compareBill == null || oracleBill == null ? null : compareBill - oracleBill;
       const capture = saving == null || oracleSaving == null || oracleSaving <= 0 ? "Unavailable" : `${formatNumber(saving / oracleSaving * 100, 1)}%`;
       return [
         ["Saving vs without BESS", saving],
@@ -1283,12 +1341,14 @@ for t = 0 ... 95
           return;
         }
         cards.push(
-          billCard(
+          billCardWithExtras(
             policyPrefix(policyName),
             [
-              ["Policy prorated bill", billValue(pDay, "bill_with_prorated_peak_vnd")],
-              ...savingRows(day, pDay, oracleDay),
+              ["Energy only", billValue(pDay, "energy_bill_vnd")],
+              ["Energy + full peak if this day owns monthly peak", billValue(pDay, "bill_with_owner_peak_vnd")],
+              ["Energy + prorated monthly peak", billValue(pDay, "bill_with_prorated_peak_vnd")],
             ],
+            savingRows(day, pDay, oracleDay),
             "Battery wear cost is not included."
           )
         );

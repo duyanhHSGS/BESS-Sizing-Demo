@@ -61,6 +61,7 @@ SYSTEM_CONFIG = {
 }
 
 DEFAULT_PARAMETERS = {
+    "selected_data_csv": "offline_data_Youngone.csv",
     "battery_capacity_kWh": "1000",
     "battery_power_limit_kW": "500",
     "charge_efficiency": "0.95",
@@ -100,11 +101,11 @@ SAMPLE_BATTERY_CANDIDATES = tuple(
 )
 
 FORM_FIELDS = (
+    "selected_data_csv",
     "battery_capacity_kWh",
     "battery_power_limit_kW",
     "charge_efficiency",
     "discharge_efficiency",
-    "dt",
     "battery_wear_cost",
     "minimum_soc",
     "maximum_soc",

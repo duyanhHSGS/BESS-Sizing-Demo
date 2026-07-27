@@ -1,5 +1,4 @@
 from benchmark import (
-    DATA_PATH,
     _annotate_day_billing,
     _day_energy_cost,
     _demand_charge,
@@ -10,6 +9,7 @@ from benchmark import (
     _prices_for_day,
     _rounded_series,
     _to_float,
+    selected_data_path,
 )
 
 import numpy as np
@@ -40,7 +40,7 @@ def build_oracle_lp(parameters):
     maximum_soc = _clamp(_to_float(parameters.get("maximum_soc"), 1.0), minimum_soc, 1.0)
     required_final_soc = _clamp(_to_float(parameters.get("required_final_soc"), minimum_soc), minimum_soc, maximum_soc)
 
-    base_days = _group_days(_load_rows(DATA_PATH), dt)
+    base_days = _group_days(_load_rows(selected_data_path(parameters)), dt)
     if not base_days:
         return {"available": True, "status": "No CSV rows found.", "days": [], "summary": _empty_summary()}
 
