@@ -1,5 +1,6 @@
 from benchmark import (
     DATA_PATH,
+    _annotate_day_billing,
     _day_energy_cost,
     _demand_charge,
     _group_days,
@@ -70,7 +71,7 @@ def build_oracle_lp(parameters):
         )
 
     summary = _build_summary(base_days, month_results, parameters, dt)
-    _attach_month_peaks(month_results, dt)
+    _attach_month_peaks(month_results, parameters, dt)
     return {
         "available": True,
         "status": "Oracle LP solved." if summary["solved_day_count"] else "Oracle LP could not solve any month.",
@@ -449,10 +450,11 @@ def _planner_annualized_saving(base_days, parameters):
     return (sum(savings) / len(savings)) * 12.0
 
 
-def _attach_month_peaks(days, dt):
+def _attach_month_peaks(days, parameters, dt):
     month_peaks = _month_peaks(days, dt)
     for day in days:
         day["month_peak"] = month_peaks.get(_month_start_day(day["day_index"]))
+    _annotate_day_billing(days, parameters, dt)
 
 
 def _no_battery_result(days, parameters, dt):
@@ -482,7 +484,7 @@ def _no_battery_result(days, parameters, dt):
                 "day_saving_vnd": 0,
             }
         )
-    _attach_month_peaks(oracle_days, dt)
+    _attach_month_peaks(oracle_days, parameters, dt)
     return {
         "available": True,
         "status": "Battery capacity or power is zero, so Oracle mirrors the benchmark.",

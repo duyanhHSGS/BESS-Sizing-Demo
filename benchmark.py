@@ -25,6 +25,7 @@ def build_benchmark(parameters):
     month_peaks = _month_peaks(days, dt)
     for day in days:
         day["month_peak"] = month_peaks.get(_month_start_day(day["day_index"]))
+    _annotate_day_billing(days, parameters, dt)
 
     monthly_peak = max(
         month_peaks.values(),
@@ -160,6 +161,30 @@ def _demand_charge(parameters, peak_grid_kW):
     if parameters.get("billing_mode") != "2tc":
         return 0.0
     return peak_grid_kW * _to_float(parameters.get("billing_peak_penalty"), 0.0)
+
+
+def _annotate_day_billing(days, parameters, dt):
+    month_counts = {}
+    for day in days:
+        month_start = _month_start_day(day["day_index"])
+        month_counts[month_start] = month_counts.get(month_start, 0) + 1
+
+    for day in days:
+        month_start = _month_start_day(day["day_index"])
+        month_peak = day.get("month_peak")
+        monthly_demand = _demand_charge(parameters, month_peak["value_kW"]) if month_peak else 0.0
+        full_peak_on_owner = (
+            monthly_demand
+            if month_peak and day["day_index"] == month_peak.get("day_index")
+            else 0.0
+        )
+        prorated_peak = monthly_demand / max(1, month_counts.get(month_start, 1))
+        energy_bill = _day_energy_cost(day, parameters, dt)
+        day["energy_bill_vnd"] = round(energy_bill)
+        day["peak_bill_owner_vnd"] = round(full_peak_on_owner)
+        day["peak_bill_prorated_vnd"] = round(prorated_peak)
+        day["bill_with_owner_peak_vnd"] = round(energy_bill + full_peak_on_owner)
+        day["bill_with_prorated_peak_vnd"] = round(energy_bill + prorated_peak)
 
 
 def _parse_windows(raw_windows):

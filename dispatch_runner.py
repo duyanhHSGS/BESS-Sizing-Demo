@@ -10,9 +10,11 @@ import numpy as np
 
 from benchmark import (
     DATA_PATH,
+    _annotate_day_billing,
     _day_energy_cost,
     _demand_charge,
     _month_peaks,
+    _month_start_day,
     _rounded_series,
     _rolling_average,
     _to_float,
@@ -230,9 +232,11 @@ def policy_result_to_days(
         days.append(day_row)
     month_peaks = _month_peaks(days, cfg.dt)
     for day_row in days:
-        month_peak = month_peaks.get(((day_row["day_index"] - 1) // 30) * 30 + 1)
+        month_peak = month_peaks.get(_month_start_day(day_row["day_index"]))
         day_row["month_peak"] = month_peak
         day_row["demand_charge_vnd"] = round(_demand_charge(parameters, month_peak["value_kW"])) if month_peak else 0
+        day_row["wear_cost_note"] = "Policy bill excludes battery wear cost."
+    _annotate_day_billing(days, parameters, cfg.dt)
     return days
 
 

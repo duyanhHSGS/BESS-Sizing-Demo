@@ -336,6 +336,58 @@
       width: 100%;
     }
 
+    .bill-strip {
+      background: #111922;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      margin: 0 0 10px;
+      padding: 10px;
+    }
+
+    .bill-card {
+      border-left: 2px solid #38bdf8;
+      padding: 2px 8px;
+    }
+
+    .bill-card h3 {
+      color: #e5edf5;
+      font-size: 12px;
+      margin: 0 0 6px;
+    }
+
+    .bill-card div {
+      align-items: center;
+      color: var(--muted);
+      display: grid;
+      font-size: 12px;
+      gap: 8px;
+      grid-template-columns: 1fr auto;
+      line-height: 1.45;
+    }
+
+    .bill-card b {
+      color: var(--text);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .graph-actions {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: space-between;
+      margin-top: 8px;
+    }
+
+    button.tiny {
+      font-size: 11px;
+      padding: 5px 9px;
+    }
+
     .chart-tooltip {
       background: rgba(11, 17, 23, .94);
       border: 1px solid #334155;
@@ -741,9 +793,13 @@
             </label>
           </div>
         </div>
+        <div class="bill-strip" id="benchmark-bill-strip" aria-label="Selected day electricity bill"></div>
         <div class="chart-wrap">
           <canvas id="benchmark-chart"></canvas>
           <div class="chart-tooltip" id="benchmark-tooltip" role="status" aria-live="polite"></div>
+        </div>
+        <div class="graph-actions">
+          <button id="btn-benchmark-hide-all" class="tiny" type="button">Hide all lines</button>
         </div>
         <div class="legend" id="benchmark-legend" aria-label="Chart line visibility controls">
           <button class="legend-item" type="button" data-series="load" aria-pressed="true"><span class="swatch" style="background:#92400e;color:#92400e"></span>Load</button>
@@ -1021,9 +1077,13 @@ for t = 0 ... 95
               <button id="btn-dispatch-run" class="primary" type="button">Create saved run for selected policies</button>
             </div>
           </div>
+          <div class="bill-strip" id="dispatch-bill-strip" aria-label="Selected dispatch day electricity bill"></div>
           <div class="chart-wrap">
             <canvas id="dispatch-chart"></canvas>
             <div class="chart-tooltip" id="dispatch-tooltip" role="status" aria-live="polite"></div>
+          </div>
+          <div class="graph-actions">
+            <button id="btn-dispatch-hide-all" class="tiny" type="button">Hide all lines</button>
           </div>
           <div class="legend" id="dispatch-legend" aria-label="Dispatch chart line visibility controls"></div>
           <div id="dispatch-day-info" class="info"></div>
@@ -1064,6 +1124,8 @@ for t = 0 ... 95
     const dayInfo = document.getElementById("benchmark-day-info");
     const legend = document.getElementById("benchmark-legend");
     const tooltip = document.getElementById("benchmark-tooltip");
+    const benchmarkBillStrip = document.getElementById("benchmark-bill-strip");
+    const benchmarkHideAllButton = document.getElementById("btn-benchmark-hide-all");
     const dispatchDaySelect = document.getElementById("dispatch-day");
     const dispatchBatterySelect = document.getElementById("dispatch-battery");
     const dispatchChart = document.getElementById("dispatch-chart");
@@ -1071,8 +1133,10 @@ for t = 0 ... 95
     const dispatchDayInfo = document.getElementById("dispatch-day-info");
     const dispatchLegend = document.getElementById("dispatch-legend");
     const dispatchTooltip = document.getElementById("dispatch-tooltip");
+    const dispatchBillStrip = document.getElementById("dispatch-bill-strip");
     const dispatchPolicyTableBody = document.getElementById("dispatch-policy-table-body");
     const dispatchRunButton = document.getElementById("btn-dispatch-run");
+    const dispatchHideAllButton = document.getElementById("btn-dispatch-hide-all");
     const dispatchWarnings = document.getElementById("dispatch-warnings");
     const ctx = chart.getContext("2d");
     const sampleBatterySelect = document.getElementById("sample-battery");
@@ -1120,6 +1184,118 @@ for t = 0 ... 95
         maximumFractionDigits: digits,
         minimumFractionDigits: digits,
       });
+    }
+
+    function formatVnd(value) {
+      return Number.isFinite(Number(value)) ? `${formatNumber(Number(value))} VND` : "Unavailable";
+    }
+
+    function formatBillDisplay(value) {
+      return typeof value === "string" ? escapeHtml(value) : formatVnd(value);
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    function billValue(day, field) {
+      return day && Number.isFinite(Number(day[field])) ? Number(day[field]) : null;
+    }
+
+    function billCard(title, rows, note = "") {
+      const body = rows.map(([label, value]) => (
+        `<div><span>${escapeHtml(label)}</span><b>${formatBillDisplay(value)}</b></div>`
+      )).join("");
+      const noteHtml = note ? `<div><span>${escapeHtml(note)}</span><b></b></div>` : "";
+      return `<section class="bill-card"><h3>${escapeHtml(title)}</h3>${body}${noteHtml}</section>`;
+    }
+
+    function selectedDayBillRows(day) {
+      return [
+        ["Energy only", billValue(day, "energy_bill_vnd")],
+        ["Energy + full peak if this day owns monthly peak", billValue(day, "bill_with_owner_peak_vnd")],
+        ["Energy + prorated monthly peak", billValue(day, "bill_with_prorated_peak_vnd")],
+      ];
+    }
+
+    function peakRows(day) {
+      const peak = day && day.month_peak ? day.month_peak : null;
+      return [
+        ["Monthly peak", peak ? `${formatNumber(peak.value_kW, 1)} kW on day ${peak.day_index}` : "Unavailable"],
+        ["Full peak charge on owner day", formatVnd(billValue(day, "peak_bill_owner_vnd"))],
+        ["Prorated peak charge", formatVnd(billValue(day, "peak_bill_prorated_vnd"))],
+      ];
+    }
+
+    function billInfoCard(title, rows) {
+      const body = rows.map(([label, value]) => (
+        `<div><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`
+      )).join("");
+      return `<section class="bill-card"><h3>${escapeHtml(title)}</h3>${body}</section>`;
+    }
+
+    function savingRows(baseDay, compareDay, oracleDay = null) {
+      const baseProrated = billValue(baseDay, "bill_with_prorated_peak_vnd");
+      const compareProrated = billValue(compareDay, "bill_with_prorated_peak_vnd");
+      const oracleProrated = billValue(oracleDay, "bill_with_prorated_peak_vnd");
+      const saving = baseProrated == null || compareProrated == null ? null : baseProrated - compareProrated;
+      const oracleSaving = baseProrated == null || oracleProrated == null ? null : baseProrated - oracleProrated;
+      const extraVsOracle = compareProrated == null || oracleProrated == null ? null : compareProrated - oracleProrated;
+      const capture = saving == null || oracleSaving == null || oracleSaving <= 0 ? "Unavailable" : `${formatNumber(saving / oracleSaving * 100, 1)}%`;
+      return [
+        ["Saving vs without BESS", saving],
+        ["Extra bill vs Oracle", extraVsOracle],
+        ["Oracle saving captured", capture],
+      ];
+    }
+
+    function renderSizingBillStrip(day, oracleDay) {
+      const oracleAvailable = oracleDay && oracleDay.solved;
+      benchmarkBillStrip.innerHTML = [
+        billCard("Without BESS", selectedDayBillRows(day)),
+        oracleAvailable
+          ? billCard("Oracle LP", selectedDayBillRows(oracleDay), "Battery wear cost is not included.")
+          : billInfoCard("Oracle LP", [["Status", "Oracle unavailable"]]),
+        oracleAvailable
+          ? billCard("Oracle saving", savingRows(day, oracleDay, oracleDay))
+          : billInfoCard("Oracle saving", [["Status", "Oracle unavailable"]]),
+        billInfoCard("Peak charge views", peakRows(day)),
+      ].join("");
+    }
+
+    function renderDispatchBillStrip(day, oracleDay) {
+      const cards = [
+        billCard("Without BESS", selectedDayBillRows(day)),
+        oracleDay && oracleDay.solved
+          ? billCard("Oracle LP", selectedDayBillRows(oracleDay), "Battery wear cost is not included.")
+          : billInfoCard("Oracle LP", [["Status", "Oracle unavailable"]]),
+      ];
+
+      selectedPolicyNames().forEach((policyName) => {
+        const pDay = policyDay(policyName, day.day_index);
+        if (!pDay) {
+          cards.push(billInfoCard(policyPrefix(policyName), [["Status", "No saved trace"]]));
+          return;
+        }
+        cards.push(
+          billCard(
+            policyPrefix(policyName),
+            [
+              ["Policy prorated bill", billValue(pDay, "bill_with_prorated_peak_vnd")],
+              ...savingRows(day, pDay, oracleDay),
+            ],
+            "Battery wear cost is not included."
+          )
+        );
+      });
+
+      cards.push(billInfoCard("Peak charge views", peakRows(day)));
+      dispatchBillStrip.innerHTML = cards.join("");
     }
 
     function fillDayOptions() {
@@ -1408,6 +1584,7 @@ for t = 0 ... 95
       const oracleDaysByIndex = new Map((activeOracle.days || []).map((day) => [day.day_index, day]));
       const day = benchmark.days[Number(daySelect.value || 0)];
       const oracleDay = oracleDaysByIndex.get(day.day_index);
+      renderSizingBillStrip(day, oracleDay);
       const rect = chart.getBoundingClientRect();
       const width = rect.width;
       const height = rect.height;
@@ -1858,6 +2035,7 @@ for t = 0 ... 95
       const oracleDaysByIndex = new Map((activeOracle.days || []).map((day) => [day.day_index, day]));
       const day = benchmark.days[Number(dispatchDaySelect.value || 0)];
       const oracleDay = oracleDaysByIndex.get(day.day_index);
+      renderDispatchBillStrip(day, oracleDay);
       const rect = dispatchChart.getBoundingClientRect();
       const width = rect.width;
       const height = rect.height;
@@ -2056,6 +2234,28 @@ for t = 0 ... 95
           drawBenchmark();
         });
       });
+    }
+
+    function hideAllBenchmarkSeries() {
+      Object.keys(activeSeries).forEach((key) => {
+        activeSeries[key] = false;
+      });
+      legend.querySelectorAll("[data-series]").forEach((button) => {
+        button.setAttribute("aria-pressed", "false");
+      });
+      hideTooltip();
+      drawBenchmark();
+    }
+
+    function hideAllDispatchSeries() {
+      Object.keys(dispatchActiveSeries).forEach((key) => {
+        dispatchActiveSeries[key] = false;
+      });
+      dispatchLegend.querySelectorAll("[data-dispatch-series]").forEach((button) => {
+        button.setAttribute("aria-pressed", "false");
+      });
+      hideDispatchTooltip();
+      drawDispatchViewer();
     }
 
     function bindTabs() {
@@ -2277,6 +2477,8 @@ for t = 0 ... 95
     [trainEcap, trainPrated, trainSteps, trainIters].forEach((input) => input.addEventListener("input", updateTrainPlan));
     trainButton.addEventListener("click", startTraining);
     trainStopButton.addEventListener("click", stopTraining);
+    benchmarkHideAllButton.addEventListener("click", hideAllBenchmarkSeries);
+    dispatchHideAllButton.addEventListener("click", hideAllDispatchSeries);
 
     bindTabs();
     fillSampleBatteryOptions();
