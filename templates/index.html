@@ -2379,11 +2379,15 @@ for t = 0 ... 95
     }
 
     async function loadTrainingDatasets() {
+      const previousSelection = trainDataset.value;
       const datasets = await trainingApi("/api/training/datasets");
       trainDataset.innerHTML = datasets.map((dataset) => (
-        `<option value="${dataset.id}" data-days="${dataset.n_days}" data-status="${dataset.status}">` +
-        `${dataset.id} (${dataset.n_days} days)</option>`
+        `<option value="${dataset.id}" data-days="${dataset.n_days}" data-status="${dataset.status}" data-source="${dataset.source}">` +
+        `${dataset.source} (${dataset.n_days} days)</option>`
       )).join("");
+      if (previousSelection && Array.from(trainDataset.options).some((option) => option.value === previousSelection)) {
+        trainDataset.value = previousSelection;
+      }
     }
 
     async function loadTrainingCheckpoints() {

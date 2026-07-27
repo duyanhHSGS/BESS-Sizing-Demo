@@ -18,10 +18,15 @@ class DatasetError(ValueError):
 def _dataset_paths(base_dir: Path = BASE_DIR) -> dict[str, Path]:
     data_dir = base_dir / "data"
     source_dir = data_dir if data_dir.exists() else base_dir
-    return {
+    paths = {
         "youngone": source_dir / "offline_data_Youngone.csv",
         "youngone_grepo": source_dir / "offline_Youngone_grepo.csv",
     }
+    for path in sorted(source_dir.glob("*.csv")):
+        if path.is_file():
+            paths.setdefault(sanitize_dataset_id(path.stem), path)
+            paths.setdefault(sanitize_dataset_id(path.name), path)
+    return paths
 
 
 def sanitize_dataset_id(dataset_id: str) -> str:
@@ -65,9 +70,14 @@ def detect_resolution_minutes(path: Path) -> int:
 
 def list_datasets(base_dir: Path = BASE_DIR) -> list[dict]:
     out = []
+    seen_paths = set()
     for dataset_id, path in _dataset_paths(base_dir).items():
         if not path.exists():
             continue
+        resolved_path = path.resolve()
+        if resolved_path in seen_paths:
+            continue
+        seen_paths.add(resolved_path)
         try:
             n_days = count_days(path)
             res_min = detect_resolution_minutes(path)
