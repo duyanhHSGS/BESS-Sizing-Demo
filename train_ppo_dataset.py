@@ -101,15 +101,23 @@ def main() -> None:
     parser.add_argument("--tag", type=str, default="")
     parser.add_argument("--billing", choices=("2tc", "tou"), default="2tc")
     parser.add_argument("--tariff-json", type=str, default="")
+    parser.add_argument("--val-days", type=int, default=30)
+    parser.add_argument("--test-days", type=int, default=30)
     args = parser.parse_args()
 
     days = load_csv_days(Path(args.csv))
-    if len(days) < 90:
-        raise SystemExit(f"Need at least 90 days for train/val/test split; found {len(days)}")
+    if args.val_days < 1 or args.test_days < 1:
+        raise SystemExit("Validation days and test days must both be at least 1")
+    split_days = args.val_days + args.test_days
+    if len(days) <= split_days:
+        raise SystemExit(
+            f"Need more than {split_days} days for train/val/test split; found {len(days)}"
+        )
     csv_dt = 24.0 / len(days[0].load)
 
-    test_days, val_days = days[-30:], days[-60:-30]
-    train_days = days[:-60]
+    test_days = days[-args.test_days:]
+    val_days = days[-split_days:-args.test_days]
+    train_days = days[:-split_days]
     peak = max(float(day.load.max()) for day in days)
     p_ref = math.ceil(peak / 500.0) * 500.0
     daily_peaks = [
@@ -171,7 +179,8 @@ def main() -> None:
     val_base = score_month(run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
     val_oracle = score_month(run_oracle(val_month, cfg)["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
     print(
-        f"[train-ds] {len(days)} days | train {len(train_days)} / val 30 / test 30 | "
+        f"[train-ds] {len(days)} days | train {len(train_days)} / "
+        f"val {len(val_days)} / test {len(test_days)} | "
         f"p_ref {p_ref:.0f} | val no-BESS {val_base/1e6:.0f}M, oracle {val_oracle/1e6:.0f}M",
         flush=True,
     )

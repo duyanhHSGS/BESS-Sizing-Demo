@@ -53,6 +53,16 @@ def _int(payload: dict, key: str, default: int) -> int:
     return int(value)
 
 
+def _split_days(payload: dict) -> tuple[int, int]:
+    val_days = _int(payload, "val_days", 30)
+    test_days = _int(payload, "test_days", 30)
+    if val_days < 1:
+        raise TrainingLaunchError("validation days must be at least 1")
+    if test_days < 1:
+        raise TrainingLaunchError("test days must be at least 1")
+    return val_days, test_days
+
+
 def _training_tag(payload: dict, dataset_id: str, e_cap: float, p_rated: float, algo: str) -> str:
     explicit = sanitize_tag(payload.get("tag", ""))
     if explicit:
@@ -94,6 +104,7 @@ def build_training_command(
 
     e_cap = _float(payload, "e_cap_kwh")
     p_rated = _float(payload, "p_rated_kw")
+    val_days, test_days = _split_days(payload)
     dataset_id = str(payload.get("dataset_id", "dataset"))
     tag = _training_tag(payload, dataset_id, e_cap, p_rated, algo)
     checkpoint = ensure_inside_base(base_dir / "checkpoints" / f"policy_{tag}.pt", base_dir)
@@ -113,6 +124,10 @@ def build_training_command(
         str(p_rated),
         "--tag",
         tag,
+        "--val-days",
+        str(val_days),
+        "--test-days",
+        str(test_days),
     ]
     if algo == "ppo":
         cmd.extend(["--steps", str(_int(payload, "steps", 400_000)), "--tariff-json", str(tariff_path)])
@@ -136,8 +151,9 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
     dataset_id = str(payload.get("dataset_id", "")).strip()
     if not dataset_id:
         raise DatasetError("missing dataset_id")
+    val_days, test_days = _split_days(payload)
     source = get_dataset_path(dataset_id)
-    n_days = require_min_days(source)
+    n_days = require_min_days(source, val_days + test_days + 1)
 
     USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
@@ -148,4 +164,4 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
     env = os.environ.copy()
     env["SIZING_DEMO_CHECKPOINT_DIR"] = str(CHECKPOINT_DIR.resolve())
     job = manager.start_subprocess("train_" + spec["algo"], spec["cmd"], cwd=str(BASE_DIR), env=env)
-    return job, {"job_id": job.id, "n_days": n_days, **spec}
+    return job, {"job_id": job.id, "n_days": n_days, "val_days": val_days, "test_days": test_days, **spec}

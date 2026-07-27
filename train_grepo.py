@@ -74,6 +74,10 @@ def main():
                     help="std cố định lambda của policy Gaussian")
     ap.add_argument("--tariff-json", type=str, default="",
                     help="Sizing Demo tariff_config.json path.")
+    ap.add_argument("--val-days", type=int, default=30,
+                    help="Number of CSV days reserved for validation.")
+    ap.add_argument("--test-days", type=int, default=30,
+                    help="Number of CSV days reserved for test holdout.")
     args = ap.parse_args()
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -121,17 +125,20 @@ def main():
                     cfg.dt,
                 ).items():
                     setattr(cfg, key, value)
-        if len(csv_days) < 90:
-            raise SystemExit(f"CSV chỉ {len(csv_days)} ngày — cần ≥90")
+        if args.val_days < 1 or args.test_days < 1:
+            raise SystemExit("Validation days and test days must both be at least 1")
+        split_days = args.val_days + args.test_days
+        if len(csv_days) <= split_days:
+            raise SystemExit(f"CSV has {len(csv_days)} days; need more than {split_days}")
         peak = max(float(d.load.max()) for d in csv_days)
         p_ref = math.ceil(peak / 500.0) * 500.0
         # floor data-driven như PPO (fix bug site peaky)
         peaks = [max(_rolling_30_minute_average(np.maximum(0, d.load - d.pv), cfg.dt), default=0.0)
-                 for d in csv_days[:-60]]
+                 for d in csv_days[:-split_days]]
         d_run0 = 0.5 * float(np.mean(peaks))
-        train_days = csv_days[:-60]
+        train_days = csv_days[:-split_days]
         val_month = MonthData(source="csv_val")
-        val_month.days = csv_days[-60:-30]
+        val_month.days = csv_days[-split_days:-args.test_days]
     else:
         p_ref = 500.0
         d_run0 = None
