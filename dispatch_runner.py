@@ -25,7 +25,7 @@ from training_checkpoints import CHECKPOINT_DIR, _load_checkpoint_meta
 
 BASE_DIR = Path(__file__).resolve().parent
 
-from baselines import run_drl_policy  # noqa: E402
+from baselines import run_drl_policy, validate_dispatch_sampling  # noqa: E402
 from common import (  # noqa: E402
     TOU_RULES,
     build_tariff_windows,
@@ -194,10 +194,15 @@ def run_policy_dispatch(
     month = month or dataset_to_month(selected_data_path(parameters))
     expected_native_dt = float(meta["native_dt_minutes"])
     actual_native_dt = cfg.dt * 60.0
+    try:
+        control_dt = validate_dispatch_sampling(meta, actual_native_dt)
+    except ValueError as exc:
+        raise DispatchRunWarning(f"{checkpoint_name}: {exc}") from exc
     if abs(expected_native_dt - actual_native_dt) > 1e-9:
-        raise DispatchRunWarning(
-            f"{checkpoint_name}: trained on {expected_native_dt:g}-minute "
-            f"native data, but selected Dispatch data is {actual_native_dt:g}-minute"
+        warnings.append(
+            f"{checkpoint_name}: policy trained on {expected_native_dt:g}-minute "
+            f"native data; running cross-resolution dispatch with "
+            f"{control_dt:g}-minute decisions and {actual_native_dt:g}-minute physics"
         )
     p_ref = float(meta.get("p_ref_kw") or _policy_reference_kw(month))
     rollout = run_drl_policy(month, cfg, agent, p_ref_kw=p_ref)

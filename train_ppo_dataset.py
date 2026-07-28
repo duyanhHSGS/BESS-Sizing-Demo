@@ -21,7 +21,7 @@ from settings import PPO_GAMMA, PPO_LAMBDA
 
 
 ROLLOUT_DAYS = 32
-LOG_EVERY_UPDATES = 4
+LOG_EVERY_UPDATES = 1
 
 
 def load_csv_days(path: Path) -> list[DayData]:

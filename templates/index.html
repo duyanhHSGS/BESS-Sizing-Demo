@@ -2503,7 +2503,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       const response = await fetch(path, options);
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(payload.error || `HTTP ${response.status}`);
+        const details = Array.isArray(payload.warnings) ? payload.warnings.filter(Boolean) : [];
+        throw new Error([payload.error || `HTTP ${response.status}`, ...details].join(" "));
       }
       return payload;
     }

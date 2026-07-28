@@ -70,6 +70,39 @@ def run_sadrbc(month: MonthData, cfg) -> dict:
 
 
 # ---------------------------------------------------------------------------
+def validate_dispatch_sampling(meta: dict, native_dt_minutes: float) -> float:
+    """Return a compatible policy control interval for native dispatch data."""
+    control_dt_minutes = float(
+        meta.get("control_dt_minutes", native_dt_minutes)
+    )
+    if not np.isfinite(native_dt_minutes) or native_dt_minutes <= 0.0:
+        raise ValueError("Dispatch data resolution must be a positive number of minutes")
+    if not np.isfinite(control_dt_minutes) or control_dt_minutes <= 0.0:
+        raise ValueError("Policy control interval must be a positive number of minutes")
+
+    ratio = control_dt_minutes / native_dt_minutes
+    if control_dt_minutes < native_dt_minutes - 1e-9:
+        raise ValueError(
+            f"Policy control interval is {control_dt_minutes:g} minutes, "
+            f"but Dispatch data is coarser at {native_dt_minutes:g} minutes"
+        )
+    if abs(ratio - round(ratio)) > 1e-9:
+        raise ValueError(
+            f"Policy control interval of {control_dt_minutes:g} minutes is not "
+            f"an exact multiple of the {native_dt_minutes:g}-minute Dispatch data"
+        )
+    if (
+        abs(30.0 / control_dt_minutes - round(30.0 / control_dt_minutes)) > 1e-9
+        or abs(1440.0 / control_dt_minutes - round(1440.0 / control_dt_minutes)) > 1e-9
+    ):
+        raise ValueError(
+            f"Policy control interval of {control_dt_minutes:g} minutes must "
+            "divide both 30 minutes and 24 hours"
+        )
+    return control_dt_minutes
+
+
+# ---------------------------------------------------------------------------
 def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
                    measure_latency: bool = False,
                    fc_seed: int = 12345) -> dict:
@@ -80,19 +113,12 @@ def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
     meta = getattr(agent, "meta", {}) or {}
     use_fc = meta.get("obs_variant") == "fc"
     native_dt_minutes = cfg.dt * 60.0
-    expected_native_dt = float(meta.get("native_dt_minutes", native_dt_minutes))
-    if abs(native_dt_minutes - expected_native_dt) > 1e-9:
-        raise ValueError(
-            f"Policy expects {expected_native_dt:g}-minute native data, "
-            f"but Dispatch has {native_dt_minutes:g}-minute data"
-        )
+    control_dt_minutes = validate_dispatch_sampling(meta, native_dt_minutes)
     env = BESSEnv(cfg, p_ref_kw=p_ref_kw, use_forecast=use_fc,
                   fc_seed=fc_seed,
                   d_run_init_kw=meta.get("d_run_init_kw"),
                   gamma=float(meta.get("gamma", PPO_GAMMA)),
-                  control_dt_minutes=float(
-                      meta.get("control_dt_minutes", native_dt_minutes)
-                  ))
+                  control_dt_minutes=control_dt_minutes)
     obs = env.reset(month)
     done = False
     lat = []
