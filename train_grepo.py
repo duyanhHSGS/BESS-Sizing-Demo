@@ -13,8 +13,9 @@ Run: python drl/train_grepo.py [--iters 400] [--group 8]
 from __future__ import annotations
 
 import argparse
-import csv
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 
@@ -25,6 +26,7 @@ from bess_env import BESSEnv, OBS_DIM
 from grepo_agent import GREPOAgent
 from baselines import run_no_bess, run_drl_policy
 from oracle_cache import load_cached_training_grids
+from training_reports import write_curve, write_report
 
 VAL_EVERY = 10
 LOG_EVERY_ITERS = 4
@@ -88,7 +90,6 @@ def main():
                                base.P_target_user)
     if args.training_config:
         import json as _json
-        from pathlib import Path
         from common import TOU_RULES, build_tariff_windows
 
         tariff = _json.loads(Path(args.training_config).read_text(encoding="utf-8"))
@@ -136,7 +137,17 @@ def main():
     agent = GREPOAgent(OBS_DIM, n_group=args.group, seed=args.seed,
                        beta=args.beta, std=args.std)
     # meta trc validation u tin  env val dng ng floor/p_ref
-    agent.meta = {"p_ref_kw": p_ref, "algo": "grepo"}
+    billing_mode = tariff.get("billing_mode", "2tc") if args.training_config else "2tc"
+    agent.meta = {
+        "p_ref_kw": p_ref,
+        "algo": "grepo",
+        "e_cap_kwh": cfg.E_cap,
+        "p_rated_kw": cfg.P_rated_nominal,
+        "billing_mode": billing_mode,
+        "group": args.group,
+        "beta": args.beta,
+        "std": args.std,
+    }
     if d_run0 is not None:
         agent.meta["d_run_init_kw"] = d_run0
     make_env = lambda: BESSEnv(cfg, p_ref_kw=p_ref)   # noqa: E731
@@ -147,6 +158,44 @@ def main():
         args.oracle_cache, [day.day_index for day in val_month.days]
     )
     val_oracle = score_month(oracle_grids, cfg, days=val_month.days)["total_cost_vnd"]
+    curve_path = RESULTS_DIR / f"training_curve_{tag}.csv"
+    report_path = RESULTS_DIR / f"training_report_{tag}.json"
+    report = {
+        "version": 1,
+        "status": "running",
+        "algorithm": "grepo",
+        "tag": tag,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "dataset": {
+            "source": str(args.csv),
+            "total_days": len(csv_days),
+            "train_days": len(train_days),
+            "validation_days": len(val_month.days),
+            "test_days": args.test_days,
+            "validation_range": [
+                val_month.days[0].date_iso,
+                val_month.days[-1].date_iso,
+            ],
+            "test_range": [
+                csv_days[-args.test_days].date_iso,
+                csv_days[-1].date_iso,
+            ],
+        },
+        "battery": {"e_cap_kwh": cfg.E_cap, "p_rated_kw": cfg.P_rated_nominal},
+        "training": {
+            "requested_iterations": args.iters,
+            "seed": args.seed,
+            "group": args.group,
+            "beta": args.beta,
+            "std": args.std,
+        },
+        "billing_mode": billing_mode,
+        "p_ref_kw": p_ref,
+        "d_run_init_kw": d_run0,
+        "validation": {"no_bess_vnd": val_base, "oracle_vnd": val_oracle},
+    }
+    write_curve(curve_path, [])
+    write_report(report_path, report)
     print(f"[grepo] config {tag} | group={args.group} | val no-BESS "
           f"{val_base/1e6:.1f}M, oracle {val_oracle/1e6:.1f}M VND", flush=True)
 
@@ -177,6 +226,10 @@ def main():
         sav = (val_base - val_cost) / val_base * 100
         curve.append({"steps": steps, "val_cost_vnd": val_cost,
                       "oracle_gap_pct": gap, "saving_vs_nobess_pct": sav})
+        write_curve(curve_path, curve)
+        report["latest"] = curve[-1]
+        report["best"] = min(curve, key=lambda point: point["val_cost_vnd"])
+        write_report(report_path, report)
         if (it + 1) == 1 or (it + 1) % LOG_EVERY_ITERS == 0:
             print(f"  iter {it+1:>3}/{args.iters} | steps {steps:>7} | "
                   f"val {val_cost/1e6:8.1f}M | saving {sav:5.1f}% | "
@@ -184,10 +237,13 @@ def main():
                   f"{steps/(time.time()-t0):,.0f} sps", flush=True)
         if val_cost < best_val:
             best_val = val_cost
-            agent.meta = {"p_ref_kw": p_ref, "algo": "grepo",
-                          "beta": args.beta, "std": args.std,
-                          "e_cap_kwh": cfg.E_cap,
-                          "p_rated_kw": cfg.P_rated_nominal}
+            agent.meta = {
+                **agent.meta,
+                "beta": args.beta,
+                "std": args.std,
+                "e_cap_kwh": cfg.E_cap,
+                "p_rated_kw": cfg.P_rated_nominal,
+            }
             if d_run0 is not None:
                 agent.meta["d_run_init_kw"] = d_run0
             agent.save(RESULTS_DIR / f"policy_{tag}.pt")
@@ -199,11 +255,10 @@ def main():
                   f"val {val_cost/1e6:8.1f}M | saving {sav:5.1f}% | "
                   f"gap {gap:6.1f}% | no new best", flush=True)
 
-    with open(RESULTS_DIR / f"training_curve_{tag}.csv", "w", newline="",
-              encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=list(curve[0].keys()))
-        w.writeheader()
-        w.writerows(curve)
+    write_curve(curve_path, curve)
+    report["status"] = "complete"
+    report["completed_at"] = datetime.now(timezone.utc).isoformat()
+    write_report(report_path, report)
     print(f"[grepo] done in {time.time()-t0:.0f}s. Best val "
           f"{best_val/1e6:.1f}M VND -> policy_{tag}.pt", flush=True)
 

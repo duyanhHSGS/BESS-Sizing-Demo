@@ -4,6 +4,7 @@ import argparse
 import csv as _csv
 import math
 import time
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,7 @@ from common import RESULTS_DIR, load_system_config, make_bess_config, score_mont
 from ppo_agent import PPOAgent, RolloutBuffer
 from scenario_gen import DayData, MonthData
 from oracle_cache import load_cached_training_grids
+from training_reports import write_curve, write_report
 from settings import PPO_GAMMA, PPO_LAMBDA
 
 
@@ -204,6 +206,38 @@ def main() -> None:
         args.oracle_cache, [day.day_index for day in val_days]
     )
     val_oracle = score_month(oracle_grids, cfg, days=val_days)["total_cost_vnd"]
+    curve_path = RESULTS_DIR / f"training_curve_{tag}.csv"
+    report_path = RESULTS_DIR / f"training_report_{tag}.json"
+    report = {
+        "version": 1,
+        "status": "running",
+        "algorithm": "ppo",
+        "tag": tag,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "dataset": {
+            "source": str(args.csv),
+            "total_days": len(days),
+            "train_days": len(train_days),
+            "validation_days": len(val_days),
+            "test_days": len(test_days),
+            "validation_range": [val_days[0].date_iso, val_days[-1].date_iso],
+            "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
+        },
+        "battery": {"e_cap_kwh": args.e_cap, "p_rated_kw": args.p_rated},
+        "training": {
+            "requested_steps": args.steps,
+            "seed": args.seed,
+            "gamma": gamma,
+            "lambda": args.lambda_value,
+            "rollout_days": ROLLOUT_DAYS,
+        },
+        "billing_mode": billing,
+        "p_ref_kw": p_ref,
+        "d_run_init_kw": d_run0,
+        "validation": {"no_bess_vnd": val_base, "oracle_vnd": val_oracle},
+    }
+    write_curve(curve_path, [])
+    write_report(report_path, report)
     print(
         f"[train-ds] {len(days)} days | train {len(train_days)} / "
         f"val {len(val_days)} / test {len(test_days)} | "
@@ -215,6 +249,14 @@ def main() -> None:
     rng = np.random.default_rng(args.seed)
     best_val = float("inf")
     curve = []
+
+    def persist_progress() -> None:
+        write_curve(curve_path, curve)
+        if curve:
+            report["latest"] = curve[-1]
+            report["best"] = min(curve, key=lambda point: point["val_cost_vnd"])
+        write_report(report_path, report)
+
     month_index = 0
     obs = env.reset(augment_month(train_months[0], rng))
     steps = 0
@@ -239,6 +281,7 @@ def main() -> None:
         saving = (val_base - val_cost) / val_base * 100
         gap = (val_cost - val_oracle) / val_oracle * 100
         curve.append({"steps": steps, "val_cost_vnd": val_cost, "oracle_gap_pct": gap, "saving_vs_nobess_pct": saving})
+        persist_progress()
         if updates == 1 or updates % LOG_EVERY_UPDATES == 0:
             print(
                 f"  update {updates:>4} | step {steps:>7} | val {val_cost/1e6:8.1f}M | "
@@ -266,6 +309,7 @@ def main() -> None:
         saving = (val_base - val_cost) / val_base * 100
         gap = (val_cost - val_oracle) / val_oracle * 100
         curve.append({"steps": steps, "val_cost_vnd": val_cost, "oracle_gap_pct": gap, "saving_vs_nobess_pct": saving})
+        persist_progress()
         best_val = val_cost
         print(
             f"  best   {updates:>4} | step {steps:>7} | val {val_cost/1e6:8.1f}M | "
@@ -274,15 +318,7 @@ def main() -> None:
         )
         agent.save(RESULTS_DIR / f"policy_{tag}.pt")
 
-    with (RESULTS_DIR / f"training_curve_{tag}.csv").open("w", newline="", encoding="utf-8") as f:
-        writer = _csv.DictWriter(
-            f,
-            fieldnames=["steps", "val_cost_vnd", "oracle_gap_pct", "saving_vs_nobess_pct"],
-        )
-        writer.writeheader()
-        writer.writerows(curve)
-
-    from datetime import date
+    persist_progress()
 
     test_month = MonthData(days=test_days, source="test")
     best_agent = PPOAgent(env.obs_dim)
@@ -293,6 +329,14 @@ def main() -> None:
     test_saving = (no_bess_cost - test_cost) / no_bess_cost * 100
     best_agent.meta = {**agent.meta, "test_saving_pct": round(test_saving, 2), "trained": date.today().isoformat()}
     best_agent.save(RESULTS_DIR / f"policy_{tag}.pt")
+    report["status"] = "complete"
+    report["completed_at"] = datetime.now(timezone.utc).isoformat()
+    report["test"] = {
+        "policy_cost_vnd": test_cost,
+        "no_bess_vnd": no_bess_cost,
+        "saving_pct": test_saving,
+    }
+    write_report(report_path, report)
     print(
         f"[train-ds] TEST {test_days[0].date_iso}->{test_days[-1].date_iso}: "
         f"{test_cost/1e6:.1f}M vs no-BESS {no_bess_cost/1e6:.1f}M -> saving {test_saving:.2f}%",

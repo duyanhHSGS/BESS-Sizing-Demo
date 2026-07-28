@@ -20,7 +20,7 @@ from settings import (
     PPO_LAMBDA,
     SAMPLE_BATTERY_CANDIDATES,
 )
-from training_checkpoints import list_checkpoints
+from training_checkpoints import get_checkpoint_report, list_checkpoints
 from training_datasets import DatasetError, list_datasets
 from training_jobs import MANAGER
 from training_launcher import (
@@ -72,6 +72,16 @@ def training_datasets():
 @app.route("/api/training/checkpoints", methods=["GET"])
 def training_checkpoints():
     return jsonify(list_checkpoints())
+
+
+@app.route("/api/training/checkpoints/<checkpoint_name>/report", methods=["GET"])
+def training_checkpoint_report(checkpoint_name):
+    try:
+        return jsonify(get_checkpoint_report(checkpoint_name))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except FileNotFoundError:
+        return jsonify({"error": "checkpoint not found"}), 404
 
 
 @app.route("/api/training/oracle-status", methods=["POST"])

@@ -668,6 +668,83 @@
       width: 100%;
     }
 
+    .training-metric-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+
+    .training-metric-tabs button {
+      cursor: pointer;
+      padding: 6px 10px;
+    }
+
+    .training-metric-tabs button.active {
+      background: #0c4a6e;
+      border-color: var(--accent);
+      color: white;
+    }
+
+    #checkpoint-table-body tr {
+      cursor: pointer;
+    }
+
+    #checkpoint-table-body tr:hover,
+    #checkpoint-table-body tr:focus {
+      background: #172c3a;
+      outline: none;
+    }
+
+    #checkpoint-table-body tr.selected {
+      background: #0c4a6e;
+      box-shadow: inset 3px 0 0 var(--accent);
+    }
+
+    .training-report-grid {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      margin-bottom: 12px;
+    }
+
+    .training-report-metric {
+      background: #111922;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+
+    .training-report-metric span {
+      color: var(--muted);
+      display: block;
+      font-size: 11px;
+      margin-bottom: 5px;
+    }
+
+    .training-report-metric b {
+      color: #e0f2fe;
+      font-size: 16px;
+    }
+
+    .training-report-details {
+      display: grid;
+      gap: 6px 18px;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    }
+
+    .training-report-details div {
+      border-bottom: 1px solid #263442;
+      display: flex;
+      gap: 10px;
+      justify-content: space-between;
+      padding: 6px 0;
+    }
+
+    .training-report-details span {
+      color: var(--muted);
+    }
+
     .chart-help {
       color: #b6c4d2;
       font-size: 13px;
@@ -1262,9 +1339,13 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       <div class="dashboard-grid">
         <section class="card">
           <h2>Learning curve</h2>
+          <div class="training-metric-tabs" id="training-metric-tabs">
+            <button type="button" class="active" data-training-metric="bill">Validation bill</button>
+            <button type="button" data-training-metric="saving">Saving vs no-BESS</button>
+            <button type="button" data-training-metric="gap">Oracle gap</button>
+          </div>
           <canvas id="train-chart" class="training-chart" width="900" height="240"></canvas>
-          <p class="chart-help">Each red point is the validation bill after more training steps. Down is good: the
-            policy is learning to run the battery with a lower electricity bill.</p>
+          <p class="chart-help" id="train-chart-help">Click a local checkpoint to inspect its saved learning history.</p>
         </section>
         <section class="card">
           <h2>Local checkpoints</h2>
@@ -1285,6 +1366,11 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           </div>
         </section>
       </div>
+      <section class="card" id="training-report-card">
+        <h2 id="training-report-title">Checkpoint training report</h2>
+        <div id="training-report-body" class="info">Select a local checkpoint to reveal its training brain scan. 🧠⚡</div>
+        <div id="training-report-warnings" class="warning-panel"></div>
+      </section>
     </section>
 
     <section id="tab-dispatch-viewer" class="tab-panel">
@@ -2566,8 +2652,17 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const checkpointTableBody = document.getElementById("checkpoint-table-body");
     const trainChart = document.getElementById("train-chart");
     const trainChartCtx = trainChart.getContext("2d");
+    const trainChartHelp = document.getElementById("train-chart-help");
+    const trainingMetricTabs = document.getElementById("training-metric-tabs");
+    const trainingReportTitle = document.getElementById("training-report-title");
+    const trainingReportBody = document.getElementById("training-report-body");
+    const trainingReportWarnings = document.getElementById("training-report-warnings");
     let trainJobId = null;
+    let activeTrainingCheckpointName = null;
     let trainPoints = [];
+    let selectedCheckpointName = null;
+    let selectedCheckpointReport = null;
+    let trainCurveMetric = "bill";
     let trainOracleStatusRequest = 0;
     let trainOracleStatusTimer = null;
 
@@ -2602,13 +2697,112 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     async function loadTrainingCheckpoints() {
       const checkpoints = await trainingApi("/api/training/checkpoints");
       checkpointTableBody.innerHTML = checkpoints.map((checkpoint) => (
-        `<tr><td>${checkpoint.name}</td>` +
-        `<td>${checkpoint.algo || "unknown"}</td>` +
-        `<td>${checkpoint.e_cap_kwh ?? "?"}/${checkpoint.p_rated_kw ?? "?"}</td>` +
-        `<td>${checkpoint.billing_mode || ""}</td>` +
-        `<td>${checkpoint.test_saving_pct == null ? "-" : checkpoint.test_saving_pct + "%"}</td>` +
-        `<td>${checkpoint.trained || ""}</td></tr>`
+        `<tr tabindex="0" data-checkpoint="${escapeHtml(checkpoint.name)}" class="${checkpoint.name === selectedCheckpointName ? "selected" : ""}">` +
+        `<td>${escapeHtml(checkpoint.name)}</td>` +
+        `<td>${escapeHtml(checkpoint.algo || "unknown")}</td>` +
+        `<td>${escapeHtml(`${checkpoint.e_cap_kwh ?? "?"}/${checkpoint.p_rated_kw ?? "?"}`)}</td>` +
+        `<td>${escapeHtml(checkpoint.billing_mode || "")}</td>` +
+        `<td>${checkpoint.test_saving_pct == null ? "-" : escapeHtml(checkpoint.test_saving_pct + "%")}</td>` +
+        `<td>${escapeHtml(checkpoint.trained || "")}</td></tr>`
       )).join("");
+      if (!checkpoints.length) {
+        selectedCheckpointName = null;
+        selectedCheckpointReport = null;
+        trainingReportBody.textContent = "No local policy_*.pt checkpoints found.";
+        trainPoints = [];
+        drawTrainCurve();
+        return;
+      }
+      if (trainJobId) return;
+      if (!checkpoints.some((checkpoint) => checkpoint.name === selectedCheckpointName)) {
+        selectedCheckpointName = checkpoints[0].name;
+      }
+      await selectTrainingCheckpoint(selectedCheckpointName);
+    }
+
+    function reportValue(value, formatter = (item) => String(item)) {
+      return value == null || value === "" || !Number.isFinite(Number(value))
+        ? "Unknown"
+        : formatter(Number(value));
+    }
+
+    function reportMetric(label, value) {
+      return `<div class="training-report-metric"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`;
+    }
+
+    function reportDetail(label, value) {
+      return `<div><span>${escapeHtml(label)}</span><b>${escapeHtml(value == null || value === "" ? "Unknown" : value)}</b></div>`;
+    }
+
+    function renderTrainingReport(payload) {
+      const checkpoint = payload.checkpoint || {};
+      const meta = checkpoint.meta || {};
+      const saved = payload.training || {};
+      const training = saved.training || {};
+      const dataset = saved.dataset || {};
+      const validation = saved.validation || {};
+      const test = saved.test || {};
+      const summary = payload.summary || {};
+      const bestBill = summary.best_bill || {};
+      const bestSaving = summary.best_saving || {};
+      const bestGap = summary.best_oracle_gap || {};
+      const testSaving = test.saving_pct ?? checkpoint.test_saving_pct;
+      trainingReportTitle.textContent = `${checkpoint.name || "Checkpoint"} — training report`;
+      const headline = [
+        reportMetric("Best validation bill", reportValue(bestBill.val_cost_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)),
+        reportMetric("Best saving vs no-BESS", reportValue(bestSaving.saving_vs_nobess_pct, (value) => `${formatNumber(value, 2)}%`)),
+        reportMetric("Smallest Oracle gap", reportValue(bestGap.oracle_gap_pct, (value) => `${formatNumber(value, 2)}%`)),
+        reportMetric("Test saving", reportValue(testSaving, (value) => `${formatNumber(value, 2)}%`)),
+        reportMetric("Trained steps", reportValue(summary.max_steps, (value) => formatNumber(value))),
+      ].join("");
+      const datasetRange = dataset.validation_range ? dataset.validation_range.join(" → ") : meta.test_range?.join(" → ");
+      const hyperparameters = checkpoint.algo === "ppo"
+        ? `gamma ${training.gamma ?? meta.gamma ?? "?"}, lambda ${training.lambda ?? meta.lambda ?? "?"}`
+        : `group ${training.group ?? meta.group ?? "?"}, beta ${training.beta ?? meta.beta ?? "?"}, std ${training.std ?? meta.std ?? "?"}`;
+      const details = [
+        ["Algorithm", checkpoint.algo || saved.algorithm],
+        ["Battery E/P", `${checkpoint.e_cap_kwh ?? saved.battery?.e_cap_kwh ?? "?"} kWh / ${checkpoint.p_rated_kw ?? saved.battery?.p_rated_kw ?? "?"} kW`],
+        ["Billing mode", checkpoint.billing_mode || saved.billing_mode],
+        ["Dataset", dataset.source || meta.train_csv],
+        ["Train / validation / test days", dataset.total_days ? `${dataset.train_days} / ${dataset.validation_days} / ${dataset.test_days}` : "Unknown"],
+        ["Validation range", datasetRange],
+        ["Hyperparameters", hyperparameters],
+        ["Requested budget", training.requested_steps ? `${formatNumber(training.requested_steps)} steps` : training.requested_iterations ? `${formatNumber(training.requested_iterations)} iterations` : "Unknown"],
+        ["Seed", training.seed],
+        ["Reference peak", reportValue(saved.p_ref_kw ?? meta.p_ref_kw, (value) => `${formatNumber(value, 1)} kW`)],
+        ["Initial running peak", reportValue(saved.d_run_init_kw ?? meta.d_run_init_kw, (value) => `${formatNumber(value, 1)} kW`)],
+        ["Validation no-BESS", reportValue(validation.no_bess_vnd ?? summary.val_no_bess_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
+        ["Validation Oracle", reportValue(validation.oracle_vnd ?? summary.val_oracle_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
+        ["Report status", saved.status || (payload.artifacts?.report ? "saved" : "legacy / reconstructed")],
+        ["Curve artifact", payload.artifacts?.curve || "Unavailable"],
+      ].map(([label, value]) => reportDetail(label, value)).join("");
+      trainingReportBody.innerHTML = `<div class="training-report-grid">${headline}</div><div class="training-report-details">${details}</div>`;
+      const warnings = payload.warnings || [];
+      trainingReportWarnings.style.display = warnings.length ? "block" : "none";
+      trainingReportWarnings.innerHTML = warnings.map((warning) => `<div>${escapeHtml(warning)}</div>`).join("");
+    }
+
+    async function selectTrainingCheckpoint(name) {
+      selectedCheckpointName = name;
+      checkpointTableBody.querySelectorAll("tr").forEach((row) => {
+        row.classList.toggle("selected", row.dataset.checkpoint === name);
+      });
+      trainingReportBody.textContent = "Loading checkpoint brain scan...";
+      trainingReportWarnings.style.display = "none";
+      try {
+        const payload = await trainingApi(`/api/training/checkpoints/${encodeURIComponent(name)}/report`);
+        if (selectedCheckpointName !== name) return;
+        selectedCheckpointReport = payload;
+        trainPoints = payload.curve || [];
+        renderTrainingReport(payload);
+        drawTrainCurve();
+      } catch (error) {
+        if (selectedCheckpointName !== name) return;
+        selectedCheckpointReport = null;
+        trainPoints = [];
+        trainingReportBody.textContent = `Could not load checkpoint report: ${error.message}`;
+        drawTrainCurve();
+      }
     }
 
     function updateTrainAlgoFields() {
@@ -2685,24 +2879,62 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       trainChartCtx.strokeRect(0, 0, width, height);
       trainChartCtx.fillStyle = "#8496a8";
       trainChartCtx.font = "12px Segoe UI, sans-serif";
-      if (trainPoints.length < 2) {
-        trainChartCtx.fillText("Validation bill points will appear as training logs stream.", 16, 26);
-        trainChartCtx.fillText("X = training steps, Y = validation bill in million VND. Lower is better.", 16, 46);
+      const metric = {
+        bill: {
+          field: "val_cost_vnd",
+          label: "validation bill",
+          unit: "M VND",
+          scale: 1e6,
+          color: "#f87171",
+          direction: "Lower is better.",
+        },
+        saving: {
+          field: "saving_vs_nobess_pct",
+          label: "saving vs no-BESS",
+          unit: "%",
+          scale: 1,
+          color: "#4ade80",
+          direction: "Higher is better.",
+        },
+        gap: {
+          field: "oracle_gap_pct",
+          label: "Oracle gap",
+          unit: "%",
+          scale: 1,
+          color: "#c4b5fd",
+          direction: "Lower is better; zero reaches Oracle.",
+        },
+      }[trainCurveMetric];
+      const plotted = trainPoints.map((point) => {
+        if (Number.isFinite(Number(point.x)) && Number.isFinite(Number(point.y))) {
+          return { x: Number(point.x), y: Number(point.y) };
+        }
+        return {
+          x: Number(point.steps),
+          y: Number(point[metric.field]) / metric.scale,
+        };
+      }).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+      trainChartHelp.textContent = `${metric.label}: ${metric.direction} X = training steps.`;
+      if (plotted.length < 2) {
+        trainChartCtx.fillText(selectedCheckpointName
+          ? "This checkpoint has fewer than two saved validation points."
+          : "Validation points will appear as training logs stream.", 16, 26);
+        trainChartCtx.fillText(`X = training steps, Y = ${metric.label} (${metric.unit}).`, 16, 46);
         return;
       }
       const pad = { left: 54, right: 18, top: 18, bottom: 34 };
-      const xs = trainPoints.map((point) => point.x);
-      const ys = trainPoints.map((point) => point.y);
+      const xs = plotted.map((point) => point.x);
+      const ys = plotted.map((point) => point.y);
       const minX = Math.min(...xs);
       const maxX = Math.max(...xs);
       const minY = Math.min(...ys);
       const maxY = Math.max(...ys);
       const xScale = (value) => pad.left + (value - minX) / Math.max(1, maxX - minX) * (width - pad.left - pad.right);
       const yScale = (value) => height - pad.bottom - (value - minY) / Math.max(1, maxY - minY) * (height - pad.top - pad.bottom);
-      trainChartCtx.strokeStyle = "#f87171";
+      trainChartCtx.strokeStyle = metric.color;
       trainChartCtx.lineWidth = 2;
       trainChartCtx.beginPath();
-      trainPoints.forEach((point, index) => {
+      plotted.forEach((point, index) => {
         const x = xScale(point.x);
         const y = yScale(point.y);
         if (index === 0) trainChartCtx.moveTo(x, y);
@@ -2712,9 +2944,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       trainChartCtx.fillStyle = "#d7e0ea";
       trainChartCtx.fillText(`${formatNumber(minX)} steps`, pad.left, height - 10);
       trainChartCtx.fillText(`${formatNumber(maxX)} steps`, width - 120, height - 10);
-      trainChartCtx.fillText(`${formatNumber(maxY, 1)}M VND`, 10, pad.top + 8);
-      trainChartCtx.fillText(`${formatNumber(minY, 1)}M VND`, 10, height - pad.bottom);
-      trainChartCtx.fillText("lower bill = better policy", width - 180, pad.top + 8);
+      trainChartCtx.fillText(`${formatNumber(maxY, 1)}${metric.unit}`, 6, pad.top + 8);
+      trainChartCtx.fillText(`${formatNumber(minY, 1)}${metric.unit}`, 6, height - pad.bottom);
+      trainChartCtx.fillText(metric.direction, width - 210, pad.top + 8);
     }
 
     function followTrainingJob(jobId) {
@@ -2722,9 +2954,16 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       events.onmessage = (event) => {
         trainLog.textContent += `${event.data}\n`;
         trainLog.scrollTop = trainLog.scrollHeight;
-        const match = event.data.match(/(?:step|steps)\s+(\d+).*?\|\s*val\s+([\d.]+)M/i);
+        const match = event.data.match(
+          /(?:step|steps)\s+(\d+).*?\|\s*val\s+([\d.]+)M.*?\|\s*saving\s+([+-]?[\d.]+)%.*?\|\s*gap\s+([+-]?[\d.]+)%/i
+        );
         if (match) {
-          trainPoints.push({ x: Number(match[1]), y: Number(match[2]) });
+          trainPoints.push({
+            steps: Number(match[1]),
+            val_cost_vnd: Number(match[2]) * 1e6,
+            saving_vs_nobess_pct: Number(match[3]),
+            oracle_gap_pct: Number(match[4]),
+          });
           drawTrainCurve();
         }
       };
@@ -2734,6 +2973,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         trainStopButton.disabled = true;
         trainJobId = null;
         await loadTrainingCheckpoints();
+        if (activeTrainingCheckpointName) {
+          await selectTrainingCheckpoint(activeTrainingCheckpointName);
+        }
       });
       events.onerror = () => events.close();
     }
@@ -2741,6 +2983,11 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     async function startTraining() {
       trainLog.textContent = "";
       trainPoints = [];
+      selectedCheckpointReport = null;
+      trainCurveMetric = "bill";
+      trainingMetricTabs.querySelectorAll("[data-training-metric]").forEach((button) => {
+        button.classList.toggle("active", button.dataset.trainingMetric === "bill");
+      });
       drawTrainCurve();
       try {
         const payload = await trainingApi("/api/training/start", {
@@ -2764,6 +3011,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           }),
         });
         trainJobId = payload.job_id;
+        activeTrainingCheckpointName = String(payload.checkpoint).split(/[\\/]/).pop();
+        selectedCheckpointName = activeTrainingCheckpointName;
         trainButton.disabled = true;
         trainStopButton.disabled = false;
         trainLog.textContent += `Started ${payload.algo} -> ${payload.checkpoint}\n`;
@@ -2787,6 +3036,26 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     [trainEcap, trainPrated, trainValDays, trainTestDays, trainSteps, trainGamma, trainLambda, trainIters].forEach((input) => input.addEventListener("input", updateTrainPlan));
     trainButton.addEventListener("click", startTraining);
     trainStopButton.addEventListener("click", stopTraining);
+    checkpointTableBody.addEventListener("click", (event) => {
+      const row = event.target.closest("[data-checkpoint]");
+      if (row) selectTrainingCheckpoint(row.dataset.checkpoint);
+    });
+    checkpointTableBody.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const row = event.target.closest("[data-checkpoint]");
+      if (!row) return;
+      event.preventDefault();
+      selectTrainingCheckpoint(row.dataset.checkpoint);
+    });
+    trainingMetricTabs.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-training-metric]");
+      if (!button) return;
+      trainCurveMetric = button.dataset.trainingMetric;
+      trainingMetricTabs.querySelectorAll("[data-training-metric]").forEach((item) => {
+        item.classList.toggle("active", item === button);
+      });
+      drawTrainCurve();
+    });
     benchmarkHideAllButton.addEventListener("click", hideAllBenchmarkSeries);
     dispatchHideAllButton.addEventListener("click", hideAllDispatchSeries);
 
