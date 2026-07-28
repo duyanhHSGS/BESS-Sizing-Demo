@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import oracle_cache
 from benchmark import detect_dt_hours
+from settings import PPO_GAMMA, PPO_LAMBDA
 from training_datasets import DatasetError, export_training_csv, get_dataset_path, require_min_days
 from training_jobs import Job, JobManager
 
@@ -53,6 +55,25 @@ def _int(payload: dict, key: str, default: int) -> int:
     if value is None or value == "":
         return default
     return int(value)
+
+
+def _bounded_float(
+    payload: dict,
+    key: str,
+    default: float,
+    *,
+    minimum: float,
+    minimum_inclusive: bool = True,
+    maximum: float,
+) -> float:
+    value = _float(payload, key, default)
+    minimum_ok = value >= minimum if minimum_inclusive else value > minimum
+    if not math.isfinite(value) or not minimum_ok or value > maximum:
+        left = "[" if minimum_inclusive else "("
+        raise TrainingLaunchError(
+            f"{key} must be finite and in {left}{minimum}, {maximum}]"
+        )
+    return value
 
 
 def _split_days(payload: dict) -> tuple[int, int]:
@@ -142,7 +163,31 @@ def build_training_command(
         str(oracle_cache_path),
     ]
     if algo == "ppo":
-        cmd.extend(["--steps", str(_int(payload, "steps", 400_000))])
+        gamma = _bounded_float(
+            payload,
+            "gamma",
+            PPO_GAMMA,
+            minimum=0.0,
+            minimum_inclusive=False,
+            maximum=1.0,
+        )
+        lambda_value = _bounded_float(
+            payload,
+            "lambda",
+            PPO_LAMBDA,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        cmd.extend(
+            [
+                "--steps",
+                str(_int(payload, "steps", 400_000)),
+                "--gamma",
+                str(gamma),
+                "--lambda",
+                str(lambda_value),
+            ]
+        )
     else:
         cmd.extend(
             [

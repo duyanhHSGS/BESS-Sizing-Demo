@@ -16,6 +16,8 @@ from settings import (
     BILLING_SUNDAY_FIELD,
     DEFAULT_PARAMETERS,
     FORM_FIELDS,
+    PPO_GAMMA,
+    PPO_LAMBDA,
     SAMPLE_BATTERY_CANDIDATES,
 )
 from training_checkpoints import list_checkpoints
@@ -223,6 +225,8 @@ def view_context():
         "benchmark": benchmark,
         "oracle": candidate_oracles[0]["oracle"] if candidate_oracles else _pending_oracle(),
         "sample_battery_candidates": SAMPLE_BATTERY_CANDIDATES,
+        "ppo_gamma": PPO_GAMMA,
+        "ppo_lambda": PPO_LAMBDA,
         "candidate_oracles": candidate_oracles,
         "csv_has_oracle_cache": oracle_cache.selected_csv_has_cache(PARAMETERS),
         "exact_oracle_cache_exists": any(

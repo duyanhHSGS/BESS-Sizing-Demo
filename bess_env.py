@@ -56,6 +56,7 @@ import numpy as np
 
 from common import DT_HOURS, STEPS_PER_DAY, dt_from_steps_per_day, steps_per_day_from_dt, tariff_vector
 from scenario_gen import MonthData
+from settings import PPO_GAMMA
 
 OBS_DIM = 13
 OBS_DIM_FC = 17             # forecast-informed variant (+4 features)
@@ -83,7 +84,7 @@ class BESSEnv:
                  degradation_vnd_per_kwh: float = 50.0,
                  d_run_init_frac: float = 0.6,
                  d_run_init_kw: float | None = None,
-                 gamma: float = 0.995,
+                 gamma: float = PPO_GAMMA,
                  use_forecast: bool = False,
                  fc_sigma_load: float = 0.05, fc_sigma_pv: float = 0.15,
                  fc_rho: float = 0.9, fc_seed: int = 12345,

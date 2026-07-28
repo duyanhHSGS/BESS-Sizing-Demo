@@ -88,6 +88,11 @@ DEFAULT_PARAMETERS = {
     "use_sample_battery_options": "no",
 }
 
+# PPO training defaults. One gamma value is shared by PPO return discounting
+# and the environment's potential-based SOC reward shaping.
+PPO_GAMMA = 0.995
+PPO_LAMBDA = 0.97
+
 SAMPLE_BATTERY_CANDIDATES = tuple(
     {
         "id": f"{int(capacity)}kwh-{ratio_label}",
@@ -127,4 +132,3 @@ FORM_FIELDS = (
 
 BILLING_MODE_FIELD = "billing_mode"
 BILLING_SUNDAY_FIELD = "billing_sunday"
-

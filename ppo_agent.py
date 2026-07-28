@@ -9,6 +9,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from settings import PPO_GAMMA, PPO_LAMBDA
+
 torch.set_num_threads(6)
 
 
@@ -57,7 +59,7 @@ class RolloutBuffer:
 
 
 class PPOAgent:
-    def __init__(self, obs_dim: int, lr=3e-4, gamma=0.995, lam=0.97,
+    def __init__(self, obs_dim: int, lr=3e-4, gamma=PPO_GAMMA, lam=PPO_LAMBDA,
                  clip=0.2, epochs=8, minibatch=256, ent_coef=3e-3,
                  vf_coef=0.5, seed=0):
         torch.manual_seed(seed)

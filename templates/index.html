@@ -1244,6 +1244,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label>Test days <input type="number" id="train-test-days" min="1" step="1" value="30"></label>
           <label class="train-ppo-field">Steps <input type="number" id="train-steps" value="400000"
               step="50000"></label>
+          <label class="train-ppo-field">Gamma <input type="number" id="train-gamma" min="0.0001" max="1"
+              step="0.0001" value="{{ ppo_gamma }}"></label>
+          <label class="train-ppo-field">Lambda <input type="number" id="train-lambda" min="0" max="1"
+              step="0.001" value="{{ ppo_lambda }}"></label>
           <label class="train-grepo-field">Iters <input type="number" id="train-iters" value="400" step="50"></label>
           <label class="train-grepo-field">Group <input type="number" id="train-group" value="8" step="1"></label>
           <label class="train-grepo-field">Beta <input type="number" id="train-beta" value="0.5" step="0.05"></label>
@@ -2548,6 +2552,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const trainValDays = document.getElementById("train-val-days");
     const trainTestDays = document.getElementById("train-test-days");
     const trainSteps = document.getElementById("train-steps");
+    const trainGamma = document.getElementById("train-gamma");
+    const trainLambda = document.getElementById("train-lambda");
     const trainIters = document.getElementById("train-iters");
     const trainGroup = document.getElementById("train-group");
     const trainBeta = document.getElementById("train-beta");
@@ -2639,7 +2645,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       } else if (trainDays < 1) {
         trainPlan.textContent = `${days} days found; validation ${valDays} + test ${testDays} leaves no training days.`;
       } else {
-        const budget = algo === "ppo" ? `${trainSteps.value} PPO steps` : `${trainIters.value} GREPO iterations`;
+        const budget = algo === "ppo"
+          ? `${trainSteps.value} PPO steps; gamma ${trainGamma.value}; lambda ${trainLambda.value}`
+          : `${trainIters.value} GREPO iterations`;
         trainPlan.textContent = `Checking exact month-wide Oracle cache... Plan: train ${trainDays} days, validation ${valDays}, test ${testDays}; ${budget}; E/P ${trainEcap.value}/${trainPrated.value}.`;
         trainOracleStatusTimer = setTimeout(refreshTrainingOracleStatus, 250);
       }
@@ -2746,6 +2754,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             val_days: Number(trainValDays.value),
             test_days: Number(trainTestDays.value),
             steps: Number(trainSteps.value),
+            gamma: Number(trainGamma.value),
+            lambda: Number(trainLambda.value),
             iters: Number(trainIters.value),
             group: Number(trainGroup.value),
             beta: Number(trainBeta.value),
@@ -2774,7 +2784,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
 
     trainAlgo.addEventListener("change", updateTrainAlgoFields);
     trainDataset.addEventListener("change", updateTrainPlan);
-    [trainEcap, trainPrated, trainValDays, trainTestDays, trainSteps, trainIters].forEach((input) => input.addEventListener("input", updateTrainPlan));
+    [trainEcap, trainPrated, trainValDays, trainTestDays, trainSteps, trainGamma, trainLambda, trainIters].forEach((input) => input.addEventListener("input", updateTrainPlan));
     trainButton.addEventListener("click", startTraining);
     trainStopButton.addEventListener("click", stopTraining);
     benchmarkHideAllButton.addEventListener("click", hideAllBenchmarkSeries);

@@ -15,6 +15,7 @@ from common import RESULTS_DIR, load_system_config, make_bess_config, score_mont
 from ppo_agent import PPOAgent, RolloutBuffer
 from scenario_gen import DayData, MonthData
 from oracle_cache import load_cached_training_grids
+from settings import PPO_GAMMA, PPO_LAMBDA
 
 
 ROLLOUT_DAYS = 32
@@ -106,6 +107,8 @@ def main() -> None:
     parser.add_argument("--e-cap", type=float, required=True)
     parser.add_argument("--p-rated", type=float, required=True)
     parser.add_argument("--steps", type=int, default=500_000)
+    parser.add_argument("--gamma", type=float, default=PPO_GAMMA)
+    parser.add_argument("--lambda", dest="lambda_value", type=float, default=PPO_LAMBDA)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--tag", type=str, default="")
     parser.add_argument("--billing", choices=("2tc", "tou"), default="2tc")
@@ -114,6 +117,10 @@ def main() -> None:
     parser.add_argument("--val-days", type=int, default=30)
     parser.add_argument("--test-days", type=int, default=30)
     args = parser.parse_args()
+    if not math.isfinite(args.gamma) or not 0.0 < args.gamma <= 1.0:
+        raise SystemExit("gamma must be finite and in (0, 1]")
+    if not math.isfinite(args.lambda_value) or not 0.0 <= args.lambda_value <= 1.0:
+        raise SystemExit("lambda must be finite and in [0, 1]")
 
     days = load_csv_days(Path(args.csv))
     if args.val_days < 1 or args.test_days < 1:
@@ -168,8 +175,15 @@ def main() -> None:
 
     train_months = month_blocks(train_days)
     val_month = MonthData(days=val_days, source="val")
-    env = BESSEnv(cfg, p_ref_kw=p_ref, d_run_init_kw=d_run0)
-    agent = PPOAgent(env.obs_dim, seed=args.seed)
+    gamma = args.gamma
+    env = BESSEnv(cfg, p_ref_kw=p_ref, d_run_init_kw=d_run0, gamma=gamma)
+    agent = PPOAgent(
+        env.obs_dim,
+        gamma=gamma,
+        lam=args.lambda_value,
+        seed=args.seed,
+    )
+    assert env.gamma == agent.gamma
     agent.meta = {
         "p_ref_kw": p_ref,
         "e_cap_kwh": args.e_cap,
@@ -177,6 +191,8 @@ def main() -> None:
         "obs_variant": "base",
         "obs_dim": env.obs_dim,
         "d_run_init_kw": d_run0,
+        "gamma": gamma,
+        "lambda": args.lambda_value,
         "billing_mode": billing,
         "train_csv": str(args.csv),
         "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
@@ -191,6 +207,7 @@ def main() -> None:
     print(
         f"[train-ds] {len(days)} days | train {len(train_days)} / "
         f"val {len(val_days)} / test {len(test_days)} | "
+        f"gamma {gamma:g} | lambda {args.lambda_value:g} | "
         f"p_ref {p_ref:.0f} | val no-BESS {val_base/1e6:.0f}M, oracle {val_oracle/1e6:.0f}M",
         flush=True,
     )
