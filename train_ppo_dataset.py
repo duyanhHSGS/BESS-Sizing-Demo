@@ -111,6 +111,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=500_000)
     parser.add_argument("--gamma", type=float, default=PPO_GAMMA)
     parser.add_argument("--lambda", dest="lambda_value", type=float, default=PPO_LAMBDA)
+    parser.add_argument("--control-dt-minutes", type=float, required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--tag", type=str, default="")
     parser.add_argument("--billing", choices=("2tc", "tou"), default="2tc")
@@ -178,7 +179,13 @@ def main() -> None:
     train_months = month_blocks(train_days)
     val_month = MonthData(days=val_days, source="val")
     gamma = args.gamma
-    env = BESSEnv(cfg, p_ref_kw=p_ref, d_run_init_kw=d_run0, gamma=gamma)
+    env = BESSEnv(
+        cfg,
+        p_ref_kw=p_ref,
+        d_run_init_kw=d_run0,
+        gamma=gamma,
+        control_dt_minutes=args.control_dt_minutes,
+    )
     agent = PPOAgent(
         env.obs_dim,
         gamma=gamma,
@@ -195,11 +202,15 @@ def main() -> None:
         "d_run_init_kw": d_run0,
         "gamma": gamma,
         "lambda": args.lambda_value,
+        "native_dt_minutes": csv_dt * 60.0,
+        "control_dt_minutes": env.control_dt_minutes,
+        "native_steps_per_action": env.native_steps_per_action,
         "billing_mode": billing,
         "train_csv": str(args.csv),
         "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
     }
-    buffer = RolloutBuffer(len(days[0].load) * ROLLOUT_DAYS, env.obs_dim)
+    decisions_per_day = len(days[0].load) // env.native_steps_per_action
+    buffer = RolloutBuffer(decisions_per_day * ROLLOUT_DAYS, env.obs_dim)
 
     val_base = score_month(run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
     oracle_grids = load_cached_training_grids(
@@ -230,6 +241,9 @@ def main() -> None:
             "gamma": gamma,
             "lambda": args.lambda_value,
             "rollout_days": ROLLOUT_DAYS,
+            "native_dt_minutes": csv_dt * 60.0,
+            "control_dt_minutes": env.control_dt_minutes,
+            "native_steps_per_action": env.native_steps_per_action,
         },
         "billing_mode": billing,
         "p_ref_kw": p_ref,
@@ -242,6 +256,7 @@ def main() -> None:
         f"[train-ds] {len(days)} days | train {len(train_days)} / "
         f"val {len(val_days)} / test {len(test_days)} | "
         f"gamma {gamma:g} | lambda {args.lambda_value:g} | "
+        f"native dt {csv_dt * 60:g}m | control dt {env.control_dt_minutes:g}m | "
         f"p_ref {p_ref:.0f} | val no-BESS {val_base/1e6:.0f}M, oracle {val_oracle/1e6:.0f}M",
         flush=True,
     )

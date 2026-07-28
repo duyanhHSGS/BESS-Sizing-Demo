@@ -27,6 +27,7 @@ from grepo_agent import GREPOAgent
 from baselines import run_no_bess, run_drl_policy
 from oracle_cache import load_cached_training_grids
 from training_reports import write_curve, write_report
+from settings import GREPO_GAMMA
 
 VAL_EVERY = 10
 LOG_EVERY_ITERS = 4
@@ -72,6 +73,8 @@ def main():
                     help="trng s hybrid baseline Eq.28")
     ap.add_argument("--std", type=float, default=0.30,
                     help="std c nh lambda ca policy Gaussian")
+    ap.add_argument("--gamma", type=float, default=GREPO_GAMMA)
+    ap.add_argument("--control-dt-minutes", type=float, required=True)
     ap.add_argument("--training-config", type=str, required=True,
                     help="Sizing Demo canonical training_config.json path.")
     ap.add_argument("--oracle-cache", type=str, required=True,
@@ -81,6 +84,8 @@ def main():
     ap.add_argument("--test-days", type=int, default=30,
                     help="Number of CSV days reserved for test holdout.")
     args = ap.parse_args()
+    if not np.isfinite(args.gamma) or not 0.0 < args.gamma <= 1.0:
+        raise SystemExit("gamma must be finite and in (0, 1]")
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     base = load_system_config()
@@ -135,6 +140,7 @@ def main():
     tag = args.tag or f"grepo_{cfg.E_cap:.0f}kwh_{cfg.P_rated_nominal:.0f}kw"
 
     agent = GREPOAgent(OBS_DIM, n_group=args.group, seed=args.seed,
+                       gamma=args.gamma,
                        beta=args.beta, std=args.std)
     # meta trc validation u tin  env val dng ng floor/p_ref
     billing_mode = tariff.get("billing_mode", "2tc") if args.training_config else "2tc"
@@ -147,10 +153,20 @@ def main():
         "group": args.group,
         "beta": args.beta,
         "std": args.std,
+        "gamma": args.gamma,
+        "native_dt_minutes": cfg.dt * 60.0,
+        "control_dt_minutes": args.control_dt_minutes,
     }
     if d_run0 is not None:
         agent.meta["d_run_init_kw"] = d_run0
-    make_env = lambda: BESSEnv(cfg, p_ref_kw=p_ref)   # noqa: E731
+    make_env = lambda: BESSEnv(   # noqa: E731
+        cfg,
+        p_ref_kw=p_ref,
+        gamma=args.gamma,
+        control_dt_minutes=args.control_dt_minutes,
+    )
+    control_probe = make_env()
+    agent.meta["native_steps_per_action"] = control_probe.native_steps_per_action
     val_base = score_month(
         run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_month.days
     )["total_cost_vnd"]
@@ -188,6 +204,10 @@ def main():
             "group": args.group,
             "beta": args.beta,
             "std": args.std,
+            "gamma": args.gamma,
+            "native_dt_minutes": cfg.dt * 60.0,
+            "control_dt_minutes": control_probe.control_dt_minutes,
+            "native_steps_per_action": control_probe.native_steps_per_action,
         },
         "billing_mode": billing_mode,
         "p_ref_kw": p_ref,
@@ -196,7 +216,8 @@ def main():
     }
     write_curve(curve_path, [])
     write_report(report_path, report)
-    print(f"[grepo] config {tag} | group={args.group} | val no-BESS "
+    print(f"[grepo] config {tag} | group={args.group} | gamma={args.gamma:g} | "
+          f"native dt {cfg.dt * 60:g}m | control dt {control_probe.control_dt_minutes:g}m | val no-BESS "
           f"{val_base/1e6:.1f}M, oracle {val_oracle/1e6:.1f}M VND", flush=True)
 
     curve = []

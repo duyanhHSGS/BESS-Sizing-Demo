@@ -1319,6 +1319,13 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
               value="{{ battery_power_limit_kW }}"></label>
           <label>Validation days <input type="number" id="train-val-days" min="1" step="1" value="30"></label>
           <label>Test days <input type="number" id="train-test-days" min="1" step="1" value="30"></label>
+          <label class="train-learning-field">Custom sampling Δt
+            <select id="train-control-dt"></select>
+          </label>
+          <label class="train-learning-field" id="train-control-dt-custom-wrap" style="display:none">
+            Custom Δt (minutes)
+            <input type="number" id="train-control-dt-custom" min="1" max="30" step="1">
+          </label>
           <label class="train-ppo-field">Steps <input type="number" id="train-steps" value="400000"
               step="50000"></label>
           <label class="train-ppo-field">Gamma <input type="number" id="train-gamma" min="0.0001" max="1"
@@ -1329,6 +1336,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label class="train-grepo-field">Group <input type="number" id="train-group" value="8" step="1"></label>
           <label class="train-grepo-field">Beta <input type="number" id="train-beta" value="0.5" step="0.05"></label>
           <label class="train-grepo-field">Std <input type="number" id="train-std" value="0.30" step="0.05"></label>
+          <label class="train-grepo-field">GREPO Gamma <input type="number" id="train-grepo-gamma"
+              min="0.0001" max="1" step="0.0001" value="{{ grepo_gamma }}"></label>
           <label>Checkpoint tag <input id="train-tag" size="22" placeholder="auto"></label>
           <button id="btn-train" class="primary" type="button">Start training</button>
           <button id="btn-train-stop" type="button" disabled>Stop</button>
@@ -2637,6 +2646,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const trainPrated = document.getElementById("train-prated");
     const trainValDays = document.getElementById("train-val-days");
     const trainTestDays = document.getElementById("train-test-days");
+    const trainControlDt = document.getElementById("train-control-dt");
+    const trainControlDtCustom = document.getElementById("train-control-dt-custom");
+    const trainControlDtCustomWrap = document.getElementById("train-control-dt-custom-wrap");
     const trainSteps = document.getElementById("train-steps");
     const trainGamma = document.getElementById("train-gamma");
     const trainLambda = document.getElementById("train-lambda");
@@ -2644,6 +2656,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const trainGroup = document.getElementById("train-group");
     const trainBeta = document.getElementById("train-beta");
     const trainStd = document.getElementById("train-std");
+    const trainGrepoGamma = document.getElementById("train-grepo-gamma");
     const trainTag = document.getElementById("train-tag");
     const trainPlan = document.getElementById("train-plan");
     const trainLog = document.getElementById("train-log");
@@ -2684,14 +2697,60 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
 
     async function loadTrainingDatasets() {
       const previousSelection = trainDataset.value;
+      const previousControlDt = selectedControlDt();
       const datasets = await trainingApi("/api/training/datasets");
       trainDataset.innerHTML = datasets.map((dataset) => (
-        `<option value="${dataset.id}" data-days="${dataset.n_days}" data-status="${dataset.status}" data-source="${dataset.source}">` +
+        `<option value="${dataset.id}" data-days="${dataset.n_days}" data-status="${dataset.status}" data-source="${dataset.source}" data-res-min="${dataset.res_min}">` +
         `${dataset.source} (${dataset.n_days} days)</option>`
       )).join("");
       if (previousSelection && Array.from(trainDataset.options).some((option) => option.value === previousSelection)) {
         trainDataset.value = previousSelection;
       }
+      const sameDataset = previousSelection && trainDataset.value === previousSelection;
+      refreshControlDtOptions(
+        !sameDataset,
+        sameDataset && Number.isFinite(previousControlDt) ? previousControlDt : null
+      );
+    }
+
+    function selectedNativeDt() {
+      return Number(trainDataset.selectedOptions[0]?.dataset.resMin || 0);
+    }
+
+    function selectedControlDt() {
+      return trainControlDt.value === "custom"
+        ? Number(trainControlDtCustom.value)
+        : Number(trainControlDt.value);
+    }
+
+    function isCompatibleControlDt(value, nativeDt = selectedNativeDt()) {
+      if (!Number.isFinite(value) || !Number.isFinite(nativeDt) || nativeDt <= 0) return false;
+      const nearInteger = (number) => Math.abs(number - Math.round(number)) < 1e-9;
+      return value >= nativeDt
+        && nearInteger(value / nativeDt)
+        && nearInteger(30 / value)
+        && nearInteger(1440 / value);
+    }
+
+    function refreshControlDtOptions(resetToNative = false, preferredValue = null) {
+      const nativeDt = selectedNativeDt();
+      const previous = resetToNative
+        ? nativeDt
+        : (preferredValue == null ? selectedControlDt() : Number(preferredValue));
+      const safe = [];
+      for (let value = Math.ceil(nativeDt); value <= 30; value += 1) {
+        if (isCompatibleControlDt(value, nativeDt)) safe.push(value);
+      }
+      trainControlDt.innerHTML = safe.map((value) => (
+        `<option value="${value}">${value} minute${value === 1 ? "" : "s"}${value === nativeDt ? " (native)" : ""}</option>`
+      )).join("") + `<option value="custom">Custom...</option>`;
+      if (safe.includes(previous)) {
+        trainControlDt.value = String(previous);
+      } else {
+        trainControlDt.value = String(nativeDt);
+      }
+      trainControlDtCustom.value = String(previous || nativeDt);
+      trainControlDtCustomWrap.style.display = trainControlDt.value === "custom" ? "inline-flex" : "none";
     }
 
     async function loadTrainingCheckpoints() {
@@ -2758,7 +2817,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       const datasetRange = dataset.validation_range ? dataset.validation_range.join(" → ") : meta.test_range?.join(" → ");
       const hyperparameters = checkpoint.algo === "ppo"
         ? `gamma ${training.gamma ?? meta.gamma ?? "?"}, lambda ${training.lambda ?? meta.lambda ?? "?"}`
-        : `group ${training.group ?? meta.group ?? "?"}, beta ${training.beta ?? meta.beta ?? "?"}, std ${training.std ?? meta.std ?? "?"}`;
+        : `gamma ${training.gamma ?? meta.gamma ?? "?"}, group ${training.group ?? meta.group ?? "?"}, beta ${training.beta ?? meta.beta ?? "?"}, std ${training.std ?? meta.std ?? "?"}`;
       const details = [
         ["Algorithm", checkpoint.algo || saved.algorithm],
         ["Battery E/P", `${checkpoint.e_cap_kwh ?? saved.battery?.e_cap_kwh ?? "?"} kWh / ${checkpoint.p_rated_kw ?? saved.battery?.p_rated_kw ?? "?"} kW`],
@@ -2767,12 +2826,15 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         ["Train / validation / test days", dataset.total_days ? `${dataset.train_days} / ${dataset.validation_days} / ${dataset.test_days}` : "Unknown"],
         ["Validation range", datasetRange],
         ["Hyperparameters", hyperparameters],
+        ["Sampling Δt", meta.control_dt_minutes == null
+          ? "Legacy / missing"
+          : `${meta.native_dt_minutes}m native → ${meta.control_dt_minutes}m control (${meta.native_steps_per_action} rows/action)`],
         ["Requested budget", training.requested_steps ? `${formatNumber(training.requested_steps)} steps` : training.requested_iterations ? `${formatNumber(training.requested_iterations)} iterations` : "Unknown"],
         ["Seed", training.seed],
         ["Reference peak", reportValue(saved.p_ref_kw ?? meta.p_ref_kw, (value) => `${formatNumber(value, 1)} kW`)],
         ["Initial running peak", reportValue(saved.d_run_init_kw ?? meta.d_run_init_kw, (value) => `${formatNumber(value, 1)} kW`)],
         ["Validation no-BESS", reportValue(validation.no_bess_vnd ?? summary.val_no_bess_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
-        ["Validation Oracle", reportValue(validation.oracle_vnd ?? summary.val_oracle_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
+        ["Validation Oracle (native perfect)", reportValue(validation.oracle_vnd ?? summary.val_oracle_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
         ["Report status", saved.status || (payload.artifacts?.report ? "saved" : "legacy / reconstructed")],
         ["Curve artifact", payload.artifacts?.curve || "Unavailable"],
       ].map(([label, value]) => reportDetail(label, value)).join("");
@@ -2807,12 +2869,18 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
 
     function updateTrainAlgoFields() {
       const algo = trainAlgo.value;
+      document.querySelectorAll(".train-learning-field").forEach((item) => {
+        item.style.display = algo === "ppo" || algo === "grepo" ? "inline-flex" : "none";
+      });
       document.querySelectorAll(".train-ppo-field").forEach((item) => {
         item.style.display = algo === "ppo" ? "inline-flex" : "none";
       });
       document.querySelectorAll(".train-grepo-field").forEach((item) => {
         item.style.display = algo === "grepo" ? "inline-flex" : "none";
       });
+      if (algo === "ppo" || algo === "grepo") {
+        trainControlDtCustomWrap.style.display = trainControlDt.value === "custom" ? "inline-flex" : "none";
+      }
       updateTrainPlan();
     }
 
@@ -2831,18 +2899,23 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       const testDays = Math.max(0, Number(trainTestDays.value || 0));
       const splitDays = valDays + testDays;
       const trainDays = days - splitDays;
-      trainButton.disabled = valDays < 1 || testDays < 1 || trainDays < 1 || algo === "grpo";
+      const nativeDt = selectedNativeDt();
+      const controlDt = selectedControlDt();
+      const validControlDt = isCompatibleControlDt(controlDt, nativeDt);
+      trainButton.disabled = valDays < 1 || testDays < 1 || trainDays < 1 || algo === "grpo" || !validControlDt;
       if (algo === "grpo") {
         trainPlan.textContent = "GRPO is visible for planning, but it is not implemented in this repo yet.";
       } else if (valDays < 1 || testDays < 1) {
         trainPlan.textContent = "Validation days and test days must both be at least 1.";
       } else if (trainDays < 1) {
         trainPlan.textContent = `${days} days found; validation ${valDays} + test ${testDays} leaves no training days.`;
+      } else if (!validControlDt) {
+        trainPlan.textContent = `Invalid control Δt ${controlDt}m. It must be a native-or-coarser multiple that divides both 30 minutes and 24 hours.`;
       } else {
         const budget = algo === "ppo"
           ? `${trainSteps.value} PPO steps; gamma ${trainGamma.value}; lambda ${trainLambda.value}`
-          : `${trainIters.value} GREPO iterations`;
-        trainPlan.textContent = `Checking exact month-wide Oracle cache... Plan: train ${trainDays} days, validation ${valDays}, test ${testDays}; ${budget}; E/P ${trainEcap.value}/${trainPrated.value}.`;
+          : `${trainIters.value} GREPO iterations; gamma ${trainGrepoGamma.value}`;
+        trainPlan.textContent = `Checking exact native-resolution Oracle cache... Plan: train ${trainDays} days, validation ${valDays}, test ${testDays}; ${budget}; sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action); E/P ${trainEcap.value}/${trainPrated.value}.`;
         trainOracleStatusTimer = setTimeout(refreshTrainingOracleStatus, 250);
       }
     }
@@ -2856,6 +2929,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           dataset_id: trainDataset.value,
           e_cap_kwh: Number(trainEcap.value),
           p_rated_kw: Number(trainPrated.value),
+          control_dt_minutes: selectedControlDt(),
         }),
       });
       const payload = await response.json().catch(() => ({}));
@@ -2866,7 +2940,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         return;
       }
       trainButton.disabled = false;
-      trainPlan.textContent = `Oracle Chad ready: ${payload.solved_days} cached days. Training may start without any daily LP.`;
+      const nativeDt = selectedNativeDt();
+      const controlDt = selectedControlDt();
+      trainPlan.textContent = `Oracle Chad ready: ${payload.solved_days} native-resolution cached days. Sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action). Training may start without any daily LP.`;
     }
 
     function drawTrainCurve() {
@@ -3007,6 +3083,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             group: Number(trainGroup.value),
             beta: Number(trainBeta.value),
             std: Number(trainStd.value),
+            grepo_gamma: Number(trainGrepoGamma.value),
+            control_dt_minutes: selectedControlDt(),
             tag: trainTag.value.trim(),
           }),
         });
@@ -3032,8 +3110,16 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     }
 
     trainAlgo.addEventListener("change", updateTrainAlgoFields);
-    trainDataset.addEventListener("change", updateTrainPlan);
-    [trainEcap, trainPrated, trainValDays, trainTestDays, trainSteps, trainGamma, trainLambda, trainIters].forEach((input) => input.addEventListener("input", updateTrainPlan));
+    trainDataset.addEventListener("change", () => {
+      refreshControlDtOptions(true);
+      updateTrainPlan();
+    });
+    trainControlDt.addEventListener("change", () => {
+      trainControlDtCustomWrap.style.display = trainControlDt.value === "custom" ? "inline-flex" : "none";
+      if (trainControlDt.value === "custom") trainControlDtCustom.focus();
+      updateTrainPlan();
+    });
+    [trainEcap, trainPrated, trainValDays, trainTestDays, trainSteps, trainGamma, trainLambda, trainIters, trainGrepoGamma, trainControlDtCustom].forEach((input) => input.addEventListener("input", updateTrainPlan));
     trainButton.addEventListener("click", startTraining);
     trainStopButton.addEventListener("click", stopTraining);
     checkpointTableBody.addEventListener("click", (event) => {

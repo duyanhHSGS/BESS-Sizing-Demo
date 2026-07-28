@@ -85,6 +85,7 @@ class BESSEnv:
                  d_run_init_frac: float = 0.6,
                  d_run_init_kw: float | None = None,
                  gamma: float = PPO_GAMMA,
+                 control_dt_minutes: float | None = None,
                  use_forecast: bool = False,
                  fc_sigma_load: float = 0.05, fc_sigma_pv: float = 0.15,
                  fc_rho: float = 0.9, fc_seed: int = 12345,
@@ -97,8 +98,15 @@ class BESSEnv:
             n_steps = steps_per_day_from_dt(dt_hours)
         self.n_steps = int(n_steps)
         self.dt = float(dt_hours)
+        self.control_dt_minutes = (
+            float(control_dt_minutes)
+            if control_dt_minutes is not None
+            else self.dt * 60.0
+        )
+        self.native_steps_per_action = 1
         cfg.dt = self.dt
         assert abs(self.n_steps * self.dt - 24.0) < 1e-9,             "n_steps  dt phi = 24h"
+        self._configure_control_interval()
         # ca s billing 30 pht = bao nhiu mu   phn gii ny
         self.roll_k = max(2, int(round(0.5 / self.dt)))
         self.cfg = cfg
@@ -137,6 +145,25 @@ class BESSEnv:
         self.log_pbess: list[np.ndarray] = []
 
     # ------------------------------------------------------------------
+    def _configure_control_interval(self) -> None:
+        native_minutes = self.dt * 60.0
+        control_minutes = self.control_dt_minutes
+        ratio = control_minutes / native_minutes
+        rounded_ratio = round(ratio)
+        if (
+            not np.isfinite(control_minutes)
+            or control_minutes < native_minutes - 1e-9
+            or abs(ratio - rounded_ratio) > 1e-9
+            or abs(30.0 / control_minutes - round(30.0 / control_minutes)) > 1e-9
+            or abs(1440.0 / control_minutes - round(1440.0 / control_minutes)) > 1e-9
+        ):
+            raise ValueError(
+                "control_dt_minutes must be a native-or-coarser multiple "
+                "that divides both 30 minutes and 24 hours"
+            )
+        self.native_steps_per_action = int(rounded_ratio)
+
+    # ------------------------------------------------------------------
     def reset(self, month: MonthData, soc_init: float | None = None) -> np.ndarray:
         self.month = month
         if month.days:
@@ -148,6 +175,7 @@ class BESSEnv:
                 self.dt = dt_from_steps_per_day(self.n_steps)
                 self.cfg.dt = self.dt
                 self.roll_k = max(1, int(round(0.5 / self.dt)))
+                self._configure_control_interval()
                 self._tar_base = tariff_vector(self.cfg)
                 from common import TOU_RULES, cfg_no_peak
                 self._tar_sun = tariff_vector(cfg_no_peak(self.cfg)) if TOU_RULES.get("sunday_no_peak") else self._tar_base
@@ -249,7 +277,7 @@ class BESSEnv:
         return 0.0, cg, cp
 
     # ------------------------------------------------------------------
-    def step(self, action: float):
+    def _step_native(self, action: float):
         cfg = self.cfg
         day = self.month.days[self.day]
         t = self.t
@@ -258,7 +286,6 @@ class BESSEnv:
 
         d, cg, cp = self.project_action(action, load, pv)
         grid = eff + cg - d                            # >= 0 by construction
-        soc_before = self.soc
         self.soc = self.soc + (cg + cp) * self.dt * cfg.eta_ch / cfg.E_cap \
                    - d * self.dt / (cfg.eta_dis * cfg.E_cap)
         # numerical guard only  projection already bounds SOC
@@ -286,13 +313,6 @@ class BESSEnv:
         # --- reward: counterfactual delta vs no-BESS ---------------------
         energy_delta = self.tariff[t] * (cg - d) * self.dt
         peak_delta = peak_pen - peak_pen_nb
-        # potential-based shaping: value of stored usable energy at mid price
-        phi_coef = cfg.E_cap * cfg.eta_dis * cfg.price_mid
-        phi_before = (soc_before - cfg.SOC_min) * phi_coef
-        phi_after = (self.soc - cfg.SOC_min) * phi_coef
-        shaping = self.gamma * phi_after - phi_before
-        reward = (-(energy_delta + peak_delta + deg_cost) + shaping) / REWARD_SCALE
-
         # --- logs ------------------------------------------------------
         self.log_grid[self.day][t] = grid
         self.log_pbess[self.day][t] = d - (cg + cp)
@@ -318,6 +338,56 @@ class BESSEnv:
                 self._make_day_forecast()
         obs = None if done else self._obs()
         info = {"grid_kw": grid, "energy_cost": energy_cost,
+                "energy_delta": energy_delta, "peak_delta": peak_delta,
+                "deg_cost": deg_cost,
                 "peak_pen": peak_pen, "peak_pen_nb": peak_pen_nb,
                 "d_run": self.d_run}
-        return obs, reward, done, info
+        return obs, done, info
+
+    def step(self, action: float):
+        """Apply one policy decision over one control interval.
+
+        The requested action is held, but projection and all physical/billing
+        state updates still run at the dataset's native resolution.
+        """
+        cfg = self.cfg
+        soc_before = self.soc
+        totals = {
+            "energy_cost": 0.0,
+            "energy_delta": 0.0,
+            "peak_delta": 0.0,
+            "deg_cost": 0.0,
+            "peak_pen": 0.0,
+            "peak_pen_nb": 0.0,
+        }
+        obs = None
+        done = False
+        info = {}
+        native_rows = 0
+        for _ in range(self.native_steps_per_action):
+            obs, done, info = self._step_native(action)
+            native_rows += 1
+            for key in totals:
+                totals[key] += float(info[key])
+            if done:
+                break
+
+        phi_coef = cfg.E_cap * cfg.eta_dis * cfg.price_mid
+        phi_before = (soc_before - cfg.SOC_min) * phi_coef
+        phi_after = (self.soc - cfg.SOC_min) * phi_coef
+        shaping = self.gamma * phi_after - phi_before
+        reward = (
+            -(
+                totals["energy_delta"]
+                + totals["peak_delta"]
+                + totals["deg_cost"]
+            )
+            + shaping
+        ) / REWARD_SCALE
+        return obs, reward, done, {
+            **info,
+            **totals,
+            "shaping": shaping,
+            "native_rows": native_rows,
+            "d_run": self.d_run,
+        }

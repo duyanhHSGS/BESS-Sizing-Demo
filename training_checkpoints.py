@@ -163,6 +163,16 @@ def get_checkpoint_report(
     points, warnings = _load_curve(curve_path)
     saved_report, report_warnings = _load_report(report_path)
     warnings.extend(report_warnings)
+    required_sampling = {
+        "native_dt_minutes",
+        "control_dt_minutes",
+        "native_steps_per_action",
+    }
+    if not required_sampling.issubset(checkpoint.get("meta", {})):
+        warnings.append(
+            "Legacy checkpoint lacks required control sampling delta-t "
+            "metadata and is blocked from Dispatch; retrain it."
+        )
     return {
         "checkpoint": checkpoint,
         "curve": points,

@@ -147,6 +147,16 @@ def load_policy(checkpoint_name: str, checkpoint_dir: Path = CHECKPOINT_DIR):
         raise DispatchRunWarning(f"{checkpoint_name}: GRPO is not implemented in this repo yet")
     if algo not in {"ppo", "grepo"}:
         raise DispatchRunWarning(f"{checkpoint_name}: unsupported checkpoint algorithm {algo}")
+    sampling_fields = {
+        "native_dt_minutes",
+        "control_dt_minutes",
+        "native_steps_per_action",
+    }
+    if not sampling_fields.issubset(meta):
+        raise DispatchRunWarning(
+            f"{checkpoint_name}: legacy checkpoint has incomplete control "
+            "sampling delta-t metadata; retrain it before Dispatch"
+        )
 
     if algo == "ppo":
         obs_dim = int(meta.get("obs_dim") or (17 if meta.get("obs_variant") == "fc" else 13))
@@ -182,6 +192,13 @@ def run_policy_dispatch(
         warnings.append(f"{checkpoint_name}: missing E/P metadata, using current UI sizing")
     cfg = build_dispatch_config(parameters, float(e_cap), float(p_rated))
     month = month or dataset_to_month(selected_data_path(parameters))
+    expected_native_dt = float(meta["native_dt_minutes"])
+    actual_native_dt = cfg.dt * 60.0
+    if abs(expected_native_dt - actual_native_dt) > 1e-9:
+        raise DispatchRunWarning(
+            f"{checkpoint_name}: trained on {expected_native_dt:g}-minute "
+            f"native data, but selected Dispatch data is {actual_native_dt:g}-minute"
+        )
     p_ref = float(meta.get("p_ref_kw") or _policy_reference_kw(month))
     rollout = run_drl_policy(month, cfg, agent, p_ref_kw=p_ref)
     days = policy_result_to_days(month, rollout, cfg, parameters)

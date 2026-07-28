@@ -9,8 +9,14 @@ from pathlib import Path
 
 import oracle_cache
 from benchmark import detect_dt_hours
-from settings import PPO_GAMMA, PPO_LAMBDA
-from training_datasets import DatasetError, export_training_csv, get_dataset_path, require_min_days
+from settings import GREPO_GAMMA, PPO_GAMMA, PPO_LAMBDA
+from training_datasets import (
+    DatasetError,
+    detect_resolution_minutes,
+    export_training_csv,
+    get_dataset_path,
+    require_min_days,
+)
 from training_jobs import Job, JobManager
 
 
@@ -86,11 +92,38 @@ def _split_days(payload: dict) -> tuple[int, int]:
     return val_days, test_days
 
 
-def _training_tag(payload: dict, dataset_id: str, e_cap: float, p_rated: float, algo: str) -> str:
+def _control_dt_minutes(payload: dict, csv_path: Path) -> int:
+    native_minutes = float(detect_resolution_minutes(csv_path))
+    requested = _float(payload, "control_dt_minutes", native_minutes)
+    ratio = requested / native_minutes
+    if (
+        not math.isfinite(requested)
+        or requested < native_minutes - 1e-9
+        or abs(ratio - round(ratio)) > 1e-9
+        or abs(30.0 / requested - round(30.0 / requested)) > 1e-9
+        or abs(1440.0 / requested - round(1440.0 / requested)) > 1e-9
+    ):
+        raise TrainingLaunchError(
+            "control_dt_minutes must be a native-or-coarser multiple "
+            "that divides both 30 minutes and 24 hours"
+        )
+    return int(round(requested))
+
+
+def _training_tag(
+    payload: dict,
+    dataset_id: str,
+    e_cap: float,
+    p_rated: float,
+    algo: str,
+    control_dt_minutes: int,
+) -> str:
     explicit = sanitize_tag(payload.get("tag", ""))
     if explicit:
         return explicit
-    return sanitize_tag(f"{algo}_{dataset_id}_{e_cap:.0f}kwh_{p_rated:.0f}kw")
+    return sanitize_tag(
+        f"{algo}_{dataset_id}_{e_cap:.0f}kwh_{p_rated:.0f}kw_dt{control_dt_minutes}m"
+    )
 
 
 def write_training_config(parameters: dict, output_dir: Path = USER_DATA_DIR) -> Path:
@@ -135,7 +168,10 @@ def build_training_command(
     p_rated = _float(payload, "p_rated_kw")
     val_days, test_days = _split_days(payload)
     dataset_id = str(payload.get("dataset_id", "dataset"))
-    tag = _training_tag(payload, dataset_id, e_cap, p_rated, algo)
+    control_dt_minutes = _control_dt_minutes(payload, csv_path)
+    tag = _training_tag(
+        payload, dataset_id, e_cap, p_rated, algo, control_dt_minutes
+    )
     checkpoint = ensure_inside_base(base_dir / "checkpoints" / f"policy_{tag}.pt", base_dir)
     script = PPO_SCRIPT if algo == "ppo" else GREPO_SCRIPT
 
@@ -161,6 +197,8 @@ def build_training_command(
         str(config_path),
         "--oracle-cache",
         str(oracle_cache_path),
+        "--control-dt-minutes",
+        str(control_dt_minutes),
     ]
     if algo == "ppo":
         gamma = _bounded_float(
@@ -189,6 +227,14 @@ def build_training_command(
             ]
         )
     else:
+        gamma = _bounded_float(
+            payload,
+            "grepo_gamma",
+            GREPO_GAMMA,
+            minimum=0.0,
+            minimum_inclusive=False,
+            maximum=1.0,
+        )
         cmd.extend(
             [
                 "--iters",
@@ -199,6 +245,8 @@ def build_training_command(
                 str(_float(payload, "beta", 0.5)),
                 "--std",
                 str(_float(payload, "std", 0.30)),
+                "--gamma",
+                str(gamma),
             ]
         )
     return {"cmd": cmd, "tag": tag, "checkpoint": str(checkpoint), "algo": algo}
@@ -209,6 +257,7 @@ def training_oracle_parameters(payload: dict, parameters: dict) -> tuple[Path, d
     if not dataset_id:
         raise DatasetError("missing dataset_id")
     source = get_dataset_path(dataset_id)
+    _control_dt_minutes(payload, source)
     return source, {
         **parameters,
         "selected_data_csv": source.name,

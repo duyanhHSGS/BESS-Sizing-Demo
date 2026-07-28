@@ -16,6 +16,7 @@ from settings import (
     BILLING_SUNDAY_FIELD,
     DEFAULT_PARAMETERS,
     FORM_FIELDS,
+    GREPO_GAMMA,
     PPO_GAMMA,
     PPO_LAMBDA,
     SAMPLE_BATTERY_CANDIDATES,
@@ -237,6 +238,7 @@ def view_context():
         "sample_battery_candidates": SAMPLE_BATTERY_CANDIDATES,
         "ppo_gamma": PPO_GAMMA,
         "ppo_lambda": PPO_LAMBDA,
+        "grepo_gamma": GREPO_GAMMA,
         "candidate_oracles": candidate_oracles,
         "csv_has_oracle_cache": oracle_cache.selected_csv_has_cache(PARAMETERS),
         "exact_oracle_cache_exists": any(

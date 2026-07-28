@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 from scenario_gen import MonthData
+from settings import PPO_GAMMA
 
 
 def _result(p_grid_days, soc_days, p_bess_days):
@@ -78,9 +79,20 @@ def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
     from bess_env import BESSEnv
     meta = getattr(agent, "meta", {}) or {}
     use_fc = meta.get("obs_variant") == "fc"
+    native_dt_minutes = cfg.dt * 60.0
+    expected_native_dt = float(meta.get("native_dt_minutes", native_dt_minutes))
+    if abs(native_dt_minutes - expected_native_dt) > 1e-9:
+        raise ValueError(
+            f"Policy expects {expected_native_dt:g}-minute native data, "
+            f"but Dispatch has {native_dt_minutes:g}-minute data"
+        )
     env = BESSEnv(cfg, p_ref_kw=p_ref_kw, use_forecast=use_fc,
                   fc_seed=fc_seed,
-                  d_run_init_kw=meta.get("d_run_init_kw"))
+                  d_run_init_kw=meta.get("d_run_init_kw"),
+                  gamma=float(meta.get("gamma", PPO_GAMMA)),
+                  control_dt_minutes=float(
+                      meta.get("control_dt_minutes", native_dt_minutes)
+                  ))
     obs = env.reset(month)
     done = False
     lat = []
