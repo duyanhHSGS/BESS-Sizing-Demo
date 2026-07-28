@@ -21,7 +21,12 @@ from settings import (
 from training_checkpoints import list_checkpoints
 from training_datasets import DatasetError, list_datasets
 from training_jobs import MANAGER
-from training_launcher import TrainingLaunchError, UnsupportedAlgorithm, start_training
+from training_launcher import (
+    TrainingLaunchError,
+    UnsupportedAlgorithm,
+    start_training,
+    training_oracle_status,
+)
 
 
 app = Flask(__name__)
@@ -67,11 +72,22 @@ def training_checkpoints():
     return jsonify(list_checkpoints())
 
 
+@app.route("/api/training/oracle-status", methods=["POST"])
+def training_oracle_cache_status():
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(training_oracle_status(payload, PARAMETERS))
+    except (DatasetError, TrainingLaunchError, ValueError) as exc:
+        return jsonify({"ready": False, "error": str(exc)}), 422
+
+
 @app.route("/api/training/start", methods=["POST"])
 def training_start():
     payload = request.get_json(silent=True) or {}
     try:
         job, details = start_training(payload, PARAMETERS, MANAGER)
+    except oracle_cache.OracleCacheRequired as exc:
+        return jsonify({"error": str(exc), "code": "oracle_cache_required"}), 422
     except UnsupportedAlgorithm as exc:
         return jsonify({"error": str(exc)}), 422
     except (DatasetError, TrainingLaunchError, ValueError) as exc:

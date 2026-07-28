@@ -8,13 +8,13 @@ from pathlib import Path
 
 import numpy as np
 
-from baselines import run_drl_policy, run_no_bess, run_oracle
+from baselines import run_drl_policy, run_no_bess
 from bess_env import BESSEnv
 from benchmark import _rolling_30_minute_average
 from common import RESULTS_DIR, load_system_config, make_bess_config, score_month
-from settings import DEFAULT_PARAMETERS
 from ppo_agent import PPOAgent, RolloutBuffer
 from scenario_gen import DayData, MonthData
+from oracle_cache import load_cached_training_grids
 
 
 ROLLOUT_DAYS = 32
@@ -27,7 +27,12 @@ def load_csv_days(path: Path) -> list[DayData]:
         for row in _csv.DictReader(f):
             day = by_day.setdefault(
                 row["date_iso"],
-                {"load": [], "pv": [], "day_type": row["day_type"]},
+                {
+                    "load": [],
+                    "pv": [],
+                    "day_type": row["day_type"],
+                    "day_index": int(row["day_index"]),
+                },
             )
             step = int(row["step"])
             while len(day["load"]) <= step:
@@ -44,7 +49,7 @@ def load_csv_days(path: Path) -> list[DayData]:
                 pv=np.asarray(data["pv"], dtype=np.float64),
                 day_type=data["day_type"],
                 weather="csv",
-                day_index=len(days) + 1,
+                day_index=data["day_index"],
                 date_iso=iso,
             )
         )
@@ -104,7 +109,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--tag", type=str, default="")
     parser.add_argument("--billing", choices=("2tc", "tou"), default="2tc")
-    parser.add_argument("--tariff-json", type=str, default="")
+    parser.add_argument("--training-config", type=str, required=True)
+    parser.add_argument("--oracle-cache", required=True)
     parser.add_argument("--val-days", type=int, default=30)
     parser.add_argument("--test-days", type=int, default=30)
     args = parser.parse_args()
@@ -134,28 +140,25 @@ def main() -> None:
     cfg = make_bess_config(base, args.e_cap, args.p_rated, base.P_target_user)
     cfg.dt = csv_dt
     billing = args.billing
-    if args.tariff_json:
-        import json
-        from common import TOU_RULES, build_tariff_windows
+    import json
+    from common import TOU_RULES, build_tariff_windows
 
-        tariff = json.loads(Path(args.tariff_json).read_text(encoding="utf-8"))
-        cfg.price_peak = float(tariff.get("price_peak", cfg.price_peak))
-        cfg.price_mid = float(tariff.get("price_mid", cfg.price_mid))
-        cfg.price_off = float(tariff.get("price_off", cfg.price_off))
-        cfg.T_cap = float(tariff.get("t_cap", cfg.T_cap))
-        for key, value in build_tariff_windows(tariff["peak_windows"], tariff["off_windows"], cfg.dt).items():
-            setattr(cfg, key, value)
-        billing = tariff.get("billing_mode", billing)
-        TOU_RULES["sunday_no_peak"] = bool(tariff.get("sunday_no_peak", False))
-    else:
-        from common import build_tariff_windows
-
-        for key, value in build_tariff_windows(
-            DEFAULT_PARAMETERS["billing_windows_expensive"],
-            DEFAULT_PARAMETERS["billing_windows_cheap"],
-            cfg.dt,
-        ).items():
-            setattr(cfg, key, value)
+    tariff = json.loads(Path(args.training_config).read_text(encoding="utf-8"))
+    cfg.price_peak = float(tariff.get("price_peak", cfg.price_peak))
+    cfg.price_mid = float(tariff.get("price_mid", cfg.price_mid))
+    cfg.price_off = float(tariff.get("price_off", cfg.price_off))
+    cfg.T_cap = float(tariff.get("t_cap", cfg.T_cap))
+    cfg.eta_ch = float(tariff.get("charge_efficiency", cfg.eta_ch))
+    cfg.eta_dis = float(tariff.get("discharge_efficiency", cfg.eta_dis))
+    cfg.SOC_min = float(tariff.get("minimum_soc", cfg.SOC_min))
+    cfg.SOC_max = float(tariff.get("maximum_soc", cfg.SOC_max))
+    cfg.SOC_eod = float(tariff.get("required_final_soc", cfg.SOC_eod))
+    for key, value in build_tariff_windows(
+        tariff["peak_windows"], tariff["off_windows"], cfg.dt
+    ).items():
+        setattr(cfg, key, value)
+    billing = tariff.get("billing_mode", billing)
+    TOU_RULES["sunday_no_peak"] = bool(tariff.get("sunday_no_peak", False))
     if billing == "tou":
         cfg.T_cap = 0.0
 
@@ -181,7 +184,10 @@ def main() -> None:
     buffer = RolloutBuffer(len(days[0].load) * ROLLOUT_DAYS, env.obs_dim)
 
     val_base = score_month(run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
-    val_oracle = score_month(run_oracle(val_month, cfg)["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
+    oracle_grids = load_cached_training_grids(
+        args.oracle_cache, [day.day_index for day in val_days]
+    )
+    val_oracle = score_month(oracle_grids, cfg, days=val_days)["total_cost_vnd"]
     print(
         f"[train-ds] {len(days)} days | train {len(train_days)} / "
         f"val {len(val_days)} / test {len(test_days)} | "

@@ -6,6 +6,8 @@ import re
 import sys
 from pathlib import Path
 
+import oracle_cache
+from benchmark import detect_dt_hours
 from training_datasets import DatasetError, export_training_csv, get_dataset_path, require_min_days
 from training_jobs import Job, JobManager
 
@@ -70,10 +72,10 @@ def _training_tag(payload: dict, dataset_id: str, e_cap: float, p_rated: float, 
     return sanitize_tag(f"{algo}_{dataset_id}_{e_cap:.0f}kwh_{p_rated:.0f}kw")
 
 
-def write_tariff_config(parameters: dict, output_dir: Path = USER_DATA_DIR) -> Path:
+def write_training_config(parameters: dict, output_dir: Path = USER_DATA_DIR) -> Path:
     output_dir = ensure_inside_base(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "tariff_config.json"
+    path = output_dir / "training_config.json"
     data = {
         "price_peak": float(parameters.get("billing_expensive", 2759)),
         "price_mid": float(parameters.get("billing_normal", 1485)),
@@ -84,6 +86,11 @@ def write_tariff_config(parameters: dict, output_dir: Path = USER_DATA_DIR) -> P
         "off_windows": parameters.get("billing_windows_cheap", "00:00-04:00,22:00-24:00"),
         "sunday_no_peak": bool(parameters.get("billing_sunday", False)),
         "realization": float(parameters.get("billing_real_saving_factor", 0.6)),
+        "charge_efficiency": float(parameters.get("charge_efficiency", 0.95)),
+        "discharge_efficiency": float(parameters.get("discharge_efficiency", 0.95)),
+        "minimum_soc": float(parameters.get("minimum_soc", 0.10)),
+        "maximum_soc": float(parameters.get("maximum_soc", 0.90)),
+        "required_final_soc": float(parameters.get("required_final_soc", 0.50)),
     }
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return path
@@ -92,7 +99,8 @@ def write_tariff_config(parameters: dict, output_dir: Path = USER_DATA_DIR) -> P
 def build_training_command(
     payload: dict,
     csv_path: Path,
-    tariff_path: Path,
+    config_path: Path,
+    oracle_cache_path: Path,
     python_executable: str = sys.executable,
     base_dir: Path = BASE_DIR,
 ) -> dict:
@@ -128,9 +136,13 @@ def build_training_command(
         str(val_days),
         "--test-days",
         str(test_days),
+        "--training-config",
+        str(config_path),
+        "--oracle-cache",
+        str(oracle_cache_path),
     ]
     if algo == "ppo":
-        cmd.extend(["--steps", str(_int(payload, "steps", 400_000)), "--tariff-json", str(tariff_path)])
+        cmd.extend(["--steps", str(_int(payload, "steps", 400_000))])
     else:
         cmd.extend(
             [
@@ -147,19 +159,47 @@ def build_training_command(
     return {"cmd": cmd, "tag": tag, "checkpoint": str(checkpoint), "algo": algo}
 
 
-def start_training(payload: dict, parameters: dict, manager: JobManager) -> tuple[Job, dict]:
+def training_oracle_parameters(payload: dict, parameters: dict) -> tuple[Path, dict]:
     dataset_id = str(payload.get("dataset_id", "")).strip()
     if not dataset_id:
         raise DatasetError("missing dataset_id")
-    val_days, test_days = _split_days(payload)
     source = get_dataset_path(dataset_id)
+    return source, {
+        **parameters,
+        "selected_data_csv": source.name,
+        "dt": str(detect_dt_hours(source)),
+        "battery_capacity_kWh": str(_float(payload, "e_cap_kwh")),
+        "battery_power_limit_kW": str(_float(payload, "p_rated_kw")),
+    }
+
+
+def training_oracle_status(payload: dict, parameters: dict) -> dict:
+    source, oracle_parameters = training_oracle_parameters(payload, parameters)
+    try:
+        cache_path, result = oracle_cache.require_cached_oracle(oracle_parameters)
+    except oracle_cache.OracleCacheRequired as exc:
+        return {"ready": False, "source": source.name, "message": str(exc)}
+    return {
+        "ready": True,
+        "source": source.name,
+        "cache": cache_path.name,
+        "solved_days": result.get("summary", {}).get("solved_day_count", 0),
+        "message": "Exact month-wide Oracle LP cache is ready.",
+    }
+
+
+def start_training(payload: dict, parameters: dict, manager: JobManager) -> tuple[Job, dict]:
+    dataset_id = str(payload.get("dataset_id", "")).strip()
+    val_days, test_days = _split_days(payload)
+    source, oracle_parameters = training_oracle_parameters(payload, parameters)
     n_days = require_min_days(source, val_days + test_days + 1)
+    oracle_path, _ = oracle_cache.require_cached_oracle(oracle_parameters)
 
     USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     csv_path = export_training_csv(dataset_id, USER_DATA_DIR, min_days=val_days + test_days + 1)
-    tariff_path = write_tariff_config(parameters, USER_DATA_DIR)
-    spec = build_training_command(payload, csv_path, tariff_path)
+    config_path = write_training_config(oracle_parameters, USER_DATA_DIR)
+    spec = build_training_command(payload, csv_path, config_path, oracle_path)
 
     env = os.environ.copy()
     env["SIZING_DEMO_CHECKPOINT_DIR"] = str(CHECKPOINT_DIR.resolve())

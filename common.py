@@ -47,9 +47,6 @@ def dt_from_steps_per_day(steps_per_day: int) -> float:
     return 24.0 / steps
 
 
-def rolling_window_steps(dt_hours: float, window_hours: float = DEMAND_WINDOW_HOURS) -> int:
-    return max(1, int(round(float(window_hours) / max(float(dt_hours), 1e-9))))
-
 # ---------------------------------------------------------------------------
 # 2026 Vietnam market CAPEX (same source as sizing/sizing_matrix_2026.py)
 # ---------------------------------------------------------------------------
@@ -210,12 +207,11 @@ def tariff_vector_day(cfg: SADRBCConfig, day) -> np.ndarray:
 
 def rolling_pmax_day(p_grid_day: np.ndarray, dt_hours: float = DT_HOURS) -> float:
     """Max 30-min rolling average of one day's grid import (kW)."""
+    from benchmark import _rolling_30_minute_average
+
     g = np.maximum(0.0, np.asarray(p_grid_day, dtype=np.float64))
-    roll_win = rolling_window_steps(dt_hours)
-    if len(g) < roll_win:
-        return float(g.max(initial=0.0))
-    roll = np.convolve(g, np.ones(roll_win) / roll_win, mode="valid")
-    return float(roll.max(initial=0.0))
+    rolling = _rolling_30_minute_average(g, dt_hours)
+    return float(max(rolling, default=0.0))
 
 
 def score_month(p_grid_days: list[np.ndarray], cfg: SADRBCConfig,

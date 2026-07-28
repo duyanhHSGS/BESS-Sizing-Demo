@@ -3,21 +3,16 @@
   NO-BESS      : grid = max(0, load - pv). Lower reference for savings.
   SADRBC v13   : the production rule-based controller (algorithm/sadrbc.py),
                  fed the day's actuals as its forecast (its best case).
-  ORACLE LP-PF : perfect-foresight LP (benchmark_compare/lp_core.py) chained
-                 day-by-day in MONTHLY billing mode  each day pays only the
-                 marginal increment of the running monthly peak. This is the
-                 optimistic performance estimator of the planning layer.
+  ORACLE       : supplied separately from the cached, month-wide Oracle LP.
 
-All three return the same structure so drl/evaluate.py can score every
-method with common.score_month on the identical cost model.
+Runtime baselines return the same structure so common.score_month can score
+each method on the identical cost model.
 """
 from __future__ import annotations
 
 import numpy as np
 
-from common import rolling_pmax_day
 from scenario_gen import MonthData
-from lp_core import build_eff_load, solve_day_lp
 
 
 def _result(p_grid_days, soc_days, p_bess_days):
@@ -70,43 +65,6 @@ def run_sadrbc(month: MonthData, cfg) -> dict:
         grids.append(np.asarray(pg, dtype=float))
         socs.append(np.asarray(soc, dtype=float))
         pbs.append(np.asarray(pb, dtype=float))
-    return _result(grids, socs, pbs)
-
-
-# ---------------------------------------------------------------------------
-def run_oracle(month: MonthData, cfg,
-               soc_floor_frac: float = 0.0) -> dict:
-    """Day-chained perfect-foresight LP under true monthly demand billing."""
-    from common import TOU_RULES, is_sunday, cfg_no_peak
-    grids, socs, pbs = [], [], []
-    soc = cfg.SOC_eod
-    peak_floor = 0.0
-    cfg_sun = (cfg_no_peak(cfg)
-               if TOU_RULES.get("sunday_no_peak") else cfg)
-    for day in month.days:
-        cfg_day = cfg_sun if (TOU_RULES.get("sunday_no_peak")
-                              and is_sunday(day)) else cfg
-        eff, sur = build_eff_load(list(day.load), list(day.pv))
-        res = solve_day_lp(
-            eff, sur, cfg_day,
-            demand_rate_per_kW=cfg.T_cap,
-            soc_init=soc, soc_end_min=cfg.SOC_eod,
-            soc_floor_frac=soc_floor_frac,
-            peak_floor=peak_floor)
-        if res["status"] != "OK":                  # defensive: idle fallback
-            g = np.maximum(0.0, day.load - day.pv)
-            n_steps = len(g)
-            grids.append(g)
-            socs.append(np.full(n_steps + 1, soc))
-            pbs.append(np.zeros(n_steps))
-            continue
-        g = np.maximum(0.0, np.asarray(res["p_grid"]))
-        grids.append(g)
-        socs.append(np.asarray(res["soc"]))
-        pbs.append(np.asarray(res["p_bess"]))
-        soc = float(res["soc"][-1])
-        # running monthly peak on the same 30-min rolling metric
-        peak_floor = max(peak_floor, rolling_pmax_day(g, cfg.dt))
     return _result(grids, socs, pbs)
 
 

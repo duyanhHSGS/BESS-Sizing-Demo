@@ -1175,14 +1175,14 @@ Pareto frontier? = whether this candidate is non-dominated among the selected cu
           <h3>Objective</h3>
           <pre class="formula">MINIMIZE:
 
-  [t=196] (
+  SUM over every time step t in the 30-day billing block (
       EnergyPrice(t)  dt  (
           GridCharge(t) - BatteryDischarge(t)
       )
   )
       <span class="formula-note"> Net energy cost</span>
 
-+ [t=196] (
++ SUM over every time step t in the 30-day billing block (
       BatteryWearCost  dt  (
           BatteryDischarge(t)
         + GridCharge(t)
@@ -1215,11 +1215,12 @@ BatterySOC(t+1)
 0  SolarCharge(t)  SolarSurplus(t)
 
 MinimumSOC  BatterySOC(t)  MaximumSOC
-BatterySOC(96)  RequiredFinalSOC
+BatterySOC(FinalMonthStep) >= RequiredFinalSOC
 
-0.5  (GridImport(t) + GridImport(t+1))  PeakGrid
-for t = 0 ... 95
-      <span class="formula-note"> 30-minute rolling average demand</span></pre>
+SUM over k in Window(t) of Weight(t,k) * GridImport(k) <= PeakGrid
+Window(t) covers exactly 0.5 hours; weights come from covered duration.
+The number of steps is detected from the CSV and dt, never fixed at 96.
+      <span class="formula-note"> Dynamic-resolution 30-minute demand</span></pre>
         </div>
       </section>
     </section>
@@ -2561,6 +2562,8 @@ for t = 0 ... 95
     const trainChartCtx = trainChart.getContext("2d");
     let trainJobId = null;
     let trainPoints = [];
+    let trainOracleStatusRequest = 0;
+    let trainOracleStatusTimer = null;
 
     async function trainingApi(path, options = {}) {
       const response = await fetch(path, options);
@@ -2614,6 +2617,8 @@ for t = 0 ... 95
     }
 
     function updateTrainPlan() {
+      trainOracleStatusRequest += 1;
+      clearTimeout(trainOracleStatusTimer);
       const selected = trainDataset.selectedOptions[0];
       if (!selected) {
         trainPlan.textContent = "No local training dataset found.";
@@ -2635,8 +2640,31 @@ for t = 0 ... 95
         trainPlan.textContent = `${days} days found; validation ${valDays} + test ${testDays} leaves no training days.`;
       } else {
         const budget = algo === "ppo" ? `${trainSteps.value} PPO steps` : `${trainIters.value} GREPO iterations`;
-        trainPlan.textContent = `Plan: train ${trainDays} days, validation ${valDays}, test ${testDays}; ${budget}; E/P ${trainEcap.value}/${trainPrated.value}.`;
+        trainPlan.textContent = `Checking exact month-wide Oracle cache... Plan: train ${trainDays} days, validation ${valDays}, test ${testDays}; ${budget}; E/P ${trainEcap.value}/${trainPrated.value}.`;
+        trainOracleStatusTimer = setTimeout(refreshTrainingOracleStatus, 250);
       }
+    }
+
+    async function refreshTrainingOracleStatus() {
+      const requestId = ++trainOracleStatusRequest;
+      const response = await fetch("/api/training/oracle-status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dataset_id: trainDataset.value,
+          e_cap_kwh: Number(trainEcap.value),
+          p_rated_kw: Number(trainPrated.value),
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (requestId !== trainOracleStatusRequest) return;
+      if (!response.ok || !payload.ready) {
+        trainButton.disabled = true;
+        trainPlan.textContent = `Oracle cache missing: ${payload.error || payload.message || "calculate Oracle LP in Sizing first."}`;
+        return;
+      }
+      trainButton.disabled = false;
+      trainPlan.textContent = `Oracle Chad ready: ${payload.solved_days} cached days. Training may start without any daily LP.`;
     }
 
     function drawTrainCurve() {

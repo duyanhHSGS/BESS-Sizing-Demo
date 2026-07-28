@@ -11,11 +11,9 @@ from benchmark import (
     _rounded_series,
     _rolling_30_minute_average,
     _to_float,
+    detect_dt_hours,
     selected_data_path,
 )
-
-import numpy as np
-
 
 def build_oracle_lp(parameters):
     try:
@@ -29,7 +27,8 @@ def build_oracle_lp(parameters):
             "summary": _empty_summary(),
         }
 
-    dt = max(0.000001, _to_float(parameters.get("dt"), 0.25))
+    csv_path = selected_data_path(parameters)
+    dt = detect_dt_hours(csv_path)
     capacity = max(0.0, _to_float(parameters.get("battery_capacity_kWh"), 0.0))
     power_limit = max(0.0, _to_float(parameters.get("battery_power_limit_kW"), 0.0))
     charge_efficiency = _clamp(_to_float(parameters.get("charge_efficiency"), 1.0), 0.001, 1.0)
@@ -38,7 +37,7 @@ def build_oracle_lp(parameters):
     maximum_soc = _clamp(_to_float(parameters.get("maximum_soc"), 1.0), minimum_soc, 1.0)
     required_final_soc = _clamp(_to_float(parameters.get("required_final_soc"), minimum_soc), minimum_soc, maximum_soc)
 
-    base_days = _group_days(_load_rows(selected_data_path(parameters)), dt)
+    base_days = _group_days(_load_rows(csv_path), dt)
     if not base_days:
         return {"available": True, "status": "No CSV rows found.", "days": [], "summary": _empty_summary()}
 
@@ -258,9 +257,10 @@ def _slice_days(days, solution, idx, parameters, dt):
         output.append(
             {
                 "day_index": day["day_index"],
+                "date_iso": day.get("date_iso"),
                 "solved": True,
                 "status": "optimal",
-                "grid": _rounded_series(grid_import),
+                "grid": [float(value) for value in grid_import],
                 "rolling_grid": _rounded_series(rolling_grid),
                 "discharge": _rounded_series(discharge),
                 "grid_charge": _rounded_series(grid_charge),
@@ -385,70 +385,6 @@ def _annualized_monthly_saving(base_days, oracle_days, parameters, dt):
     return (sum(monthly_savings) / len(monthly_savings)) * 12.0
 
 
-def _planner_annualized_saving(base_days, parameters):
-    try:
-        from baselines import run_no_bess, run_oracle
-        from common import TOU_RULES, build_tariff_windows, load_system_config, make_bess_config, score_month
-        from scenario_gen import DayData, MonthData
-    except ImportError:
-        return _annualized_monthly_saving(base_days, [], parameters, _to_float(parameters.get("dt"), 0.25))
-
-    base = load_system_config()
-    cfg = make_bess_config(
-        base,
-        _to_float(parameters.get("battery_capacity_kWh"), base.E_cap),
-        _to_float(parameters.get("battery_power_limit_kW"), base.P_rated_nominal),
-        base.P_target_user,
-    )
-    cfg.eta_ch = _to_float(parameters.get("charge_efficiency"), cfg.eta_ch)
-    cfg.eta_dis = _to_float(parameters.get("discharge_efficiency"), cfg.eta_dis)
-    cfg.SOC_min = _to_float(parameters.get("minimum_soc"), cfg.SOC_min)
-    cfg.SOC_max = _to_float(parameters.get("maximum_soc"), cfg.SOC_max)
-    cfg.SOC_chg = cfg.SOC_max
-    cfg.SOC_eod = _to_float(parameters.get("required_final_soc"), cfg.SOC_eod)
-    cfg.price_peak = _to_float(parameters.get("billing_expensive"), cfg.price_peak)
-    cfg.price_mid = _to_float(parameters.get("billing_normal"), cfg.price_mid)
-    cfg.price_off = _to_float(parameters.get("billing_cheap"), cfg.price_off)
-    cfg.T_cap = _to_float(parameters.get("billing_peak_penalty"), cfg.T_cap) if parameters.get("billing_mode") == "2tc" else 0.0
-    for key, value in build_tariff_windows(
-        str(parameters.get("billing_windows_expensive", "")),
-        str(parameters.get("billing_windows_cheap", "")),
-        _to_float(parameters.get("dt"), cfg.dt),
-    ).items():
-        setattr(cfg, key, value)
-    TOU_RULES["sunday_no_peak"] = bool(parameters.get("billing_sunday"))
-
-    months = []
-    for month_start in sorted({_month_start_day(day["day_index"]) for day in base_days}):
-        month = MonthData(source=f"sizing_demo:{month_start}")
-        for day in base_days:
-            if _month_start_day(day["day_index"]) != month_start:
-                continue
-            month.days.append(
-                DayData(
-                    load=np.asarray(day["load"], dtype=np.float64),
-                    pv=np.asarray(day["pv"], dtype=np.float64),
-                    day_type=day["day_type"],
-                    weather="sizing_demo",
-                    day_index=day["day_index"],
-                    date_iso=day.get("date_iso"),
-                )
-            )
-        months.append(month)
-
-    savings = []
-    for month in months:
-        base_score = score_month(run_no_bess(month, cfg)["p_grid_days"], cfg, days=month.days)
-        oracle_score = score_month(run_oracle(month, cfg)["p_grid_days"], cfg, days=month.days)
-        n_days = max(1, len(month.days))
-        energy_saving = (base_score["energy_cost_vnd"] - oracle_score["energy_cost_vnd"]) * (30.0 / n_days)
-        demand_saving = base_score["demand_cost_vnd"] - oracle_score["demand_cost_vnd"]
-        savings.append(energy_saving + demand_saving)
-    if not savings:
-        return 0.0
-    return (sum(savings) / len(savings)) * 12.0
-
-
 def _attach_month_peaks(days, parameters, dt):
     month_peaks = _month_peaks(days, dt)
     for day in days:
@@ -465,6 +401,7 @@ def _no_battery_result(days, parameters, dt):
         oracle_days.append(
             {
                 "day_index": day["day_index"],
+                "date_iso": day.get("date_iso"),
                 "solved": True,
                 "status": "battery disabled",
                 "grid": day["grid"],

@@ -10,7 +10,7 @@ HARD-CONSTRAINT SAFETY PROJECTION (never learned, always enforced):
                   grid[t] = eff_load + cg - d >= 0 for ANY policy output.
   * SOC bounds  : charge/discharge are capped by the energy head-room in
                   [SOC_min, SOC_max] at the current step.
-  * P_rated     : |p_bess| <= P_rated (AC side, same convention as lp_core).
+  * P_rated     : |p_bess| <= P_rated on the AC side.
 The RL problem is therefore unconstrained for the learner; the projection
 makes the 4 critical scenarios in CLAUDE.md structurally satisfiable.
 
@@ -89,7 +89,7 @@ class BESSEnv:
                  fc_rho: float = 0.9, fc_seed: int = 12345,
                  n_steps: int = STEPS_PER_DAY,
                  dt_hours: float = DT_HOURS):
-        #  PHN GII tham s ha: 9615' (mc nh) hoc 14401'
+        # Resolution is derived from configured dt or the supplied day length.
         # (ch  bi bo GREPO). Ngy d liu phi c ng n_steps mu.
         if dt_hours == DT_HOURS and getattr(cfg, "dt", DT_HOURS) != DT_HOURS:
             dt_hours = float(cfg.dt)
@@ -118,7 +118,7 @@ class BESSEnv:
         self.fc_rho = fc_rho
         self._fc_rng = np.random.default_rng(fc_seed)
         self._fc_load = self._fc_pv = None
-        base_tar = tariff_vector(cfg)              # 96 mc 15'
+        base_tar = tariff_vector(cfg)
         self._tar_base = base_tar
         # Ch nht khng cao im (quy tc EVN, bt qua TOU_RULES):
         # vector ring, hon i ti bin ngy trong reset()/step()

@@ -217,7 +217,7 @@ def replan_trigger(minutes_since_plan, fc_err_pv, fc_err_load, soc_drift):
 
 
 def _validate_forecast(P_load, P_pv, name='forecast'):
-    """v13 H5: validate forecast arrays  length 96, finite, non-negative."""
+    """Validate same-length, finite, non-negative forecast arrays."""
     if len(P_load) == 0:
         raise ValueError(f'{name}: P_load is empty')
     if len(P_load) != len(P_pv):
@@ -235,7 +235,7 @@ def _validate_forecast(P_load, P_pv, name='forecast'):
 # =====================================================================
 def backward_pass(P_load, P_pv, P_target, cfg=None,
                   t_start=0, SOC_eod_target=None):
-    """v13 C1: t_start lets a replan rebuild floor for [t_start..96]."""
+    """Build the reserve floor from t_start through the dynamic day horizon."""
     cfg = cfg or _DEFAULTS
     n_steps = len(P_load)
     SOC_floor = [0.0] * (n_steps + 1)
@@ -806,7 +806,7 @@ class SADRBCRunner:
                       p_grid_history=None,
                       T_battery=30.0, V_grid=1.0, blackout_steps=None,
                       plan_timestamp=None):
-        """Recompute the plan from t_now to 96 (replan)."""
+        """Recompute the plan from t_now to the dynamic end-of-day step."""
         n_steps = min(len(P_load_actual), len(P_pv_actual), len(P_load_fc), len(P_pv_fc))
         if not (1 <= t_now < n_steps):
             raise ValueError(f'step_intraday: t_now={t_now} (1..{n_steps - 1})')

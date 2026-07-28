@@ -74,7 +74,7 @@ class GREPOAgent:
                       d_run_init=None):
         """Rollout N_g episodes on the SAME episode data (identical exogenous
         trajectory + initial state; Sec 2.2.2.2). Per the paper, an episode
-        is ONE DAY (their T=1440 at 1-min; ours T=96 at 15-min)  pass a
+        is one day at the dataset's configured dynamic resolution; pass a
         1-day MonthData. Returns stacked arrays [N_g, T, ...]."""
         obs_g, act_g, logp_g, rew_g = [], [], [], []
         for i in range(self.n_group):
