@@ -98,7 +98,10 @@ def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
     lat = []
     while not done:
         t0 = time.perf_counter()
-        a, _, _ = agent.act(obs, deterministic=True)
+        if hasattr(agent, "predict_action"):
+            a = agent.predict_action(obs)
+        else:
+            a, _, _ = agent.act(obs, deterministic=True)
         if measure_latency:
             lat.append((time.perf_counter() - t0) * 1e3)
         obs, _, done, _ = env.step(a)

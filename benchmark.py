@@ -2,6 +2,8 @@ import csv
 from datetime import date
 from pathlib import Path
 
+import numpy as np
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -274,11 +276,27 @@ def _rolling_average(values, window):
 
 
 def _rolling_30_minute_average(values, dt):
-    values = list(values)
-    averages = []
-    for window in _demand_windows(len(values), dt):
-        averages.append(sum(values[step] * weight for step, weight in window))
-    return averages
+    values = np.asarray(values, dtype=np.float64)
+    steps = len(values)
+    if steps == 0:
+        return []
+
+    samples = DEMAND_WINDOW_HOURS / dt
+    rounded_samples = int(round(samples))
+    if rounded_samples >= 1 and abs(samples - rounded_samples) <= FLOAT_EPSILON:
+        prefix = np.empty(steps + 1, dtype=np.float64)
+        prefix[0] = 0.0
+        np.cumsum(values, out=prefix[1:])
+        starts = np.arange(steps)
+        ends = np.minimum(starts + rounded_samples, steps)
+        counts = ends - starts
+        return ((prefix[ends] - prefix[starts]) / counts).tolist()
+
+    # Preserve the weighted partial-sample behavior for unusual resolutions.
+    return [
+        sum(values[step] * weight for step, weight in window)
+        for window in _demand_windows(steps, dt)
+    ]
 
 
 def _demand_windows(steps, dt):

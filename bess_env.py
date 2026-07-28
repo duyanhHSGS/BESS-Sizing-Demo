@@ -72,8 +72,9 @@ def _ar1_noise_series(actual: np.ndarray, sigma: float, rho: float,
     n = len(actual)
     e = np.zeros(n)
     w = sigma * np.sqrt(1.0 - rho ** 2)
+    innovations = w * rng.standard_normal(max(0, n - 1))
     for t in range(1, n):
-        e[t] = rho * e[t - 1] + w * rng.standard_normal()
+        e[t] = rho * e[t - 1] + innovations[t - 1]
     return np.maximum(0.0, actual * (1.0 + e))
 
 
@@ -143,6 +144,25 @@ class BESSEnv:
         self.log_grid: list[np.ndarray] = []
         self.log_soc: list[np.ndarray] = []
         self.log_pbess: list[np.ndarray] = []
+        self._refresh_cached_coefficients()
+
+    def _refresh_cached_coefficients(self) -> None:
+        cfg = self.cfg
+        self._inv_p_ref = 1.0 / self.p_ref
+        self._inv_peak_price = 1.0 / cfg.price_peak
+        self._soc_charge_coeff = self.dt * cfg.eta_ch / cfg.E_cap
+        self._soc_discharge_coeff = self.dt / (cfg.eta_dis * cfg.E_cap)
+        self._available_power_coeff = cfg.E_cap * cfg.eta_dis / self.dt
+        self._room_power_coeff = cfg.E_cap / (cfg.eta_ch * self.dt)
+        self._phi_coef = cfg.E_cap * cfg.eta_dis * cfg.price_mid
+
+    def _reset_demand_window(self) -> None:
+        self._roll_grid = np.zeros(self.roll_k, dtype=np.float64)
+        self._roll_nb = np.zeros(self.roll_k, dtype=np.float64)
+        self._roll_pos = 0
+        self._roll_count = 0
+        self._roll_grid_sum = 0.0
+        self._roll_nb_sum = 0.0
 
     # ------------------------------------------------------------------
     def _configure_control_interval(self) -> None:
@@ -179,6 +199,7 @@ class BESSEnv:
                 self._tar_base = tariff_vector(self.cfg)
                 from common import TOU_RULES, cfg_no_peak
                 self._tar_sun = tariff_vector(cfg_no_peak(self.cfg)) if TOU_RULES.get("sunday_no_peak") else self._tar_base
+                self._refresh_cached_coefficients()
         self.day = 0
         self.t = 0
         self.soc = float(soc_init if soc_init is not None else self.cfg.SOC_eod)
@@ -189,8 +210,8 @@ class BESSEnv:
         self.log_grid = [np.zeros(self.n_steps) for _ in month.days]
         self.log_soc = [np.zeros(self.n_steps + 1) for _ in month.days]
         self.log_pbess = [np.zeros(self.n_steps) for _ in month.days]
-        self._buf = []          # rolling 30' grid tht
-        self._buf_nb = []       # rolling 30' grid no-BESS
+        self._reset_demand_window()
+        self._day_fraction = 1.0 / max(1, len(month.days))
         self.log_soc[0][0] = self.soc
         self._set_day_tariff()
         self._make_day_forecast()
@@ -234,23 +255,26 @@ class BESSEnv:
         sur = max(0.0, pv - load)
         t_next = min(t + self.n_steps // 24, self.n_steps - 1)  # 1h ti
         ang = 2.0 * np.pi * t / self.n_steps
-        base = [
-            np.sin(ang), np.cos(ang),
-            eff / self.p_ref,
-            pv / self.p_ref,
-            sur / self.p_ref,
-            self.soc,
-            self.tariff[t] / self.cfg.price_peak,
-            self.tariff[t_next] / self.cfg.price_peak,
-            self.d_run / self.p_ref,
-            self.g_prev / self.p_ref,
-            1.0 if day.day_type == "working" else 0.0,
-            self.day / max(1, len(self.month.days)),
-            t / self.n_steps,
-        ]
+        # A fresh array is required because callers retain the current
+        # observation until after step() has produced the next one.
+        base = np.empty(self.obs_dim, dtype=np.float32)
+        inv_ref = self._inv_p_ref
+        base[0] = np.sin(ang)
+        base[1] = np.cos(ang)
+        base[2] = eff * inv_ref
+        base[3] = pv * inv_ref
+        base[4] = sur * inv_ref
+        base[5] = self.soc
+        base[6] = self.tariff[t] * self._inv_peak_price
+        base[7] = self.tariff[t_next] * self._inv_peak_price
+        base[8] = self.d_run * inv_ref
+        base[9] = self.g_prev * inv_ref
+        base[10] = 1.0 if day.day_type == "working" else 0.0
+        base[11] = self.day * self._day_fraction
+        base[12] = t / self.n_steps
         if self.use_forecast:
-            base += self._fc_features(t)
-        return np.array(base, dtype=np.float32)
+            base[13:] = self._fc_features(t)
+        return base
 
     # ------------------------------------------------------------------
     def project_action(self, a: float, load: float, pv: float):
@@ -264,11 +288,11 @@ class BESSEnv:
         p_des = float(np.clip(a, -1.0, 1.0)) * cfg.P_rated_nominal
         if p_des >= 0.0:                               # discharge request
             avail = max(0.0, (self.soc - cfg.SOC_min)
-                        * cfg.E_cap * cfg.eta_dis / self.dt)
+                        * self._available_power_coeff)
             d = min(p_des, cfg.P_rated_nominal, eff, avail)
             return d, 0.0, 0.0
         room = max(0.0, (cfg.SOC_max - self.soc)
-                   * cfg.E_cap / (cfg.eta_ch * self.dt))
+                   * self._room_power_coeff)
         ch = min(-p_des, cfg.P_rated_nominal, room)
         cp = min(ch, sur)                              # free PV first
         # peak-safe: grid-charging may never set a new monthly peak itself
@@ -286,24 +310,30 @@ class BESSEnv:
 
         d, cg, cp = self.project_action(action, load, pv)
         grid = eff + cg - d                            # >= 0 by construction
-        self.soc = self.soc + (cg + cp) * self.dt * cfg.eta_ch / cfg.E_cap \
-                   - d * self.dt / (cfg.eta_dis * cfg.E_cap)
+        self.soc = self.soc + (cg + cp) * self._soc_charge_coeff \
+                   - d * self._soc_discharge_coeff
         # numerical guard only  projection already bounds SOC
         self.soc = min(cfg.SOC_max, max(cfg.SOC_min, self.soc))
 
         # --- costs (actual, for logging/scoring) ------------------------
         energy_cost = self.tariff[t] * grid * self.dt
-        self._buf.append(grid)
-        self._buf_nb.append(eff)
-        if len(self._buf) > self.roll_k:
-            self._buf.pop(0)
-            self._buf_nb.pop(0)
-        if len(self._buf) < self.roll_k:
+        pos = self._roll_pos
+        if self._roll_count == self.roll_k:
+            self._roll_grid_sum -= self._roll_grid[pos]
+            self._roll_nb_sum -= self._roll_nb[pos]
+        else:
+            self._roll_count += 1
+        self._roll_grid[pos] = grid
+        self._roll_nb[pos] = eff
+        self._roll_grid_sum += grid
+        self._roll_nb_sum += eff
+        self._roll_pos = (pos + 1) % self.roll_k
+        if self._roll_count < self.roll_k:
             d_t = 0.0                    # cha  ca s 30' u ngy
             d_t_nb = 0.0
         else:
-            d_t = float(np.mean(self._buf))
-            d_t_nb = float(np.mean(self._buf_nb))
+            d_t = self._roll_grid_sum / self.roll_k
+            d_t_nb = self._roll_nb_sum / self.roll_k
         peak_pen = cfg.T_cap * max(0.0, d_t - self.d_run)
         self.d_run = max(self.d_run, d_t)
         peak_pen_nb = cfg.T_cap * max(0.0, d_t_nb - self.d_run_nb)
@@ -328,8 +358,7 @@ class BESSEnv:
             self.day += 1
             self.g_prev = 0.0        # billing windows do not straddle days
             self.g_prev_nb = 0.0
-            self._buf = []
-            self._buf_nb = []
+            self._reset_demand_window()
             if self.day >= len(self.month.days):
                 done = True
             else:
@@ -337,12 +366,17 @@ class BESSEnv:
                 self._set_day_tariff()
                 self._make_day_forecast()
         obs = None if done else self._obs()
-        info = {"grid_kw": grid, "energy_cost": energy_cost,
-                "energy_delta": energy_delta, "peak_delta": peak_delta,
-                "deg_cost": deg_cost,
-                "peak_pen": peak_pen, "peak_pen_nb": peak_pen_nb,
-                "d_run": self.d_run}
-        return obs, done, info
+        return (
+            obs,
+            done,
+            grid,
+            energy_cost,
+            energy_delta,
+            peak_delta,
+            deg_cost,
+            peak_pen,
+            peak_pen_nb,
+        )
 
     def step(self, action: float):
         """Apply one policy decision over one control interval.
@@ -350,43 +384,58 @@ class BESSEnv:
         The requested action is held, but projection and all physical/billing
         state updates still run at the dataset's native resolution.
         """
-        cfg = self.cfg
         soc_before = self.soc
-        totals = {
-            "energy_cost": 0.0,
-            "energy_delta": 0.0,
-            "peak_delta": 0.0,
-            "deg_cost": 0.0,
-            "peak_pen": 0.0,
-            "peak_pen_nb": 0.0,
-        }
+        energy_cost_total = 0.0
+        energy_delta_total = 0.0
+        peak_delta_total = 0.0
+        deg_cost_total = 0.0
+        peak_pen_total = 0.0
+        peak_pen_nb_total = 0.0
         obs = None
         done = False
-        info = {}
+        grid = 0.0
         native_rows = 0
         for _ in range(self.native_steps_per_action):
-            obs, done, info = self._step_native(action)
+            (
+                obs,
+                done,
+                grid,
+                energy_cost,
+                energy_delta,
+                peak_delta,
+                deg_cost,
+                peak_pen,
+                peak_pen_nb,
+            ) = self._step_native(action)
             native_rows += 1
-            for key in totals:
-                totals[key] += float(info[key])
+            energy_cost_total += energy_cost
+            energy_delta_total += energy_delta
+            peak_delta_total += peak_delta
+            deg_cost_total += deg_cost
+            peak_pen_total += peak_pen
+            peak_pen_nb_total += peak_pen_nb
             if done:
                 break
 
-        phi_coef = cfg.E_cap * cfg.eta_dis * cfg.price_mid
-        phi_before = (soc_before - cfg.SOC_min) * phi_coef
-        phi_after = (self.soc - cfg.SOC_min) * phi_coef
+        phi_before = (soc_before - self.cfg.SOC_min) * self._phi_coef
+        phi_after = (self.soc - self.cfg.SOC_min) * self._phi_coef
         shaping = self.gamma * phi_after - phi_before
         reward = (
             -(
-                totals["energy_delta"]
-                + totals["peak_delta"]
-                + totals["deg_cost"]
+                energy_delta_total
+                + peak_delta_total
+                + deg_cost_total
             )
             + shaping
         ) / REWARD_SCALE
         return obs, reward, done, {
-            **info,
-            **totals,
+            "grid_kw": grid,
+            "energy_cost": energy_cost_total,
+            "energy_delta": energy_delta_total,
+            "peak_delta": peak_delta_total,
+            "deg_cost": deg_cost_total,
+            "peak_pen": peak_pen_total,
+            "peak_pen_nb": peak_pen_nb_total,
             "shaping": shaping,
             "native_rows": native_rows,
             "d_run": self.d_run,

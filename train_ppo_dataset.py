@@ -83,8 +83,9 @@ def augment_month(
         def _ar1(n: int, sigma: float) -> np.ndarray:
             err = np.zeros(n)
             white = sigma * np.sqrt(1 - rho ** 2)
+            innovations = white * rng.standard_normal(max(0, n - 1))
             for step in range(1, n):
-                err[step] = rho * err[step - 1] + white * rng.standard_normal()
+                err[step] = rho * err[step - 1] + innovations[step - 1]
             return err
 
         n_steps = len(day.load)
@@ -264,59 +265,115 @@ def main() -> None:
     rng = np.random.default_rng(args.seed)
     best_val = float("inf")
     curve = []
+    perf = {
+        "augment": 0.0,
+        "rollout": 0.0,
+        "update": 0.0,
+        "validation": 0.0,
+        "scoring": 0.0,
+        "io": 0.0,
+        "checkpoint": 0.0,
+        "decisions": 0,
+        "native_rows": 0,
+    }
 
     def persist_progress() -> None:
+        started_io = time.perf_counter()
         write_curve(curve_path, curve)
         if curve:
             report["latest"] = curve[-1]
-            report["best"] = min(curve, key=lambda point: point["val_cost_vnd"])
+            if (
+                "best" not in report
+                or curve[-1]["val_cost_vnd"] < report["best"]["val_cost_vnd"]
+            ):
+                report["best"] = curve[-1]
         write_report(report_path, report)
+        perf["io"] += time.perf_counter() - started_io
+
+    def print_performance() -> None:
+        rollout_seconds = max(perf["rollout"], 1e-9)
+        print(
+            f"  perf rollout {perf['rollout']:.2f}s | augment {perf['augment']:.2f}s | "
+            f"ppo {perf['update']:.2f}s | validate {perf['validation']:.2f}s | "
+            f"score {perf['scoring']:.2f}s | io {perf['io']:.2f}s | "
+            f"checkpoint {perf['checkpoint']:.2f}s | "
+            f"{perf['native_rows']/rollout_seconds:,.0f} native rows/s | "
+            f"{perf['decisions']/rollout_seconds:,.0f} decisions/s",
+            flush=True,
+        )
+        for key in perf:
+            perf[key] = 0 if key in ("decisions", "native_rows") else 0.0
 
     month_index = 0
-    obs = env.reset(augment_month(train_months[0], rng))
+    augment_started = time.perf_counter()
+    first_month = augment_month(train_months[0], rng)
+    perf["augment"] += time.perf_counter() - augment_started
+    obs = env.reset(first_month)
     steps = 0
     updates = 0
     started = time.time()
+    rollout_started = time.perf_counter()
     while steps < args.steps:
         action, logp, value = agent.act(obs)
-        next_obs, reward, done, _ = env.step(action)
+        next_obs, reward, done, step_info = env.step(action)
         buffer.add(obs, action, logp, reward, value, float(done))
         steps += 1
+        perf["decisions"] += 1
+        perf["native_rows"] += int(step_info["native_rows"])
         if done:
             month_index += 1
-            next_obs = env.reset(augment_month(train_months[month_index % len(train_months)], rng))
+            augment_started = time.perf_counter()
+            next_month = augment_month(
+                train_months[month_index % len(train_months)], rng
+            )
+            perf["augment"] += time.perf_counter() - augment_started
+            next_obs = env.reset(next_month)
         obs = next_obs
         if not buffer.full():
             continue
+        perf["rollout"] += time.perf_counter() - rollout_started
         updates += 1
+        update_started = time.perf_counter()
         _, _, last_value = agent.act(obs)
         agent.update(buffer, 0.0 if done else last_value)
+        perf["update"] += time.perf_counter() - update_started
+        validation_started = time.perf_counter()
         result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
+        perf["validation"] += time.perf_counter() - validation_started
+        scoring_started = time.perf_counter()
         val_cost = score_month(result["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
+        perf["scoring"] += time.perf_counter() - scoring_started
         saving = (val_base - val_cost) / val_base * 100
         gap = (val_cost - val_oracle) / val_oracle * 100
         curve.append({"steps": steps, "val_cost_vnd": val_cost, "oracle_gap_pct": gap, "saving_vs_nobess_pct": saving})
         persist_progress()
-        if updates == 1 or updates % LOG_EVERY_UPDATES == 0:
+        is_best = val_cost < best_val
+        if val_cost < best_val:
+            best_val = val_cost
+            checkpoint_started = time.perf_counter()
+            agent.save(RESULTS_DIR / f"policy_{tag}.pt")
+            perf["checkpoint"] += time.perf_counter() - checkpoint_started
+        should_log = updates == 1 or updates % LOG_EVERY_UPDATES == 0
+        if should_log:
             print(
                 f"  update {updates:>4} | step {steps:>7} | val {val_cost/1e6:8.1f}M | "
                 f"saving {saving:5.1f}% | gap {gap:6.1f}% | {steps/(time.time()-started):,.0f} sps",
                 flush=True,
             )
-        if val_cost < best_val:
-            best_val = val_cost
+            print_performance()
+        if is_best:
             print(
                 f"  best   {updates:>4} | step {steps:>7} | val {val_cost/1e6:8.1f}M | "
                 f"saving {saving:5.1f}% | gap {gap:6.1f}% | checkpoint updated",
                 flush=True,
             )
-            agent.save(RESULTS_DIR / f"policy_{tag}.pt")
         elif updates % LOG_EVERY_UPDATES == 0:
             print(
                 f"  step {steps:>7} | val {val_cost/1e6:8.1f}M | saving {saving:5.1f}% | "
                 f"gap {gap:6.1f}% | no new best",
                 flush=True,
             )
+        rollout_started = time.perf_counter()
 
     if not curve:
         result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)

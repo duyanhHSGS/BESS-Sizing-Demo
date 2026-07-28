@@ -12,6 +12,7 @@ import torch.nn as nn
 from settings import PPO_GAMMA, PPO_LAMBDA
 
 torch.set_num_threads(6)
+_LOG_2PI = float(np.log(2.0 * np.pi))
 
 
 def _mlp(inp, out, hidden=64):
@@ -71,15 +72,28 @@ class PPOAgent:
         self.meta = {}          # deployment context (p_ref_kw, obs_variant)
 
     # ------------------------------------------------------------------
-    @torch.no_grad()
+    @torch.inference_mode()
     def act(self, obs: np.ndarray, deterministic: bool = False):
         o = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
-        dist = self.net.dist(o)
-        a = dist.mean if deterministic else dist.sample()
-        logp = dist.log_prob(a).sum(-1)
+        mean = torch.tanh(self.net.actor(o))
+        std = self.net.log_std.exp()
+        a = mean if deterministic else torch.normal(mean, std)
+        logp = (
+            -0.5 * ((a - mean) / std).square()
+            - self.net.log_std
+            - 0.5 * _LOG_2PI
+        ).sum(-1)
         v = self.net.value(o)
         return (float(np.clip(a.item(), -1.0, 1.0)),
                 float(logp.item()), float(v.item()))
+
+    # ------------------------------------------------------------------
+    @torch.inference_mode()
+    def predict_action(self, obs: np.ndarray) -> float:
+        """Deterministic actor-only inference for evaluation rollouts."""
+        o = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
+        mean = torch.tanh(self.net.actor(o))
+        return float(np.clip(mean.item(), -1.0, 1.0))
 
     # ------------------------------------------------------------------
     def update(self, buf: RolloutBuffer, last_val: float):
