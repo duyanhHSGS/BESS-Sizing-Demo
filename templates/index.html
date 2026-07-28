@@ -297,7 +297,7 @@
       grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     }
 
-    .metric-row + .metric-row {
+    .metric-row+.metric-row {
       border-top: 1px solid var(--border);
       margin-top: 10px;
       padding-top: 10px;
@@ -322,7 +322,7 @@
       padding: 4px 10px;
     }
 
-    .metric > span {
+    .metric>span {
       color: var(--muted);
       display: block;
       font-size: 11px;
@@ -365,7 +365,7 @@
       padding: 2px 8px;
     }
 
-    .bill-card + .bill-card {
+    .bill-card+.bill-card {
       margin-top: 2px;
     }
 
@@ -707,240 +707,349 @@
     </nav>
 
     <section id="tab-sizing-demo" class="tab-panel active">
-    <form class="card" method="post" action="/set-parameters">
-      <h2>CSV data</h2>
-      <div class="row">
-        <label><span class="field-name">Selected CSV data<span class="hint" tabindex="0" data-tip="Choose a CSV from Sizing_Demo/data. The app reads P_load_kW and P_pv_kW from this file.">?</span></span>
-          <select id="selected-data-csv" name="selected_data_csv">
-            {% for csv_file in data_csv_files %}
-            <option value="{{ csv_file }}" {% if csv_file == selected_data_csv %}selected{% endif %}>{{ csv_file }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label><span class="field-name">Detected dt (h)<span class="hint" tabindex="0" data-tip="Detected automatically from the selected CSV: dt = 24 hours divided by the number of steps in a normal day.">?</span></span><input class="detected-input" type="number" id="tf-dt" name="dt" step="0.000001" value="{{ dt }}" readonly aria-readonly="true"></label>
-        <button class="primary" type="submit" name="form_action" value="save">Apply CSV</button>
-      </div>
-      <div class="info">Selected CSV: {{ selected_data_csv }}. Detected time step dt is {{ dt }} h.</div>
-      {% if exact_oracle_cache_exists %}
-      <div class="info cache-notice">This selected CSV file already has cached Oracle LP for the current inputs, and the app is using it right now. If you want to calculate again, click Calculate.</div>
-      {% elif csv_has_oracle_cache %}
-      <div class="info cache-notice">This selected CSV file has cached Oracle LP from another input combo. Save matching inputs to use it, or click Calculate to make a fresh cache.</div>
-      {% endif %}
+      <form class="card" method="post" action="/set-parameters">
+        <h2>CSV data</h2>
+        <div class="row">
+          <label><span class="field-name">Selected CSV data<span class="hint" tabindex="0"
+                data-tip="Choose a CSV from Sizing_Demo/data. The app reads P_load_kW and P_pv_kW from this file.">?</span></span>
+            <select id="selected-data-csv" name="selected_data_csv">
+              {% for csv_file in data_csv_files %}
+              <option value="{{ csv_file }}" {% if csv_file==selected_data_csv %}selected{% endif %}>{{ csv_file }}
+              </option>
+              {% endfor %}
+            </select>
+          </label>
+          <label><span class="field-name">Detected dt (h)<span class="hint" tabindex="0"
+                data-tip="Detected automatically from the selected CSV: dt = 24 hours divided by the number of steps in a normal day.">?</span></span><input
+              class="detected-input" type="number" id="tf-dt" name="dt" step="0.000001" value="{{ dt }}" readonly
+              aria-readonly="true"></label>
+          <button class="primary" type="submit" name="form_action" value="save">Apply CSV</button>
+        </div>
+        <div class="info">Selected CSV: {{ selected_data_csv }}. Detected time step dt is {{ dt }} h.</div>
+        {% if exact_oracle_cache_exists %}
+        <div class="info cache-notice">This selected CSV file already has cached Oracle LP for the current inputs, and
+          the app is using it right now. If you want to calculate again, click Calculate.</div>
+        {% elif csv_has_oracle_cache %}
+        <div class="info cache-notice">This selected CSV file has cached Oracle LP from another input combo. Save
+          matching inputs to use it, or click Calculate to make a fresh cache.</div>
+        {% endif %}
 
-      <h2>Battery operation inputs</h2>
-      <div class="row">
-        <label><span class="field-name">Battery capacity (kWh)<span class="hint" tabindex="0" data-tip="BatteryCapacity: how much energy the battery can store. A bigger kWh value is like a bigger backpack for saving energy.">?</span></span><input type="number" id="tf-bcap" name="battery_capacity_kWh" step="10" min="0"
-            value="{{ battery_capacity_kWh }}"></label>
-        <label><span class="field-name">Battery power limit (kW)<span class="hint" tabindex="0" data-tip="BatteryPowerLimit: how fast the battery can charge or discharge. kW is the speed, not the storage size.">?</span></span><input type="number" id="tf-bpow" name="battery_power_limit_kW" step="0.5"
-            min="0" value="{{ battery_power_limit_kW }}"></label>
-        <label><span class="field-name">Charge efficiency<span class="hint" tabindex="0" data-tip="ChargeEfficiency: the fraction of charging energy that actually gets stored. 0.95 means 95% stays and 5% is lost.">?</span></span><input type="number" id="tf-cheff" name="charge_efficiency" step="0.01" min="0" max="1"
-            value="{{ charge_efficiency }}"></label>
-        <label><span class="field-name">Discharge efficiency<span class="hint" tabindex="0" data-tip="DischargeEfficiency: the fraction of stored energy that comes back out usefully. 0.95 means 95% reaches the load.">?</span></span><input type="number" id="tf-deff" name="discharge_efficiency" step="0.01" min="0"
-            max="1" value="{{ discharge_efficiency }}"></label>
-        <button id="btn-custom-battery" class="primary" type="submit" name="form_action" value="save">Save this custom battery</button>
-      </div>
-      <div class="sample-row">
-        <label><span class="field-name">Sample batteries<span class="hint" tabindex="0" data-tip="Pick from the project sample grid: energy sizes 250, 500, 750, 1000, 1250 kWh and power ratios 0.35, 0.50, 0.70 times capacity.">?</span></span>
-          <select id="sample-battery"></select>
-        </label>
-        <label><span class="field-name">Use selected sample batteries option<span class="hint" tabindex="0" data-tip="Yes copies the selected sample battery into BatteryCapacity and BatteryPowerLimit. It does not calculate until you click Calculate.">?</span></span>
-          <select id="use-sample-battery" name="use_sample_battery_options">
-            <option value="no" {% if use_sample_battery_options != "yes" %}selected{% endif %}>No</option>
-            <option value="yes" {% if use_sample_battery_options == "yes" %}selected{% endif %}>Yes</option>
-          </select>
-        </label>
-        <div class="info">This replaces only BatteryCapacity and BatteryPowerLimit; all tariff, SOC, and finance inputs stay as-is.</div>
-      </div>
-      <div class="row">
-        <label><span class="field-name">Battery wear cost (VND/kWh throughput)<span class="hint" tabindex="0" data-tip="BatteryWearCost: a small cost for each kWh moved through the battery, representing battery aging from use.">?</span></span><input type="number" id="tf-wear" name="battery_wear_cost"
-            step="1" min="0" value="{{ battery_wear_cost }}"></label>
-        <label><span class="field-name">Minimum SOC<span class="hint" tabindex="0" data-tip="MinimumSOC: the lowest allowed battery fill level. 0.10 means the battery should not go below 10% full.">?</span></span><input type="number" id="tf-minsoc" name="minimum_soc" step="0.01" min="0" max="1"
-            value="{{ minimum_soc }}"></label>
-        <label><span class="field-name">Maximum SOC<span class="hint" tabindex="0" data-tip="MaximumSOC: the highest allowed battery fill level. 0.90 means stop charging around 90% full.">?</span></span><input type="number" id="tf-maxsoc" name="maximum_soc" step="0.01" min="0" max="1"
-            value="{{ maximum_soc }}"></label>
-        <label><span class="field-name">Required final SOC<span class="hint" tabindex="0" data-tip="RequiredFinalSOC: the minimum battery fill level wanted at the end of the simulated day or horizon.">?</span></span><input type="number" id="tf-finalsoc" name="required_final_soc" step="0.01" min="0"
-            max="1" value="{{ required_final_soc }}"></label>
-      </div>
-      <div class="info">Load(t) and PV(t) come from the selected CSV columns P_load_kW and P_pv_kW. The detected dt converts power snapshots into energy.</div>
+        <h2>Battery operation inputs</h2>
+        <div class="row">
+          <label><span class="field-name">Battery capacity (kWh)<span class="hint" tabindex="0"
+                data-tip="BatteryCapacity: how much energy the battery can store. A bigger kWh value is like a bigger backpack for saving energy.">?</span></span><input
+              type="number" id="tf-bcap" name="battery_capacity_kWh" value="{{ battery_capacity_kWh }}"></label>
+          <label><span class="field-name">Battery power limit (kW)<span class="hint" tabindex="0"
+                data-tip="BatteryPowerLimit: how fast the battery can charge or discharge. kW is the speed, not the storage size.">?</span></span><input
+              type="number" id="tf-bpow" name="battery_power_limit_kW" step="0.5" min="0"
+              value="{{ battery_power_limit_kW }}"></label>
+          <label><span class="field-name">Charge efficiency<span class="hint" tabindex="0"
+                data-tip="ChargeEfficiency: the fraction of charging energy that actually gets stored. 0.95 means 95% stays and 5% is lost.">?</span></span><input
+              type="number" id="tf-cheff" name="charge_efficiency" step="0.01" min="0" max="1"
+              value="{{ charge_efficiency }}"></label>
+          <label><span class="field-name">Discharge efficiency<span class="hint" tabindex="0"
+                data-tip="DischargeEfficiency: the fraction of stored energy that comes back out usefully. 0.95 means 95% reaches the load.">?</span></span><input
+              type="number" id="tf-deff" name="discharge_efficiency" step="0.01" min="0" max="1"
+              value="{{ discharge_efficiency }}"></label>
+          <button id="btn-custom-battery" class="primary" type="submit" name="form_action" value="save">Save this custom
+            battery</button>
+        </div>
+        <div class="sample-row">
+          <label><span class="field-name">Sample batteries<span class="hint" tabindex="0"
+                data-tip="Pick from the project sample grid: energy sizes 250, 500, 750, 1000, 1250 kWh and power ratios 0.35, 0.50, 0.70 times capacity.">?</span></span>
+            <select id="sample-battery"></select>
+          </label>
+          <label><span class="field-name">Use selected sample batteries option<span class="hint" tabindex="0"
+                data-tip="Yes copies the selected sample battery into BatteryCapacity and BatteryPowerLimit. It does not calculate until you click Calculate.">?</span></span>
+            <select id="use-sample-battery" name="use_sample_battery_options">
+              <option value="no" {% if use_sample_battery_options !="yes" %}selected{% endif %}>No</option>
+              <option value="yes" {% if use_sample_battery_options=="yes" %}selected{% endif %}>Yes</option>
+            </select>
+          </label>
+          <div class="info">This replaces only BatteryCapacity and BatteryPowerLimit; all tariff, SOC, and finance
+            inputs stay as-is.</div>
+        </div>
+        <div class="row">
+          <label><span class="field-name">Battery wear cost (VND/kWh throughput)<span class="hint" tabindex="0"
+                data-tip="BatteryWearCost: a small cost for each kWh moved through the battery, representing battery aging from use.">?</span></span><input
+              type="number" id="tf-wear" name="battery_wear_cost" step="1" min="0"
+              value="{{ battery_wear_cost }}"></label>
+          <label><span class="field-name">Minimum SOC<span class="hint" tabindex="0"
+                data-tip="MinimumSOC: the lowest allowed battery fill level. 0.10 means the battery should not go below 10% full.">?</span></span><input
+              type="number" id="tf-minsoc" name="minimum_soc" step="0.01" min="0" max="1"
+              value="{{ minimum_soc }}"></label>
+          <label><span class="field-name">Maximum SOC<span class="hint" tabindex="0"
+                data-tip="MaximumSOC: the highest allowed battery fill level. 0.90 means stop charging around 90% full.">?</span></span><input
+              type="number" id="tf-maxsoc" name="maximum_soc" step="0.01" min="0" max="1"
+              value="{{ maximum_soc }}"></label>
+          <label><span class="field-name">Required final SOC<span class="hint" tabindex="0"
+                data-tip="RequiredFinalSOC: the minimum battery fill level wanted at the end of the simulated day or horizon.">?</span></span><input
+              type="number" id="tf-finalsoc" name="required_final_soc" step="0.01" min="0" max="1"
+              value="{{ required_final_soc }}"></label>
+        </div>
+        <div class="info">Load(t) and PV(t) come from the selected CSV columns P_load_kW and P_pv_kW. The detected dt
+          converts power snapshots into energy.</div>
 
-      <h2>Electric bill and battery price inputs</h2>
-      <div class="mode-pick" id="tf-mode-pick">
-        <label class="mode-card">
-          <input type="radio" name="billing_mode" value="2tc" {{ checked_2tc }}>
-          <div><b>Pay by kWh + monthly peak</b>
-            <small>You pay for energy used, and also pay extra for the highest 30-minute grid peak in the month.
-              The battery can save money two ways: buy cheap energy and lower that peak.</small>
+        <h2>Electric bill and battery price inputs</h2>
+        <div class="mode-pick" id="tf-mode-pick">
+          <label class="mode-card">
+            <input type="radio" name="billing_mode" value="2tc" {{ checked_2tc }}>
+            <div><b>Pay by kWh + monthly peak</b>
+              <small>You pay for energy used, and also pay extra for the highest 30-minute grid peak in the month.
+                The battery can save money two ways: buy cheap energy and lower that peak.</small>
+            </div>
+          </label>
+          <label class="mode-card">
+            <input type="radio" name="billing_mode" value="tou" {{ checked_tou }}>
+            <div><b>Pay by kWh only</b>
+              <small>You only pay different kWh prices at different times of day.
+                The battery saves money by charging when electricity is cheap and discharging when it is
+                expensive.</small>
+            </div>
+          </label>
+        </div>
+        <div class="row">
+          <label><span class="field-name">Sunday pricing<span class="hint" tabindex="0"
+                data-tip="When checked, Sunday ignores expensive-hour pricing and uses the normal price instead.">?</span></span><input
+              type="checkbox" id="tf-sunday" name="billing_sunday" {{ checked_sunday }}>
+            Sunday has no expensive hours; use the normal price instead</label>
+        </div>
+        <div class="row">
+          <label><span class="field-name">Expensive-hour price (VND/kWh)<span class="hint" tabindex="0"
+                data-tip="EnergyPrice(t) during costly hours. The bill multiplies this price by grid kWh used in those time windows.">?</span></span><input
+              type="number" id="tf-peak" name="billing_expensive" step="10" value="{{ billing_expensive }}"></label>
+          <label><span class="field-name">Normal-hour price (VND/kWh)<span class="hint" tabindex="0"
+                data-tip="EnergyPrice(t) during regular hours, used when the time is not cheap or expensive.">?</span></span><input
+              type="number" id="tf-mid" name="billing_normal" step="10" value="{{ billing_normal }}"></label>
+          <label><span class="field-name">Cheap-hour price (VND/kWh)<span class="hint" tabindex="0"
+                data-tip="EnergyPrice(t) during cheap hours. A battery may charge here so it can discharge later.">?</span></span><input
+              type="number" id="tf-off" name="billing_cheap" step="10" value="{{ billing_cheap }}"></label>
+          <label><span class="field-name">Monthly peak fee (VND/kW/month)<span class="hint" tabindex="0"
+                data-tip="DemandChargeRate: extra monthly charge based on the highest grid demand peak. Lowering this peak is peak shaving.">?</span></span><input
+              type="number" id="tf-tcap" name="billing_peak_penalty" value="{{ billing_peak_penalty }}"></label>
+        </div>
+        <div class="row">
+          <label><span class="field-name">Expensive-hour windows<span class="hint" tabindex="0"
+                data-tip="Clock ranges that use the expensive price. Example: 17:30-22:30 means evening power is costly.">?</span></span><input
+              id="tf-wpeak" name="billing_windows_expensive" size="24" placeholder="17:30-22:30"
+              value="{{ billing_windows_expensive }}"></label>
+          <label><span class="field-name">Cheap-hour windows<span class="hint" tabindex="0"
+                data-tip="Clock ranges that use the cheap price. Example: 00:00-06:00 means overnight power is cheap.">?</span></span><input
+              id="tf-woff" name="billing_windows_cheap" size="24" placeholder="00:00-06:00"
+              value="{{ billing_windows_cheap }}"></label>
+        </div>
+        <div class="row">
+          <label><span class="field-name">Battery cell price (VND/kWh)<span class="hint" tabindex="0"
+                data-tip="Capital cost for battery energy capacity. Bigger BatteryCapacity increases this part of project cost.">?</span></span><input
+              type="number" id="tf-ckwh" name="billing_battery_per_kWh" step="100000"
+              value="{{ billing_battery_per_kWh }}"></label>
+          <label><span class="field-name">Inverter/PCS price (VND/kW)<span class="hint" tabindex="0"
+                data-tip="Capital cost for battery power capability. Bigger BatteryPowerLimit increases this part of project cost.">?</span></span><input
+              type="number" id="tf-ckw" name="billing_battery_per_kW" step="100000"
+              value="{{ billing_battery_per_kW }}"></label>
+          <label><span class="field-name">Yearly maintenance (%)<span class="hint" tabindex="0"
+                data-tip="Yearly upkeep cost as a fraction of battery investment. 0.02 means 2% per year.">?</span></span><input
+              type="number" id="tf-opex" name="billing_yearly_maintain_percentage" step="0.005"
+              value="{{ billing_yearly_maintain_percentage }}"></label>
+          <label><span class="field-name">Discount rate<span class="hint" tabindex="0"
+                data-tip="Makes future savings count less than money today. 0.08 means an 8% yearly discount rate.">?</span></span><input
+              type="number" id="tf-disc" name="billing_discount_rate" step="0.01"
+              value="{{ billing_discount_rate }}"></label>
+          <label><span class="field-name">Project years<span class="hint" tabindex="0"
+                data-tip="How many years to evaluate battery costs and savings over.">?</span></span><input
+              type="number" id="tf-years" name="billing_years" step="1" value="{{ billing_years }}"></label>
+          <label><span class="field-name">Real-world savings factor<span class="hint" tabindex="0"
+                data-tip="Reduces ideal oracle savings into realistic expected savings. 0.60 means count 60% of the perfect result.">?</span></span><input
+              type="number" id="tf-real" name="billing_real_saving_factor" step="0.05" min="0.1" max="1"
+              value="{{ billing_real_saving_factor }}"></label>
+          <button id="btn-tf-save" class="primary" type="submit" name="form_action" value="save">Save bill and finance
+            inputs</button>
+          <button id="btn-calculate" class="secondary" type="submit" name="form_action"
+            value="calculate">Calculate</button>
+        </div>
+        <div class="info">Real-world savings factor means: if Oracle says the battery can save 100, the real controller
+          may
+          capture only part of it. Example: 0.60 means count 60 as realistic savings. Changing the time windows means
+          the
+          DRL policy should be trained again.</div>
+        {% if saved %}<div class="info saved">Saved bill and finance inputs.</div>{% endif %}
+        <div id="tariff-info" class="info"></div>
+        <div class="oracle-progress" id="oracle-progress" role="status" aria-live="polite">
+          <strong>Battery calculation progress</strong>
+          <span>Waiting to start...</span>
+        </div>
+      </form>
+
+      <div class="dashboard-grid">
+        <section class="card">
+          <div class="section-head">
+            <h2>Daily chart</h2>
+            <div class="row">
+              <label>Day
+                <select id="benchmark-day"></select>
+              </label>
+              <label>Battery
+                <select id="benchmark-battery"></select>
+              </label>
+            </div>
           </div>
-        </label>
-        <label class="mode-card">
-          <input type="radio" name="billing_mode" value="tou" {{ checked_tou }}>
-          <div><b>Pay by kWh only</b>
-            <small>You only pay different kWh prices at different times of day.
-              The battery saves money by charging when electricity is cheap and discharging when it is
-              expensive.</small>
+          <div class="bill-strip" id="benchmark-bill-strip" aria-label="Selected day electricity bill"></div>
+          <div class="chart-wrap">
+            <canvas id="benchmark-chart"></canvas>
+            <div class="chart-tooltip" id="benchmark-tooltip" role="status" aria-live="polite"></div>
           </div>
-        </label>
-      </div>
-      <div class="row">
-        <label><span class="field-name">Sunday pricing<span class="hint" tabindex="0" data-tip="When checked, Sunday ignores expensive-hour pricing and uses the normal price instead.">?</span></span><input type="checkbox" id="tf-sunday" name="billing_sunday" {{ checked_sunday }}>
-          Sunday has no expensive hours; use the normal price instead</label>
-      </div>
-      <div class="row">
-        <label><span class="field-name">Expensive-hour price (VND/kWh)<span class="hint" tabindex="0" data-tip="EnergyPrice(t) during costly hours. The bill multiplies this price by grid kWh used in those time windows.">?</span></span><input type="number" id="tf-peak" name="billing_expensive" step="10"
-            value="{{ billing_expensive }}"></label>
-        <label><span class="field-name">Normal-hour price (VND/kWh)<span class="hint" tabindex="0" data-tip="EnergyPrice(t) during regular hours, used when the time is not cheap or expensive.">?</span></span><input type="number" id="tf-mid" name="billing_normal" step="10"
-            value="{{ billing_normal }}"></label>
-        <label><span class="field-name">Cheap-hour price (VND/kWh)<span class="hint" tabindex="0" data-tip="EnergyPrice(t) during cheap hours. A battery may charge here so it can discharge later.">?</span></span><input type="number" id="tf-off" name="billing_cheap" step="10"
-            value="{{ billing_cheap }}"></label>
-        <label><span class="field-name">Monthly peak fee (VND/kW/month)<span class="hint" tabindex="0" data-tip="DemandChargeRate: extra monthly charge based on the highest grid demand peak. Lowering this peak is peak shaving.">?</span></span><input type="number" id="tf-tcap" name="billing_peak_penalty" step="1000"
-            value="{{ billing_peak_penalty }}"></label>
-      </div>
-      <div class="row">
-        <label><span class="field-name">Expensive-hour windows<span class="hint" tabindex="0" data-tip="Clock ranges that use the expensive price. Example: 17:30-22:30 means evening power is costly.">?</span></span><input id="tf-wpeak" name="billing_windows_expensive" size="24"
-            placeholder="17:30-22:30" value="{{ billing_windows_expensive }}"></label>
-        <label><span class="field-name">Cheap-hour windows<span class="hint" tabindex="0" data-tip="Clock ranges that use the cheap price. Example: 00:00-06:00 means overnight power is cheap.">?</span></span><input id="tf-woff" name="billing_windows_cheap" size="24" placeholder="00:00-06:00"
-            value="{{ billing_windows_cheap }}"></label>
-      </div>
-      <div class="row">
-        <label><span class="field-name">Battery cell price (VND/kWh)<span class="hint" tabindex="0" data-tip="Capital cost for battery energy capacity. Bigger BatteryCapacity increases this part of project cost.">?</span></span><input type="number" id="tf-ckwh" name="billing_battery_per_kWh"
-            step="100000" value="{{ billing_battery_per_kWh }}"></label>
-        <label><span class="field-name">Inverter/PCS price (VND/kW)<span class="hint" tabindex="0" data-tip="Capital cost for battery power capability. Bigger BatteryPowerLimit increases this part of project cost.">?</span></span><input type="number" id="tf-ckw" name="billing_battery_per_kW" step="100000"
-            value="{{ billing_battery_per_kW }}"></label>
-        <label><span class="field-name">Yearly maintenance (%)<span class="hint" tabindex="0" data-tip="Yearly upkeep cost as a fraction of battery investment. 0.02 means 2% per year.">?</span></span><input type="number" id="tf-opex" name="billing_yearly_maintain_percentage"
-            step="0.005" value="{{ billing_yearly_maintain_percentage }}"></label>
-        <label><span class="field-name">Discount rate<span class="hint" tabindex="0" data-tip="Makes future savings count less than money today. 0.08 means an 8% yearly discount rate.">?</span></span><input type="number" id="tf-disc" name="billing_discount_rate" step="0.01"
-            value="{{ billing_discount_rate }}"></label>
-        <label><span class="field-name">Project years<span class="hint" tabindex="0" data-tip="How many years to evaluate battery costs and savings over.">?</span></span><input type="number" id="tf-years" name="billing_years" step="1"
-            value="{{ billing_years }}"></label>
-        <label><span class="field-name">Real-world savings factor<span class="hint" tabindex="0" data-tip="Reduces ideal oracle savings into realistic expected savings. 0.60 means count 60% of the perfect result.">?</span></span><input type="number" id="tf-real" name="billing_real_saving_factor" step="0.05"
-            min="0.1" max="1" value="{{ billing_real_saving_factor }}"></label>
-        <button id="btn-tf-save" class="primary" type="submit" name="form_action" value="save">Save bill and finance inputs</button>
-        <button id="btn-calculate" class="secondary" type="submit" name="form_action" value="calculate">Calculate</button>
-      </div>
-      <div class="info">Real-world savings factor means: if Oracle says the battery can save 100, the real controller
-        may
-        capture only part of it. Example: 0.60 means count 60 as realistic savings. Changing the time windows means the
-        DRL policy should be trained again.</div>
-      {% if saved %}<div class="info saved">Saved bill and finance inputs.</div>{% endif %}
-      <div id="tariff-info" class="info"></div>
-      <div class="oracle-progress" id="oracle-progress" role="status" aria-live="polite">
-        <strong>Battery calculation progress</strong>
-        <span>Waiting to start...</span>
-      </div>
-    </form>
-
-    <div class="dashboard-grid">
-      <section class="card">
-        <div class="section-head">
-          <h2>Daily chart</h2>
-          <div class="row">
-            <label>Day
-              <select id="benchmark-day"></select>
-            </label>
-            <label>Battery
-              <select id="benchmark-battery"></select>
-            </label>
+          <div class="graph-actions">
+            <button id="btn-benchmark-hide-all" class="tiny" type="button">Hide all lines</button>
           </div>
-        </div>
-        <div class="bill-strip" id="benchmark-bill-strip" aria-label="Selected day electricity bill"></div>
-        <div class="chart-wrap">
-          <canvas id="benchmark-chart"></canvas>
-          <div class="chart-tooltip" id="benchmark-tooltip" role="status" aria-live="polite"></div>
-        </div>
-        <div class="graph-actions">
-          <button id="btn-benchmark-hide-all" class="tiny" type="button">Hide all lines</button>
-        </div>
-        <div class="legend" id="benchmark-legend" aria-label="Chart line visibility controls">
-          <button class="legend-item" type="button" data-series="load" aria-pressed="true"><span class="swatch" style="background:#92400e;color:#92400e"></span>Load</button>
-          <button class="legend-item" type="button" data-series="pv" aria-pressed="true"><span class="swatch" style="background:#166534;color:#166534"></span>PV</button>
-          <button class="legend-item" type="button" data-series="grid" aria-pressed="true"><span class="swatch" style="background:#075985;color:#075985"></span>Grid import before battery</button>
-          <button class="legend-item" type="button" data-series="rolling_grid" aria-pressed="true"><span class="swatch" style="background:#9f1239;color:#9f1239"></span>Daily 30-minute rolling grid</button>
-          <button class="legend-item" type="button" data-series="monthly_peak" aria-pressed="true"><span class="swatch" style="background:#7f1d1d;color:#7f1d1d"></span>DEADLY monthly peak</button>
-          <button class="legend-item" type="button" data-series="oracle_peak" aria-pressed="true"><span class="swatch" style="background:#86efac;color:#86efac"></span>Post-oracle DEADLY peak</button>
-          <button class="legend-item" type="button" data-series="oracle_grid" aria-pressed="true"><span class="swatch" style="background:#c4b5fd;color:#c4b5fd"></span>Oracle grid after battery</button>
-          <button class="legend-item" type="button" data-series="oracle_rolling_grid" aria-pressed="true"><span class="swatch" style="background:#fda4af;color:#fda4af"></span>Oracle 30-minute rolling grid</button>
-          <button class="legend-item" type="button" data-series="oracle_discharge" aria-pressed="true"><span class="swatch" style="background:#fdba74;color:#fdba74"></span>Battery discharge</button>
-          <button class="legend-item" type="button" data-series="oracle_charge" aria-pressed="true"><span class="swatch" style="background:#67e8f9;color:#67e8f9"></span>Battery charge</button>
-          <button class="legend-item" type="button" data-series="oracle_soc" aria-pressed="true"><span class="swatch" style="background:#fde047;color:#fde047"></span>SOC %</button>
-        </div>
-        <div id="benchmark-day-info" class="info"></div>
-      </section>
+          <div class="legend" id="benchmark-legend" aria-label="Chart line visibility controls">
+            <button class="legend-item" type="button" data-series="load" aria-pressed="true"><span class="swatch"
+                style="background:#92400e;color:#92400e"></span>Load</button>
+            <button class="legend-item" type="button" data-series="pv" aria-pressed="true"><span class="swatch"
+                style="background:#166534;color:#166534"></span>PV</button>
+            <button class="legend-item" type="button" data-series="grid" aria-pressed="true"><span class="swatch"
+                style="background:#075985;color:#075985"></span>Grid import before battery</button>
+            <button class="legend-item" type="button" data-series="rolling_grid" aria-pressed="true"><span
+                class="swatch" style="background:#9f1239;color:#9f1239"></span>Daily 30-minute rolling grid</button>
+            <button class="legend-item" type="button" data-series="monthly_peak" aria-pressed="true"><span
+                class="swatch" style="background:#7f1d1d;color:#7f1d1d"></span>DEADLY monthly peak</button>
+            <button class="legend-item" type="button" data-series="oracle_peak" aria-pressed="true"><span class="swatch"
+                style="background:#86efac;color:#86efac"></span>Post-oracle DEADLY peak</button>
+            <button class="legend-item" type="button" data-series="oracle_grid" aria-pressed="true"><span class="swatch"
+                style="background:#c4b5fd;color:#c4b5fd"></span>Oracle grid after battery</button>
+            <button class="legend-item" type="button" data-series="oracle_rolling_grid" aria-pressed="true"><span
+                class="swatch" style="background:#fda4af;color:#fda4af"></span>Oracle 30-minute rolling grid</button>
+            <button class="legend-item" type="button" data-series="oracle_discharge" aria-pressed="true"><span
+                class="swatch" style="background:#fdba74;color:#fdba74"></span>Battery discharge</button>
+            <button class="legend-item" type="button" data-series="oracle_charge" aria-pressed="true"><span
+                class="swatch" style="background:#67e8f9;color:#67e8f9"></span>Battery charge</button>
+            <button class="legend-item" type="button" data-series="oracle_soc" aria-pressed="true"><span class="swatch"
+                style="background:#fde047;color:#fde047"></span>SOC %</button>
+          </div>
+          <div id="benchmark-day-info" class="info"></div>
+        </section>
 
-      <section class="card">
-        <h2>Battery benchmark</h2>
-      <div class="metric-grid">
-        <div class="metric-row summary-main">
-          <div class="metric"><span class="metric-label">Battery cost<span class="hint" tabindex="0" data-tip="Battery cost = BatteryCapacity * Battery cell price + BatteryPowerLimit * Inverter/PCS price. This is the upfront battery investment, not the electric bill.">?</span></span><b id="summary-battery-cost">{{ "{:,.0f}".format(benchmark.summary.battery_cost_vnd) }} VND</b></div>
-          <div class="metric"><span class="metric-label">Battery capacity<span class="hint" tabindex="0" data-tip="BatteryCapacity from the selected sample batteries option. It controls stored energy size in kWh.">?</span></span><b id="summary-battery-capacity">{{ "{:,.0f}".format(battery_capacity_kWh | float) }} kWh</b></div>
-          <div class="metric"><span class="metric-label">Power limit<span class="hint" tabindex="0" data-tip="BatteryPowerLimit from the selected sample batteries option. It controls maximum charge or discharge speed in kW.">?</span></span><b id="summary-battery-power">{{ "{:,.0f}".format(battery_power_limit_kW | float) }} kW</b></div>
-          <div class="metric"><span class="metric-label">Wear cost<span class="hint" tabindex="0" data-tip="BatteryWearCost times battery throughput is added to the Oracle post-battery bill.">?</span></span><b>{{ "{:,.0f}".format(battery_wear_cost | float) }} VND/kWh</b></div>
-        </div>
-        <div class="metric-row summary-main">
-          <div class="metric"><span class="metric-label">FACT: Oracle LP solved<span class="hint" tabindex="0" data-tip="True when SciPy/linprog solved at least one month. False means the Oracle result is not a valid optimized battery answer.">?</span></span><b id="summary-solved">{{ "True" if oracle.summary.solved_day_count else "False" }}</b></div>
-          <div class="metric"><span class="metric-label">Days in CSV<span class="hint" tabindex="0" data-tip="Count of unique day_index values loaded from the selected CSV.">?</span></span><b>{{ benchmark.summary.day_count }}</b></div>
-          <div class="metric"><span class="metric-label">Total load<span class="hint" tabindex="0" data-tip="Total load = sum of P_load_kW * dt across all CSV rows.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_load_kWh) }} kWh</b></div>
-          <div class="metric"><span class="metric-label">Total PV<span class="hint" tabindex="0" data-tip="Total PV = sum of P_pv_kW * dt across all CSV rows.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_pv_kWh) }} kWh</b></div>
-        </div>
-        <div class="metric-row summary-triple">
-          <div class="metric"><span class="metric-label">Grid import before battery<span class="hint" tabindex="0" data-tip="Before-battery grid import = sum of max(0, Load - PV) * dt across the CSV. Battery is ignored here.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_grid_kWh) }} kWh</b></div>
-          <div class="metric"><span class="metric-label">Bill before battery<span class="hint" tabindex="0" data-tip="Before-battery bill = energy charge before battery + demand charge before battery. Energy charge uses time-of-use prices; demand charge uses the highest monthly rolling 30-minute grid peak.">?</span></span><b>{{ "{:,.0f}".format(benchmark.summary.total_bill_vnd) }} VND</b></div>
-          <div class="metric"><span class="metric-label">Highest monthly DEADLY peak before battery<span class="hint" tabindex="0" data-tip="Before-battery peak = max monthly 30-minute rolling average of grid import before battery. This drives the demand charge in 2TC mode.">?</span></span><b>{{ "{:,.1f}".format(benchmark.summary.peak_grid_kW) }} kW, day {{ benchmark.summary.peak_day_index }}</b></div>
-        </div>
-        <div class="metric-row summary-triple">
-          <div class="metric"><span class="metric-label">Grid import post battery<span class="hint" tabindex="0" data-tip="Post-battery grid import = sum of Oracle GridImport(t) * dt after optimized battery charge/discharge.">?</span></span><b id="summary-post-grid">{{ "{:,.0f}".format(oracle.summary.total_grid_kWh) }} kWh</b></div>
-          <div class="metric"><span class="metric-label">Bill post battery<span class="hint" tabindex="0" data-tip="Post-battery bill = Oracle energy charge + Oracle demand charge + battery wear cost. It does not include upfront battery cost.">?</span></span><b id="summary-post-bill">{{ "{:,.0f}".format(oracle.summary.total_bill_vnd) }} VND</b></div>
-          <div class="metric"><span class="metric-label">Highest monthly DEADLY peak post battery<span class="hint" tabindex="0" data-tip="Post-battery peak = max monthly 30-minute rolling average of Oracle grid import after battery dispatch.">?</span></span><b id="summary-post-peak">{{ "{:,.1f}".format(oracle.summary.peak_grid_kW) }} kW</b></div>
-        </div>
-        <div class="metric-row summary-triple">
-          <div class="metric"><span class="metric-label">Grid import diff<span class="hint" tabindex="0" data-tip="Grid import diff = before-battery grid import - post-battery grid import. Positive means the optimized battery reduced grid energy.">?</span></span><b id="summary-grid-diff">{{ "{:,.0f}".format(benchmark.summary.total_grid_kWh - oracle.summary.total_grid_kWh) }} kWh</b></div>
-          <div class="metric"><span class="metric-label">Bill diff<span class="hint" tabindex="0" data-tip="Bill diff = before-battery bill - post-battery bill. This is the perfect Oracle saving before applying the real-world savings factor.">?</span></span><b id="summary-bill-diff">{{ "{:,.0f}".format(benchmark.summary.total_bill_vnd - oracle.summary.total_bill_vnd) }} VND</b></div>
-          <div class="metric"><span class="metric-label">DEADLY peak diff<span class="hint" tabindex="0" data-tip="Peak diff = before-battery highest monthly peak - post-battery highest monthly peak. This is the kW shaved by Oracle.">?</span></span><b id="summary-peak-diff">{{ "{:,.1f}".format(benchmark.summary.peak_grid_kW - oracle.summary.peak_grid_kW) }} kW</b></div>
-        </div>
-        {% set oracle_bill_diff_vnd = benchmark.summary.total_bill_vnd - oracle.summary.total_bill_vnd %}
-        {% set csv_day_count = benchmark.summary.day_count if benchmark.summary.day_count else 1 %}
-        {% set oracle_perfect_anual_saving_vnd = oracle_bill_diff_vnd / csv_day_count * 365 %}
-        {% set seer_anual_saving_vnd = (oracle_perfect_anual_saving_vnd if oracle_perfect_anual_saving_vnd > 0 else 0) * oracle.summary.seer_factor %}
-        <div class="metric-row summary-triple">
-          <div class="metric"><span class="metric-label">Oracle perfect anual saving<span class="hint" tabindex="0" data-tip="Oracle perfect anual saving = bill diff / DaysInCSV * 365, using perfect future knowledge. It is an upper bound.">?</span></span><b id="summary-oracle-saving">{{ "{:,.0f}".format(oracle_perfect_anual_saving_vnd) }} VND/year</b></div>
-          <div class="metric"><span class="metric-label">SEER realistic anual saving<span class="hint" tabindex="0" data-tip="SEER realistic anual saving = max(0, Oracle perfect anual saving) * real-world savings factor.">?</span></span><b id="summary-seer-saving">{{ "{:,.0f}".format(seer_anual_saving_vnd) }} VND/year</b></div>
-          <div class="metric"><span class="metric-label">Oracle LP status<span class="hint" tabindex="0" data-tip="Raw solver status message from the Oracle LP. If it says solved, the optimized battery dispatch is available.">?</span></span><b id="summary-status">{{ oracle.status }}</b></div>
-        </div>
-      </div>
+        <section class="card">
+          <h2>Battery benchmark</h2>
+          <div class="metric-grid">
+            <div class="metric-row summary-main">
+              <div class="metric"><span class="metric-label">Battery cost<span class="hint" tabindex="0"
+                    data-tip="Battery cost = BatteryCapacity * Battery cell price + BatteryPowerLimit * Inverter/PCS price. This is the upfront battery investment, not the electric bill.">?</span></span><b
+                  id="summary-battery-cost">{{ "{:,.0f}".format(benchmark.summary.battery_cost_vnd) }} VND</b></div>
+              <div class="metric"><span class="metric-label">Battery capacity<span class="hint" tabindex="0"
+                    data-tip="BatteryCapacity from the selected sample batteries option. It controls stored energy size in kWh.">?</span></span><b
+                  id="summary-battery-capacity">{{ "{:,.0f}".format(battery_capacity_kWh | float) }} kWh</b></div>
+              <div class="metric"><span class="metric-label">Power limit<span class="hint" tabindex="0"
+                    data-tip="BatteryPowerLimit from the selected sample batteries option. It controls maximum charge or discharge speed in kW.">?</span></span><b
+                  id="summary-battery-power">{{ "{:,.0f}".format(battery_power_limit_kW | float) }} kW</b></div>
+              <div class="metric"><span class="metric-label">Wear cost<span class="hint" tabindex="0"
+                    data-tip="BatteryWearCost times battery throughput is added to the Oracle post-battery bill.">?</span></span><b>{{
+                  "{:,.0f}".format(battery_wear_cost | float) }} VND/kWh</b></div>
+            </div>
+            <div class="metric-row summary-main">
+              <div class="metric"><span class="metric-label">FACT: Oracle LP solved<span class="hint" tabindex="0"
+                    data-tip="True when SciPy/linprog solved at least one month. False means the Oracle result is not a valid optimized battery answer.">?</span></span><b
+                  id="summary-solved">{{ "True" if oracle.summary.solved_day_count else "False" }}</b></div>
+              <div class="metric"><span class="metric-label">Days in CSV<span class="hint" tabindex="0"
+                    data-tip="Count of unique day_index values loaded from the selected CSV.">?</span></span><b>{{
+                  benchmark.summary.day_count }}</b></div>
+              <div class="metric"><span class="metric-label">Total load<span class="hint" tabindex="0"
+                    data-tip="Total load = sum of P_load_kW * dt across all CSV rows.">?</span></span><b>{{
+                  "{:,.0f}".format(benchmark.summary.total_load_kWh) }} kWh</b></div>
+              <div class="metric"><span class="metric-label">Total PV<span class="hint" tabindex="0"
+                    data-tip="Total PV = sum of P_pv_kW * dt across all CSV rows.">?</span></span><b>{{
+                  "{:,.0f}".format(benchmark.summary.total_pv_kWh) }} kWh</b></div>
+            </div>
+            <div class="metric-row summary-triple">
+              <div class="metric"><span class="metric-label">Grid import before battery<span class="hint" tabindex="0"
+                    data-tip="Before-battery grid import = sum of max(0, Load - PV) * dt across the CSV. Battery is ignored here.">?</span></span><b>{{
+                  "{:,.0f}".format(benchmark.summary.total_grid_kWh) }} kWh</b></div>
+              <div class="metric"><span class="metric-label">Bill before battery<span class="hint" tabindex="0"
+                    data-tip="Before-battery bill = energy charge before battery + demand charge before battery. Energy charge uses time-of-use prices; demand charge uses the highest monthly rolling 30-minute grid peak.">?</span></span><b>{{
+                  "{:,.0f}".format(benchmark.summary.total_bill_vnd) }} VND</b></div>
+              <div class="metric"><span class="metric-label">Highest monthly DEADLY peak before battery<span
+                    class="hint" tabindex="0"
+                    data-tip="Before-battery peak = max monthly 30-minute rolling average of grid import before battery. This drives the demand charge in 2TC mode.">?</span></span><b>{{
+                  "{:,.1f}".format(benchmark.summary.peak_grid_kW) }} kW, day {{ benchmark.summary.peak_day_index }}</b>
+              </div>
+            </div>
+            <div class="metric-row summary-triple">
+              <div class="metric"><span class="metric-label">Grid import post battery<span class="hint" tabindex="0"
+                    data-tip="Post-battery grid import = sum of Oracle GridImport(t) * dt after optimized battery charge/discharge.">?</span></span><b
+                  id="summary-post-grid">{{ "{:,.0f}".format(oracle.summary.total_grid_kWh) }} kWh</b></div>
+              <div class="metric"><span class="metric-label">Bill post battery<span class="hint" tabindex="0"
+                    data-tip="Post-battery bill = Oracle energy charge + Oracle demand charge + battery wear cost. It does not include upfront battery cost.">?</span></span><b
+                  id="summary-post-bill">{{ "{:,.0f}".format(oracle.summary.total_bill_vnd) }} VND</b></div>
+              <div class="metric"><span class="metric-label">Highest monthly DEADLY peak post battery<span class="hint"
+                    tabindex="0"
+                    data-tip="Post-battery peak = max monthly 30-minute rolling average of Oracle grid import after battery dispatch.">?</span></span><b
+                  id="summary-post-peak">{{ "{:,.1f}".format(oracle.summary.peak_grid_kW) }} kW</b></div>
+            </div>
+            <div class="metric-row summary-triple">
+              <div class="metric"><span class="metric-label">Grid import diff<span class="hint" tabindex="0"
+                    data-tip="Grid import diff = before-battery grid import - post-battery grid import. Positive means the optimized battery reduced grid energy.">?</span></span><b
+                  id="summary-grid-diff">{{ "{:,.0f}".format(benchmark.summary.total_grid_kWh -
+                  oracle.summary.total_grid_kWh) }} kWh</b></div>
+              <div class="metric"><span class="metric-label">Bill diff<span class="hint" tabindex="0"
+                    data-tip="Bill diff = before-battery bill - post-battery bill. This is the perfect Oracle saving before applying the real-world savings factor.">?</span></span><b
+                  id="summary-bill-diff">{{ "{:,.0f}".format(benchmark.summary.total_bill_vnd -
+                  oracle.summary.total_bill_vnd) }} VND</b></div>
+              <div class="metric"><span class="metric-label">DEADLY peak diff<span class="hint" tabindex="0"
+                    data-tip="Peak diff = before-battery highest monthly peak - post-battery highest monthly peak. This is the kW shaved by Oracle.">?</span></span><b
+                  id="summary-peak-diff">{{ "{:,.1f}".format(benchmark.summary.peak_grid_kW -
+                  oracle.summary.peak_grid_kW) }} kW</b></div>
+            </div>
+            {% set oracle_bill_diff_vnd = benchmark.summary.total_bill_vnd - oracle.summary.total_bill_vnd %}
+            {% set csv_day_count = benchmark.summary.day_count if benchmark.summary.day_count else 1 %}
+            {% set oracle_perfect_anual_saving_vnd = oracle_bill_diff_vnd / csv_day_count * 365 %}
+            {% set seer_anual_saving_vnd = (oracle_perfect_anual_saving_vnd if oracle_perfect_anual_saving_vnd > 0 else
+            0) * oracle.summary.seer_factor %}
+            <div class="metric-row summary-triple">
+              <div class="metric"><span class="metric-label">Oracle perfect anual saving<span class="hint" tabindex="0"
+                    data-tip="Oracle perfect anual saving = bill diff / DaysInCSV * 365, using perfect future knowledge. It is an upper bound.">?</span></span><b
+                  id="summary-oracle-saving">{{ "{:,.0f}".format(oracle_perfect_anual_saving_vnd) }} VND/year</b></div>
+              <div class="metric"><span class="metric-label">SEER realistic anual saving<span class="hint" tabindex="0"
+                    data-tip="SEER realistic anual saving = max(0, Oracle perfect anual saving) * real-world savings factor.">?</span></span><b
+                  id="summary-seer-saving">{{ "{:,.0f}".format(seer_anual_saving_vnd) }} VND/year</b></div>
+              <div class="metric"><span class="metric-label">Oracle LP status<span class="hint" tabindex="0"
+                    data-tip="Raw solver status message from the Oracle LP. If it says solved, the optimized battery dispatch is available.">?</span></span><b
+                  id="summary-status">{{ oracle.status }}</b></div>
+            </div>
+          </div>
 
-      <h2>Oracle sizing economics</h2>
-      <div class="sizing-table-wrap">
-        <table class="sizing-table">
-          <thead>
-            <tr>
-              <th>Candidate</th>
-              <th>E battery (kWh)</th>
-              <th>P battery (kW)</th>
-              <th>Anual realistic saving/year (mil VND)</th>
-              <th>NPV (bil VND)</th>
-              <th>Payback (years)</th>
-              <th>Contract cap recommendation</th>
-              <th>Pareto frontier?</th>
-            </tr>
-          </thead>
-          <tbody id="sizing-table-body">
-            {% for candidate in candidate_oracles %}
-              <tr data-candidate-index="{{ loop.index0 }}">
-                <td>{{ candidate.label }}</td>
-                <td>{{ "{:,.0f}".format(candidate.battery_capacity_kWh) }}</td>
-                <td>{{ "{:,.1f}".format(candidate.battery_power_limit_kW) }}</td>
-                <td data-sizing-cell="annual">...</td>
-                <td data-sizing-cell="npv">...</td>
-                <td data-sizing-cell="payback">...</td>
-                <td data-sizing-cell="contract">...</td>
-                <td data-sizing-cell="pareto">...</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      <div class="math-block">
-        <h3>How the sizing numbers are calculated</h3>
-        <pre class="formula tight">Bill diff = Before-battery bill - Post-battery bill
+          <h2>Oracle sizing economics</h2>
+          <div class="sizing-table-wrap">
+            <table class="sizing-table">
+              <thead>
+                <tr>
+                  <th>Candidate</th>
+                  <th>E battery (kWh)</th>
+                  <th>P battery (kW)</th>
+                  <th>Anual realistic saving/year (mil VND)</th>
+                  <th>NPV (bil VND)</th>
+                  <th>Payback (years)</th>
+                  <th>Contract cap recommendation</th>
+                  <th>Pareto frontier?</th>
+                </tr>
+              </thead>
+              <tbody id="sizing-table-body">
+                {% for candidate in candidate_oracles %}
+                <tr data-candidate-index="{{ loop.index0 }}">
+                  <td>{{ candidate.label }}</td>
+                  <td>{{ "{:,.0f}".format(candidate.battery_capacity_kWh) }}</td>
+                  <td>{{ "{:,.1f}".format(candidate.battery_power_limit_kW) }}</td>
+                  <td data-sizing-cell="annual">...</td>
+                  <td data-sizing-cell="npv">...</td>
+                  <td data-sizing-cell="payback">...</td>
+                  <td data-sizing-cell="contract">...</td>
+                  <td data-sizing-cell="pareto">...</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <div class="math-block">
+            <h3>How the sizing numbers are calculated</h3>
+            <pre class="formula tight">Bill diff = Before-battery bill - Post-battery bill
 
 Oracle perfect anual saving = Bill diff / DaysInCSV * 365
 
@@ -963,51 +1072,108 @@ Contract cap recommendation = Oracle post-battery highest monthly peak * 1.05
 That 5% is a small buffer above the oracle peak, because real controllers are not magical future-seeing robots.
 
 Pareto frontier? = whether this candidate is non-dominated among the selected custom battery options.</pre>
-      </div>
-      </section>
-    </div>
-
-    <section class="card">
-      <h2>Oracle LP math</h2>
-      <div class="info">This is the optimization problem the oracle will solve later. The machine knows the real CSV
-        load/PV data and chooses the unknown battery actions that minimize the bill.</div>
-
-      <div class="math-grid" style="margin-top:14px">
-        <div class="math-block">
-          <h3>Known parameters</h3>
-          <dl class="math-list">
-            <div><dt>Load(t)</dt><dd>Building load from the CSV, in kW.</dd></div>
-            <div><dt>PV(t)</dt><dd>Solar generation from the CSV, in kW.</dd></div>
-            <div><dt>BatteryCapacity</dt><dd>Battery energy capacity, in kWh.</dd></div>
-            <div><dt>BatteryPowerLimit</dt><dd>Maximum battery charge/discharge power, in kW.</dd></div>
-            <div><dt>ChargeEfficiency</dt><dd>Fraction of charging energy that becomes stored energy.</dd></div>
-            <div><dt>DischargeEfficiency</dt><dd>Fraction of stored energy that comes back out usefully.</dd></div>
-            <div><dt>dt</dt><dd>Time step in hours, detected automatically from the selected CSV. Current dt is {{ dt }} h.</dd></div>
-            <div><dt>EnergyPrice(t)</dt><dd>Electricity tariff at time t, in VND/kWh.</dd></div>
-            <div><dt>DemandChargeRate</dt><dd>Capacity charge, in VND/kW.</dd></div>
-            <div><dt>BatteryWearCost</dt><dd>Battery degradation cost, in VND/kWh throughput.</dd></div>
-            <div><dt>MinimumSOC</dt><dd>Lowest allowed battery state of charge.</dd></div>
-            <div><dt>MaximumSOC</dt><dd>Highest allowed battery state of charge.</dd></div>
-            <div><dt>RequiredFinalSOC</dt><dd>Minimum SOC required at the end of the horizon.</dd></div>
-          </dl>
-        </div>
-
-        <div class="math-block">
-          <h3>Unknown variables to solve</h3>
-          <dl class="math-list">
-            <div><dt>BatteryDischarge(t)</dt><dd>Battery to load power, in kW.</dd></div>
-            <div><dt>GridCharge(t)</dt><dd>Grid to battery power, in kW.</dd></div>
-            <div><dt>SolarCharge(t)</dt><dd>PV surplus to battery power, in kW.</dd></div>
-            <div><dt>GridImport(t)</dt><dd>Power imported from the grid, in kW.</dd></div>
-            <div><dt>BatterySOC(t)</dt><dd>Battery state of charge from 0 to 1.</dd></div>
-            <div><dt>PeakGrid</dt><dd>Monthly billed peak demand, in kW.</dd></div>
-          </dl>
-        </div>
+          </div>
+        </section>
       </div>
 
-      <div class="math-block" style="margin-top:14px">
-        <h3>Objective</h3>
-        <pre class="formula">MINIMIZE:
+      <section class="card">
+        <h2>Oracle LP math</h2>
+        <div class="info">This is the optimization problem the oracle will solve later. The machine knows the real CSV
+          load/PV data and chooses the unknown battery actions that minimize the bill.</div>
+
+        <div class="math-grid" style="margin-top:14px">
+          <div class="math-block">
+            <h3>Known parameters</h3>
+            <dl class="math-list">
+              <div>
+                <dt>Load(t)</dt>
+                <dd>Building load from the CSV, in kW.</dd>
+              </div>
+              <div>
+                <dt>PV(t)</dt>
+                <dd>Solar generation from the CSV, in kW.</dd>
+              </div>
+              <div>
+                <dt>BatteryCapacity</dt>
+                <dd>Battery energy capacity, in kWh.</dd>
+              </div>
+              <div>
+                <dt>BatteryPowerLimit</dt>
+                <dd>Maximum battery charge/discharge power, in kW.</dd>
+              </div>
+              <div>
+                <dt>ChargeEfficiency</dt>
+                <dd>Fraction of charging energy that becomes stored energy.</dd>
+              </div>
+              <div>
+                <dt>DischargeEfficiency</dt>
+                <dd>Fraction of stored energy that comes back out usefully.</dd>
+              </div>
+              <div>
+                <dt>dt</dt>
+                <dd>Time step in hours, detected automatically from the selected CSV. Current dt is {{ dt }} h.</dd>
+              </div>
+              <div>
+                <dt>EnergyPrice(t)</dt>
+                <dd>Electricity tariff at time t, in VND/kWh.</dd>
+              </div>
+              <div>
+                <dt>DemandChargeRate</dt>
+                <dd>Capacity charge, in VND/kW.</dd>
+              </div>
+              <div>
+                <dt>BatteryWearCost</dt>
+                <dd>Battery degradation cost, in VND/kWh throughput.</dd>
+              </div>
+              <div>
+                <dt>MinimumSOC</dt>
+                <dd>Lowest allowed battery state of charge.</dd>
+              </div>
+              <div>
+                <dt>MaximumSOC</dt>
+                <dd>Highest allowed battery state of charge.</dd>
+              </div>
+              <div>
+                <dt>RequiredFinalSOC</dt>
+                <dd>Minimum SOC required at the end of the horizon.</dd>
+              </div>
+            </dl>
+          </div>
+
+          <div class="math-block">
+            <h3>Unknown variables to solve</h3>
+            <dl class="math-list">
+              <div>
+                <dt>BatteryDischarge(t)</dt>
+                <dd>Battery to load power, in kW.</dd>
+              </div>
+              <div>
+                <dt>GridCharge(t)</dt>
+                <dd>Grid to battery power, in kW.</dd>
+              </div>
+              <div>
+                <dt>SolarCharge(t)</dt>
+                <dd>PV surplus to battery power, in kW.</dd>
+              </div>
+              <div>
+                <dt>GridImport(t)</dt>
+                <dd>Power imported from the grid, in kW.</dd>
+              </div>
+              <div>
+                <dt>BatterySOC(t)</dt>
+                <dd>Battery state of charge from 0 to 1.</dd>
+              </div>
+              <div>
+                <dt>PeakGrid</dt>
+                <dd>Monthly billed peak demand, in kW.</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+
+        <div class="math-block" style="margin-top:14px">
+          <h3>Objective</h3>
+          <pre class="formula">MINIMIZE:
 
   [t=196] (
       EnergyPrice(t)  dt  (
@@ -1027,11 +1193,11 @@ Pareto frontier? = whether this candidate is non-dominated among the selected cu
 
 + DemandChargeRate  PeakGrid
       <span class="formula-note"> Monthly demand charge</span></pre>
-      </div>
+        </div>
 
-      <div class="math-block" style="margin-top:14px">
-        <h3>Constraints</h3>
-        <pre class="formula">GridImport(t)
+        <div class="math-block" style="margin-top:14px">
+          <h3>Constraints</h3>
+          <pre class="formula">GridImport(t)
   = EffectiveLoad(t) + GridCharge(t) - BatteryDischarge(t)
    0
       <span class="formula-note"> No electricity export</span>
@@ -1054,8 +1220,8 @@ BatterySOC(96)  RequiredFinalSOC
 0.5  (GridImport(t) + GridImport(t+1))  PeakGrid
 for t = 0 ... 95
       <span class="formula-note"> 30-minute rolling average demand</span></pre>
-      </div>
-    </section>
+        </div>
+      </section>
     </section>
 
     <section id="tab-training-lab" class="tab-panel">
@@ -1071,10 +1237,12 @@ for t = 0 ... 95
             </select>
           </label>
           <label>E_cap (kWh) <input type="number" id="train-ecap" step="50" value="{{ battery_capacity_kWh }}"></label>
-          <label>P_rated (kW) <input type="number" id="train-prated" step="25" value="{{ battery_power_limit_kW }}"></label>
+          <label>P_rated (kW) <input type="number" id="train-prated" step="25"
+              value="{{ battery_power_limit_kW }}"></label>
           <label>Validation days <input type="number" id="train-val-days" min="1" step="1" value="30"></label>
           <label>Test days <input type="number" id="train-test-days" min="1" step="1" value="30"></label>
-          <label class="train-ppo-field">Steps <input type="number" id="train-steps" value="400000" step="50000"></label>
+          <label class="train-ppo-field">Steps <input type="number" id="train-steps" value="400000"
+              step="50000"></label>
           <label class="train-grepo-field">Iters <input type="number" id="train-iters" value="400" step="50"></label>
           <label class="train-grepo-field">Group <input type="number" id="train-group" value="8" step="1"></label>
           <label class="train-grepo-field">Beta <input type="number" id="train-beta" value="0.5" step="0.05"></label>
@@ -1090,7 +1258,8 @@ for t = 0 ... 95
         <section class="card">
           <h2>Learning curve</h2>
           <canvas id="train-chart" class="training-chart" width="900" height="240"></canvas>
-          <p class="chart-help">Each red point is the validation bill after more training steps. Down is good: the policy is learning to run the battery with a lower electricity bill.</p>
+          <p class="chart-help">Each red point is the validation bill after more training steps. Down is good: the
+            policy is learning to run the battery with a lower electricity bill.</p>
         </section>
         <section class="card">
           <h2>Local checkpoints</h2>
@@ -1125,7 +1294,8 @@ for t = 0 ... 95
               <label>Battery
                 <select id="dispatch-battery"></select>
               </label>
-              <button id="btn-dispatch-run" class="primary" type="button">Create saved run for selected policies</button>
+              <button id="btn-dispatch-run" class="primary" type="button">Create saved run for selected
+                policies</button>
             </div>
           </div>
           <div class="bill-strip" id="dispatch-bill-strip" aria-label="Selected dispatch day electricity bill"></div>
@@ -1559,27 +1729,27 @@ for t = 0 ... 95
       const power = Number(candidate.battery_power_limit_kW || 0);
       const batteryCost = (
         capacity * Number({{ billing_battery_per_kWh | tojson }})
-        + power * Number({{ billing_battery_per_kW | tojson }})
+    + power * Number({{ billing_battery_per_kW | tojson }})
       );
-      const yearlyMaintenance = batteryCost * Number({{ billing_yearly_maintain_percentage | tojson }});
-      const annualNetCashflow = anualSavings.realisticAnualSaving - yearlyMaintenance;
-      const discountRate = Number({{ billing_discount_rate | tojson }});
-      const projectYears = Math.max(0, Math.round(Number({{ billing_years | tojson }})));
-      let discountedCashflow = 0;
-      for (let year = 1; year <= projectYears; year += 1) {
-        discountedCashflow += annualNetCashflow / ((1 + discountRate) ** year);
-      }
-      const npv = -batteryCost + discountedCashflow;
-      return {
-        oracle_annual_saving_vnd: Math.round(anualSavings.oracleAnualSaving),
-        annual_saving_vnd: Math.round(anualSavings.realisticAnualSaving),
-        annual_saving_million_vnd: anualSavings.realisticAnualSaving / 1000000,
-        annual_maintenance_vnd: Math.round(yearlyMaintenance),
-        annual_net_cashflow_vnd: Math.round(annualNetCashflow),
-        npv_vnd: Math.round(npv),
-        npv_billion_vnd: npv / 1000000000,
-        payback_years: annualNetCashflow > 0 ? batteryCost / annualNetCashflow : null,
-      };
+    const yearlyMaintenance = batteryCost * Number({{ billing_yearly_maintain_percentage | tojson }});
+    const annualNetCashflow = anualSavings.realisticAnualSaving - yearlyMaintenance;
+    const discountRate = Number({{ billing_discount_rate | tojson }});
+    const projectYears = Math.max(0, Math.round(Number({{ billing_years | tojson }})));
+    let discountedCashflow = 0;
+    for (let year = 1; year <= projectYears; year += 1) {
+      discountedCashflow += annualNetCashflow / ((1 + discountRate) ** year);
+    }
+    const npv = -batteryCost + discountedCashflow;
+    return {
+      oracle_annual_saving_vnd: Math.round(anualSavings.oracleAnualSaving),
+      annual_saving_vnd: Math.round(anualSavings.realisticAnualSaving),
+      annual_saving_million_vnd: anualSavings.realisticAnualSaving / 1000000,
+      annual_maintenance_vnd: Math.round(yearlyMaintenance),
+      annual_net_cashflow_vnd: Math.round(annualNetCashflow),
+      npv_vnd: Math.round(npv),
+      npv_billion_vnd: npv / 1000000000,
+      payback_years: annualNetCashflow > 0 ? batteryCost / annualNetCashflow : null,
+    };
     }
 
     async function loadCandidateOracles() {
@@ -1643,22 +1813,22 @@ for t = 0 ... 95
       const anualSavings = annualizedSavingsFromBillDiff(summary);
       const batteryCost = (
         Number(candidate.battery_capacity_kWh || 0) * Number({{ billing_battery_per_kWh | tojson }})
-        + Number(candidate.battery_power_limit_kW || 0) * Number({{ billing_battery_per_kW | tojson }})
+    + Number(candidate.battery_power_limit_kW || 0) * Number({{ billing_battery_per_kW | tojson }})
       );
 
-      setText("summary-battery-cost", `${formatNumber(batteryCost)} VND`);
-      setText("summary-battery-capacity", `${formatNumber(candidate.battery_capacity_kWh)} kWh`);
-      setText("summary-battery-power", `${formatNumber(candidate.battery_power_limit_kW, 1)} kW`);
-      setText("summary-solved", summary.solved_day_count ? "True" : "False");
-      setText("summary-post-grid", `${formatNumber(summary.total_grid_kWh)} kWh`);
-      setText("summary-post-bill", `${formatNumber(summary.total_bill_vnd)} VND`);
-      setText("summary-post-peak", `${formatNumber(summary.peak_grid_kW, 1)} kW`);
-      setText("summary-grid-diff", `${formatNumber(benchmark.summary.total_grid_kWh - Number(summary.total_grid_kWh || 0))} kWh`);
-      setText("summary-bill-diff", `${formatNumber(benchmark.summary.total_bill_vnd - Number(summary.total_bill_vnd || 0))} VND`);
-      setText("summary-peak-diff", `${formatNumber(benchmark.summary.peak_grid_kW - Number(summary.peak_grid_kW || 0), 1)} kW`);
-      setText("summary-oracle-saving", `${formatNumber(anualSavings.oracleAnualSaving)} VND/year`);
-      setText("summary-seer-saving", `${formatNumber(anualSavings.realisticAnualSaving)} VND/year`);
-      setText("summary-status", activeOracle.status || "Oracle status unavailable.");
+    setText("summary-battery-cost", `${formatNumber(batteryCost)} VND`);
+    setText("summary-battery-capacity", `${formatNumber(candidate.battery_capacity_kWh)} kWh`);
+    setText("summary-battery-power", `${formatNumber(candidate.battery_power_limit_kW, 1)} kW`);
+    setText("summary-solved", summary.solved_day_count ? "True" : "False");
+    setText("summary-post-grid", `${formatNumber(summary.total_grid_kWh)} kWh`);
+    setText("summary-post-bill", `${formatNumber(summary.total_bill_vnd)} VND`);
+    setText("summary-post-peak", `${formatNumber(summary.peak_grid_kW, 1)} kW`);
+    setText("summary-grid-diff", `${formatNumber(benchmark.summary.total_grid_kWh - Number(summary.total_grid_kWh || 0))} kWh`);
+    setText("summary-bill-diff", `${formatNumber(benchmark.summary.total_bill_vnd - Number(summary.total_bill_vnd || 0))} VND`);
+    setText("summary-peak-diff", `${formatNumber(benchmark.summary.peak_grid_kW - Number(summary.peak_grid_kW || 0), 1)} kW`);
+    setText("summary-oracle-saving", `${formatNumber(anualSavings.oracleAnualSaving)} VND/year`);
+    setText("summary-seer-saving", `${formatNumber(anualSavings.realisticAnualSaving)} VND/year`);
+    setText("summary-status", activeOracle.status || "Oracle status unavailable.");
     }
 
     function drawBenchmark() {

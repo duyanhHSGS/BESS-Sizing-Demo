@@ -30,6 +30,7 @@ from baselines import run_no_bess, run_oracle, run_drl_policy
 VAL_SEED = 9999
 TRAIN_SEED0 = 20_000        # distinct stream from PPO's 10k range
 VAL_EVERY = 10
+LOG_EVERY_ITERS = 4
 
 
 def _load_csv_days(path):
@@ -194,6 +195,11 @@ def main():
         sav = (val_base - val_cost) / val_base * 100
         curve.append({"steps": steps, "val_cost_vnd": val_cost,
                       "oracle_gap_pct": gap, "saving_vs_nobess_pct": sav})
+        if (it + 1) == 1 or (it + 1) % LOG_EVERY_ITERS == 0:
+            print(f"  iter {it+1:>3}/{args.iters} | steps {steps:>7} | "
+                  f"val {val_cost/1e6:8.1f}M | saving {sav:5.1f}% | "
+                  f"gap {gap:6.1f}% | pi {losses['pi_loss']:+.3f} | "
+                  f"{steps/(time.time()-t0):,.0f} sps", flush=True)
         if val_cost < best_val:
             best_val = val_cost
             agent.meta = {"p_ref_kw": p_ref, "algo": "grepo",
@@ -203,10 +209,13 @@ def main():
             if d_run0 is not None:
                 agent.meta["d_run_init_kw"] = d_run0
             agent.save(RESULTS_DIR / f"policy_{tag}.pt")
-        print(f"  iter {it+1:>3}/{args.iters} | steps {steps:>7} | "
-              f"val {val_cost/1e6:8.1f}M | saving {sav:5.1f}% | "
-              f"gap {gap:6.1f}% | pi {losses['pi_loss']:+.3f} | "
-              f"{steps/(time.time()-t0):,.0f} sps", flush=True)
+            print(f"  best {it+1:>4} | steps {steps:>7} | "
+                  f"val {val_cost/1e6:8.1f}M | saving {sav:5.1f}% | "
+                  f"gap {gap:6.1f}% | checkpoint updated", flush=True)
+        elif (it + 1) % LOG_EVERY_ITERS == 0:
+            print(f"  iter {it+1:>3}/{args.iters} | steps {steps:>7} | "
+                  f"val {val_cost/1e6:8.1f}M | saving {sav:5.1f}% | "
+                  f"gap {gap:6.1f}% | no new best", flush=True)
 
     with open(RESULTS_DIR / f"training_curve_{tag}.csv", "w", newline="",
               encoding="utf-8") as f:

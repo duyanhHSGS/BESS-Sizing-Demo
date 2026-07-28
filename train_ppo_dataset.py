@@ -18,6 +18,7 @@ from scenario_gen import DayData, MonthData
 
 
 ROLLOUT_DAYS = 32
+LOG_EVERY_UPDATES = 4
 
 
 def load_csv_days(path: Path) -> list[DayData]:
@@ -194,6 +195,7 @@ def main() -> None:
     month_index = 0
     obs = env.reset(augment_month(train_months[0], rng))
     steps = 0
+    updates = 0
     started = time.time()
     while steps < args.steps:
         action, logp, value = agent.act(obs)
@@ -206,6 +208,7 @@ def main() -> None:
         obs = next_obs
         if not buffer.full():
             continue
+        updates += 1
         _, _, last_value = agent.act(obs)
         agent.update(buffer, 0.0 if done else last_value)
         result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
@@ -213,14 +216,26 @@ def main() -> None:
         saving = (val_base - val_cost) / val_base * 100
         gap = (val_cost - val_oracle) / val_oracle * 100
         curve.append({"steps": steps, "val_cost_vnd": val_cost, "oracle_gap_pct": gap, "saving_vs_nobess_pct": saving})
+        if updates == 1 or updates % LOG_EVERY_UPDATES == 0:
+            print(
+                f"  update {updates:>4} | step {steps:>7} | val {val_cost/1e6:8.1f}M | "
+                f"saving {saving:5.1f}% | gap {gap:6.1f}% | {steps/(time.time()-started):,.0f} sps",
+                flush=True,
+            )
         if val_cost < best_val:
             best_val = val_cost
+            print(
+                f"  best   {updates:>4} | step {steps:>7} | val {val_cost/1e6:8.1f}M | "
+                f"saving {saving:5.1f}% | gap {gap:6.1f}% | checkpoint updated",
+                flush=True,
+            )
             agent.save(RESULTS_DIR / f"policy_{tag}.pt")
-        print(
-            f"  step {steps:>7} | val {val_cost/1e6:8.1f}M | saving {saving:5.1f}% | "
-            f"gap {gap:6.1f}% | {steps/(time.time()-started):,.0f} sps",
-            flush=True,
-        )
+        elif updates % LOG_EVERY_UPDATES == 0:
+            print(
+                f"  step {steps:>7} | val {val_cost/1e6:8.1f}M | saving {saving:5.1f}% | "
+                f"gap {gap:6.1f}% | no new best",
+                flush=True,
+            )
 
     if not curve:
         result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
@@ -229,12 +244,12 @@ def main() -> None:
         gap = (val_cost - val_oracle) / val_oracle * 100
         curve.append({"steps": steps, "val_cost_vnd": val_cost, "oracle_gap_pct": gap, "saving_vs_nobess_pct": saving})
         best_val = val_cost
-        agent.save(RESULTS_DIR / f"policy_{tag}.pt")
         print(
-            f"  step {steps:>7} | val {val_cost/1e6:8.1f}M | saving {saving:5.1f}% | "
-            f"gap {gap:6.1f}% | final short-run checkpoint",
+            f"  best   {updates:>4} | step {steps:>7} | val {val_cost/1e6:8.1f}M | "
+            f"saving {saving:5.1f}% | gap {gap:6.1f}% | final short-run checkpoint",
             flush=True,
         )
+        agent.save(RESULTS_DIR / f"policy_{tag}.pt")
 
     with (RESULTS_DIR / f"training_curve_{tag}.csv").open("w", newline="", encoding="utf-8") as f:
         writer = _csv.DictWriter(
