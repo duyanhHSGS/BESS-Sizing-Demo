@@ -1,19 +1,32 @@
-main.py                 → Flask web server (the CEO of the brain 🧠💼)
-settings.py             → Default system config (the initial DNA 🧬)
-bess_env.py             → BESS simulation environment (the physical battery body 🔋)
-baselines.py            → Baseline algorithms (dummy brains for comparison 🤡)
-benchmark.py            → Benchmarking harness (the test arena 🏟️)
-common.py               → Shared utility functions (the neural glue 🧩)
-dispatch_runner.py      → Runs a full monthly dispatch simulation (the memory replay loop 🔄)
-dispatch_store.py       → Stores dispatch results (the hippocampus file cabinet 📁)
-grepo_agent.py          → GREPO reinforcement learning agent (the RL innovator 🧪)
-ppo_agent.py            → PPO reinforcement learning agent (the old-school RL brain 🧠)
-sadrbc.py               → SADRBC v13 rule-based controller (the veteran uncle 👴)
-oracle_cache.py         → Exact cache gate for month-wide Oracle results (the short-term memory 🗃️)
-oracle_lp.py            → Dynamic-dt, month-wide LP Oracle (the perfect-foresight wizard 🔮)
-training_*.py           → Training infrastructure (the school for agents 📚)
-scenario_gen.py         → Generates test scenarios (the dream machine 💭)
-problems.txt             → Problem dataset (the battlefield scenarios ⚔️)
-data/hotfix.py          → Data hotfix patches (the emergency surgery 🩹)
-templates/index.html    → Flask frontend HTML (the HQ display screen 🖥️)
-requirements.txt        → Python dependencies (the brain vitamins 💊)
+mini-faceIQ
+===========
+
+How to run
+----------
+
+1. Use Python 3.10.
+
+2. Create a virtual environment:
+
+   python -m venv .venv
+
+3. Activate the virtual environment:
+
+   Windows PowerShell:
+   .\.venv\Scripts\Activate.ps1
+
+   macOS/Linux:
+   source .venv/bin/activate
+
+4. Install dependencies:
+
+   python -m pip install --upgrade pip
+   python -m pip install -r requirements.txt
+
+5. Run tests with pytest:
+
+   python -m pytest
+
+6. Start the app:
+
+   python main.py
