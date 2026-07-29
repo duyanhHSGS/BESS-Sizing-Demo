@@ -2841,7 +2841,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         const checked = policy.runnable ? "checked" : "";
         return `<label><input type="checkbox" data-benchmark-policy="${benchmarkEscape(policy.name)}" ${checked} ${disabled}>` +
           `<span><b>${benchmarkEscape(policy.name)}</b><br><small>${benchmarkEscape(policy.algo || "unknown")} · trained E/P ` +
-          `${benchmarkEscape(policy.e_cap_kwh ?? "?")}/${benchmarkEscape(policy.p_rated_kw ?? "?")}` +
+          `${benchmarkEscape(policy.e_cap_kwh ?? "?")}/${benchmarkEscape(policy.p_rated_kw ?? "?")} · native Δt ` +
+          `${benchmarkEscape(policy.meta?.native_dt_minutes ?? "?")} min · control Δt ` +
+          `${benchmarkEscape(policy.meta?.control_dt_minutes ?? "?")} min` +
           `${policy.reason ? ` · ${benchmarkEscape(policy.reason)}` : ""}</small></span>` +
           `<span class="benchmark-danger">${warning}</span></label>`;
       }).join("") || "No local policy_*.pt checkpoints found.";

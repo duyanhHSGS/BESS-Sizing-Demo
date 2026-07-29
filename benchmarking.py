@@ -24,7 +24,16 @@ SAMPLING_FIELDS = {"native_dt_minutes", "control_dt_minutes", "native_steps_per_
 
 def context(parameters: dict[str, Any]) -> dict[str, Any]:
     csv_path = selected_data_path(parameters)
-    actual_dt_minutes = float(parameters["dt"]) * 60.0
+    shared = _shared_bess(parameters)
+    dispatch_cfg = dispatch_runner.build_dispatch_config(
+        parameters,
+        shared["capacity_kwh"],
+        shared["power_kw"],
+    )
+    # Match Dispatch Viewer semantics: detected floating-point dt is normalized
+    # through integer steps/day before checkpoint compatibility is evaluated.
+    # For example, 1.00002-minute CSV data is native 1-minute data.
+    actual_dt_minutes = dispatch_cfg.dt * 60.0
     policies = []
     for checkpoint in list_checkpoints():
         meta = checkpoint.get("meta", {})
@@ -53,7 +62,7 @@ def context(parameters: dict[str, Any]) -> dict[str, Any]:
             "sha256": _file_hash(csv_path),
             "dt_minutes": actual_dt_minutes,
         },
-        "shared_bess": _shared_bess(parameters),
+        "shared_bess": shared,
         "policies": policies,
         "oracle_ready": _oracle_ready(oracle),
         "oracle_status": (oracle or {}).get("status") or "Exact Oracle is not cached.",
