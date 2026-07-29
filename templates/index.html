@@ -3144,7 +3144,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       if (!dayA || !dayB) return;
       benchmarkingDom.versusDelta.textContent = `Day ${dayIndex}: ${a.label} owner-day operating cost ${formatVnd(dayA.total_operating_owner_vnd)} vs ${b.label} ${formatVnd(dayB.total_operating_owner_vnd)}. Full monthly demand belongs to the peak-setting owner day; prorating is only a comparison view.`;
       const { ctx, width, height } = prepareBenchmarkCanvas("benchmarking-versus-chart");
-      const pad = 34; const series = [dayA.grid || [], dayB.grid || []];
+      const pad = 34; const series = [dayA.rolling_grid || [], dayB.rolling_grid || []];
       const max = Math.max(...series.flat(), 1);
       series.forEach((values, seriesIndex) => {
         ctx.strokeStyle = seriesIndex ? "#dc2626" : "#4f46e5"; ctx.lineWidth = 2; ctx.beginPath();
@@ -3156,7 +3156,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       });
       ctx.fillStyle = "#4f46e5"; ctx.fillText(a.label, pad, 14);
       ctx.fillStyle = "#dc2626"; ctx.fillText(b.label, pad + 170, 14);
-      ctx.fillStyle = "#64748b"; ctx.fillText("Grid import kW across selected detective day", pad, height - 8);
+      ctx.fillStyle = "#64748b"; ctx.fillText("30-minute rolling grid import kW across selected detective day", pad, height - 8);
     }
 
     document.getElementById("btn-benchmarking-run").addEventListener("click", startBenchmarkTournament);
