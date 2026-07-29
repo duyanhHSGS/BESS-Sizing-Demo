@@ -2650,7 +2650,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         const ep = `${policy.e_cap_kwh ?? "?"}/${policy.p_rated_kw ?? "?"}`;
         const run = policy.latest_run ? new Date(policy.latest_run.created * 1000).toLocaleString() : "None";
         return `<tr><td><input type="checkbox" data-dispatch-policy="${policy.name}" ${selected}></td>` +
-          `<td>${policy.name}</td><td>${policy.algo || "unknown"}</td><td>${ep}</td>` +
+          `<td>${policy.display_name || policy.name}</td><td>${policy.algo || "unknown"}</td><td>${ep}</td>` +
           `<td>${run}</td><td>${policy.warning || policy.error || ""}</td></tr>`;
       }).join("");
       dispatchPolicyTableBody.querySelectorAll("[data-dispatch-policy]").forEach((checkbox) => {

@@ -21,6 +21,7 @@ from benchmark import (
     selected_data_path,
 )
 from training_checkpoints import CHECKPOINT_DIR, _load_checkpoint_meta
+from baselines import run_sadrbc
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -226,6 +227,27 @@ def run_policies(
     results = {}
     warnings = []
     for policy_name in policy_names:
+        if policy_name == "sadrbc_v13":
+            cfg = build_dispatch_config(
+                parameters,
+                _to_float(parameters.get("battery_capacity_kWh"), 0.0),
+                _to_float(parameters.get("battery_power_limit_kW"), 0.0),
+            )
+            rollout = run_sadrbc(month, cfg)
+            days = policy_result_to_days(month, rollout, cfg, parameters)
+            results[policy_name] = {
+                "policy": policy_name,
+                "algo": "sadrbc",
+                "meta": {
+                    "e_cap_kwh": cfg.E_cap,
+                    "p_rated_kw": cfg.P_rated_nominal,
+                    "controller": "SADRBC v13",
+                },
+                "warnings": [],
+                "days": days,
+                "kpi": score_month(rollout["p_grid_days"], cfg, month.days),
+            }
+            continue
         try:
             result = run_policy_dispatch(policy_name, parameters, checkpoint_dir, month)
         except DispatchRunWarning as exc:

@@ -138,7 +138,23 @@ def training_job_events(job_id):
 @app.route("/api/dispatch/policies", methods=["GET"])
 def dispatch_policies():
     latest = dispatch_store.latest_runs_by_policy()
-    rows = []
+    sadrbc_run = latest.get("sadrbc_v13")
+    rows = [
+        {
+            "name": "sadrbc_v13",
+            "display_name": "SADRBC v13",
+            "algo": "rule-based",
+            "e_cap_kwh": _to_float(PARAMETERS.get("battery_capacity_kWh"), 0.0),
+            "p_rated_kw": _to_float(PARAMETERS.get("battery_power_limit_kW"), 0.0),
+            "billing_mode": PARAMETERS.get("billing_mode"),
+            "meta": {"controller": "SADRBC v13", "uses_current_sizing": True},
+            "error": None,
+            "latest_run": sadrbc_run,
+            "latest_status": "saved" if sadrbc_run else "no saved trace",
+            "has_trace": bool(sadrbc_run and dispatch_store.get_traces(sadrbc_run["id"])),
+            "warning": None if sadrbc_run else "No saved SADRBC v13 trace exists yet.",
+        }
+    ]
     for checkpoint in list_checkpoints():
         run = latest.get(checkpoint["name"])
         rows.append(
@@ -191,7 +207,7 @@ def dispatch_run():
     if not isinstance(policy_names, list) or not policy_names:
         return jsonify({"error": "Select at least one policy."}), 422
 
-    known = {checkpoint["name"] for checkpoint in list_checkpoints()}
+    known = {"sadrbc_v13", *{checkpoint["name"] for checkpoint in list_checkpoints()}}
     unknown = [name for name in policy_names if name not in known]
     if unknown:
         return jsonify({"error": f"Unknown local policy: {', '.join(unknown)}"}), 422
