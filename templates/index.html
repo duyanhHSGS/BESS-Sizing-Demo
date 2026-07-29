@@ -772,6 +772,28 @@
         display: none;
       }
     }
+    .benchmark-hero { background: linear-gradient(135deg, #111827, #312e81 55%, #7c2d12); color: #fff; }
+    .benchmark-hero h2 { color: #fff; margin-bottom: 6px; }
+    .benchmark-snapshot { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+    .benchmark-badge { border-radius: 999px; padding: 6px 10px; background: rgba(255,255,255,.14); font-size: 12px; }
+    .benchmark-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 14px; }
+    .benchmark-champions { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin: 12px 0; }
+    .benchmark-champion { padding: 12px; border: 1px solid #d8dee9; border-radius: 12px; background: linear-gradient(180deg, #fff, #f8fafc); }
+    .benchmark-champion span { display: block; color: #64748b; font-size: 12px; }
+    .benchmark-champion b { display: block; margin-top: 4px; overflow-wrap: anywhere; }
+    .benchmark-chart { width: 100%; height: 260px; border-radius: 10px; background: #fff; }
+    .benchmark-policy-list { max-height: 260px; overflow: auto; }
+    .benchmark-policy-list label { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; padding: 7px; border-bottom: 1px solid #edf0f5; }
+    .benchmark-policy-list small { color: #64748b; }
+    .benchmark-danger { color: #b42318; font-weight: 800; }
+    .benchmark-cache-warning { border: 2px solid #f59e0b; background: #fffbeb; color: #78350f; padding: 10px; border-radius: 10px; }
+    .benchmark-progress-track { height: 10px; background: #e5e7eb; border-radius: 999px; overflow: hidden; }
+    .benchmark-progress-bar { height: 100%; width: 0; background: linear-gradient(90deg, #2563eb, #7c3aed, #f97316); transition: width .2s ease; }
+    .benchmark-detectives { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+    .benchmark-detective { text-align: left; border: 1px solid #d8dee9; background: #fff; border-radius: 10px; padding: 10px; cursor: pointer; }
+    .benchmark-detective:hover { border-color: #7c3aed; transform: translateY(-1px); }
+    .benchmark-sort { cursor: pointer; user-select: none; }
+    .benchmark-sort:hover { color: #4f46e5; }
   </style>
 </head>
 
@@ -780,6 +802,7 @@
     <nav class="tabs" aria-label="Sizing Demo sections">
       <button class="tab-button active" type="button" data-tab-target="sizing-demo">Sizing Demo</button>
       <button class="tab-button" type="button" data-tab-target="training-lab">Training Lab</button>
+      <button class="tab-button" type="button" data-tab-target="benchmarking">Benchmarking</button>
       <button class="tab-button" type="button" data-tab-target="dispatch-viewer">Dispatch Viewer</button>
     </nav>
 
@@ -1380,6 +1403,107 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         <div id="training-report-body" class="info">Select a local checkpoint to reveal its training brain scan. 🧠⚡</div>
         <div id="training-report-warnings" class="warning-panel"></div>
       </section>
+    </section>
+
+    <section id="tab-benchmarking" class="tab-panel">
+      <section class="card benchmark-hero">
+        <div class="section-head">
+          <div>
+            <h2>Policy Tournament Arena 🏟️🔋</h2>
+            <div>Every selected .pt brain gets the same battery body and fights no-BESS, SADRBC v13, and Oracle Final Boss.</div>
+          </div>
+          <div class="row">
+            <button id="btn-benchmarking-run" class="primary" type="button">Recompute fresh</button>
+            <button id="btn-benchmarking-cancel" type="button" disabled>Cancel tournament</button>
+          </div>
+        </div>
+        <div id="benchmarking-snapshot" class="benchmark-snapshot"></div>
+        <div id="benchmarking-oracle-gate" class="warning-panel" style="display:none"></div>
+        <div id="benchmarking-cache" style="display:none"></div>
+        <div id="benchmarking-progress" style="display:none">
+          <div class="benchmark-progress-track"><div id="benchmarking-progress-bar" class="benchmark-progress-bar"></div></div>
+          <div id="benchmarking-progress-text" class="info"></div>
+        </div>
+      </section>
+
+      <div class="benchmark-grid">
+        <section class="card">
+          <div class="section-head">
+            <h2>.pt Fighters</h2>
+            <div class="row">
+              <button id="btn-benchmarking-select-all" class="tiny" type="button">Select all runnable</button>
+              <button id="btn-benchmarking-clear" class="tiny" type="button">Clear all</button>
+            </div>
+          </div>
+          <div id="benchmarking-policy-list" class="benchmark-policy-list">Loading local brains...</div>
+        </section>
+        <section class="card">
+          <div class="section-head">
+            <h2>Run history</h2>
+            <div class="row">
+              <a id="benchmarking-export-csv" class="button tiny" href="#" style="display:none">Export CSV</a>
+              <a id="benchmarking-export-json" class="button tiny" href="#" style="display:none">Export JSON</a>
+            </div>
+          </div>
+          <div id="benchmarking-history" class="info">No completed tournament loaded.</div>
+        </section>
+      </div>
+
+      <section class="card" id="benchmarking-results" style="display:none">
+        <div class="section-head">
+          <div>
+            <h2>Tournament scoreboard</h2>
+            <div id="benchmarking-result-note" class="info"></div>
+          </div>
+          <label>Score scope
+            <select id="benchmarking-scope"><option value="all">Entire CSV</option></select>
+          </label>
+        </div>
+        <div id="benchmarking-champions" class="benchmark-champions"></div>
+        <div class="sizing-table-wrap">
+          <table class="sizing-table">
+            <thead><tr>
+              <th class="benchmark-sort" data-benchmark-sort="label">Fighter</th>
+              <th>Type</th>
+              <th class="benchmark-sort" data-benchmark-sort="total_operating_cost_vnd">Total incl. wear</th>
+              <th class="benchmark-sort" data-benchmark-sort="energy_cost_vnd">Energy</th>
+              <th class="benchmark-sort" data-benchmark-sort="demand_cost_vnd">Demand</th>
+              <th class="benchmark-sort" data-benchmark-sort="wear_cost_vnd">Wear</th>
+              <th class="benchmark-sort" data-benchmark-sort="peak_kw">Highest 30-min peak</th>
+              <th>Oracle relation</th>
+              <th>Safety</th>
+            </tr></thead>
+            <tbody id="benchmarking-leaderboard"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <div id="benchmarking-visuals" class="benchmark-grid" style="display:none">
+        <section class="card"><h2>Bill stack: energy + demand + wear</h2><canvas id="benchmarking-cost-chart" class="benchmark-chart"></canvas></section>
+        <section class="card"><h2>Highest 30-minute peak</h2><canvas id="benchmarking-peak-chart" class="benchmark-chart"></canvas></section>
+        <section class="card"><h2>Savings ladder in VND</h2><canvas id="benchmarking-saving-chart" class="benchmark-chart"></canvas></section>
+        <section class="card"><h2>Cost vs peak battle map</h2><canvas id="benchmarking-scatter-chart" class="benchmark-chart"></canvas></section>
+      </div>
+
+      <div id="benchmarking-detective-area" class="benchmark-grid" style="display:none">
+        <section class="card">
+          <div class="section-head">
+            <h2>Worst-Days Detective 🕵️</h2>
+            <label>Investigate <select id="benchmarking-detective-fighter"></select></label>
+          </div>
+          <div id="benchmarking-detectives" class="benchmark-detectives"></div>
+        </section>
+        <section class="card">
+          <div class="section-head">
+            <h2>Head-to-head</h2>
+            <div class="row">
+              <select id="benchmarking-versus-a"></select><b>VS</b><select id="benchmarking-versus-b"></select>
+            </div>
+          </div>
+          <div id="benchmarking-versus-delta" class="info"></div>
+          <canvas id="benchmarking-versus-chart" class="benchmark-chart"></canvas>
+        </section>
+      </div>
     </section>
 
     <section id="tab-dispatch-viewer" class="tab-panel">
@@ -2617,6 +2741,443 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       drawDispatchViewer();
     }
 
+    const benchmarkingState = {
+      loaded: false,
+      context: null,
+      result: null,
+      jobId: null,
+      pollTimer: null,
+      sortKey: "total_operating_cost_vnd",
+      sortDirection: 1,
+      detectiveDay: null,
+    };
+
+    const benchmarkingDom = {
+      snapshot: document.getElementById("benchmarking-snapshot"),
+      oracleGate: document.getElementById("benchmarking-oracle-gate"),
+      cache: document.getElementById("benchmarking-cache"),
+      progress: document.getElementById("benchmarking-progress"),
+      progressBar: document.getElementById("benchmarking-progress-bar"),
+      progressText: document.getElementById("benchmarking-progress-text"),
+      policyList: document.getElementById("benchmarking-policy-list"),
+      history: document.getElementById("benchmarking-history"),
+      results: document.getElementById("benchmarking-results"),
+      resultNote: document.getElementById("benchmarking-result-note"),
+      scope: document.getElementById("benchmarking-scope"),
+      champions: document.getElementById("benchmarking-champions"),
+      leaderboard: document.getElementById("benchmarking-leaderboard"),
+      visuals: document.getElementById("benchmarking-visuals"),
+      detectiveArea: document.getElementById("benchmarking-detective-area"),
+      detectiveFighter: document.getElementById("benchmarking-detective-fighter"),
+      detectives: document.getElementById("benchmarking-detectives"),
+      versusA: document.getElementById("benchmarking-versus-a"),
+      versusB: document.getElementById("benchmarking-versus-b"),
+      versusDelta: document.getElementById("benchmarking-versus-delta"),
+      exportCsv: document.getElementById("benchmarking-export-csv"),
+      exportJson: document.getElementById("benchmarking-export-json"),
+    };
+
+    function benchmarkEscape(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      }[character]));
+    }
+
+    async function benchmarkingApi(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `Benchmarking request failed (${response.status})`);
+      return payload;
+    }
+
+    function selectedBenchmarkPolicies() {
+      return Array.from(benchmarkingDom.policyList.querySelectorAll("input[data-benchmark-policy]:checked"))
+        .map((input) => input.dataset.benchmarkPolicy);
+    }
+
+    async function refreshBenchmarkingTab(force = false) {
+      if (benchmarkingState.loaded && !force) {
+        renderBenchmarkCharts();
+        return;
+      }
+      benchmarkingDom.policyList.textContent = "Loading local .pt brains...";
+      try {
+        const context = await benchmarkingApi("/api/benchmarking/context");
+        benchmarkingState.context = context;
+        benchmarkingState.loaded = true;
+        renderBenchmarkContext(context);
+        await checkBenchmarkCache();
+      } catch (error) {
+        benchmarkingDom.policyList.innerHTML = `<div class="benchmark-danger">${benchmarkEscape(error.message)}</div>`;
+      }
+    }
+
+    function renderBenchmarkContext(context) {
+      const dataset = context.dataset || {};
+      const bess = context.shared_bess || {};
+      benchmarkingDom.snapshot.innerHTML = [
+        `CSV: ${dataset.filename || "?"}`,
+        `Data hash: ${(dataset.sha256 || "").slice(0, 12)}`,
+        `Δt: ${formatNumber(dataset.dt_minutes, 2)} min`,
+        `Shared body: ${formatNumber(bess.capacity_kwh, 0)} kWh / ${formatNumber(bess.power_kw, 1)} kW`,
+        `Wear: ${formatVnd(bess.wear_vnd_per_kwh)} / kWh throughput`,
+      ].map((label) => `<span class="benchmark-badge">${benchmarkEscape(label)}</span>`).join("");
+
+      benchmarkingDom.oracleGate.style.display = context.oracle_ready ? "none" : "block";
+      benchmarkingDom.oracleGate.innerHTML = context.oracle_ready ? "" :
+        `<b>Oracle Final Boss is missing.</b> ${benchmarkEscape(context.oracle_status)} ` +
+        `<button type="button" class="tiny" id="benchmarking-go-sizing">Go calculate it in Sizing Demo</button>`;
+      document.getElementById("benchmarking-go-sizing")?.addEventListener("click", () => {
+        document.querySelector('[data-tab-target="sizing-demo"]')?.click();
+      });
+      document.getElementById("btn-benchmarking-run").disabled = !context.oracle_ready;
+
+      benchmarkingDom.policyList.innerHTML = (context.policies || []).map((policy) => {
+        const warning = policy.body_mismatch ? "TRAINED FOR ANOTHER BODY" : "";
+        const disabled = policy.runnable ? "" : "disabled";
+        const checked = policy.runnable ? "checked" : "";
+        return `<label><input type="checkbox" data-benchmark-policy="${benchmarkEscape(policy.name)}" ${checked} ${disabled}>` +
+          `<span><b>${benchmarkEscape(policy.name)}</b><br><small>${benchmarkEscape(policy.algo || "unknown")} · trained E/P ` +
+          `${benchmarkEscape(policy.e_cap_kwh ?? "?")}/${benchmarkEscape(policy.p_rated_kw ?? "?")}` +
+          `${policy.reason ? ` · ${benchmarkEscape(policy.reason)}` : ""}</small></span>` +
+          `<span class="benchmark-danger">${warning}</span></label>`;
+      }).join("") || "No local policy_*.pt checkpoints found.";
+      benchmarkingDom.policyList.querySelectorAll("input").forEach((input) => input.addEventListener("change", checkBenchmarkCache));
+      renderBenchmarkHistory(context.history || []);
+    }
+
+    async function checkBenchmarkCache() {
+      const policies = selectedBenchmarkPolicies();
+      benchmarkingDom.cache.style.display = "none";
+      if (!policies.length) return;
+      try {
+        const payload = await benchmarkingApi("/api/benchmarking/cache", {
+          method: "POST", body: JSON.stringify({ policies }),
+        });
+        if (!payload.cached) return;
+        const cached = payload.cached;
+        benchmarkingDom.cache.style.display = "block";
+        benchmarkingDom.cache.innerHTML = `<div class="benchmark-cache-warning"><b>CACHED TOURNAMENT</b> · ` +
+          `${new Date(cached.created * 1000).toLocaleString()} · fingerprint ${benchmarkEscape(cached.fingerprint.slice(0, 12))}. ` +
+          `Inspect it now, but recompute fresh before making a final decision.</div>`;
+        await loadBenchmarkResult(cached.id);
+      } catch (error) {
+        benchmarkingDom.cache.style.display = "block";
+        benchmarkingDom.cache.innerHTML = `<div class="benchmark-danger">${benchmarkEscape(error.message)}</div>`;
+      }
+    }
+
+    function renderBenchmarkHistory(runs) {
+      benchmarkingDom.history.innerHTML = runs.length ? runs.map((run) => (
+        `<button type="button" class="legend-item" data-benchmark-run="${run.id}">` +
+        `<b>${benchmarkEscape(run.dataset || "dataset")}</b> · ${new Date(run.created * 1000).toLocaleString()} · ` +
+        `${benchmarkEscape(run.fingerprint.slice(0, 10))}</button>`
+      )).join("") : "No completed tournaments saved yet.";
+      benchmarkingDom.history.querySelectorAll("[data-benchmark-run]").forEach((button) => {
+        button.addEventListener("click", () => loadBenchmarkResult(button.dataset.benchmarkRun));
+      });
+    }
+
+    async function startBenchmarkTournament() {
+      const policies = selectedBenchmarkPolicies();
+      if (!policies.length) {
+        benchmarkingDom.progress.style.display = "block";
+        benchmarkingDom.progressText.textContent = "Select at least one runnable .pt policy.";
+        return;
+      }
+      document.getElementById("btn-benchmarking-run").disabled = true;
+      document.getElementById("btn-benchmarking-cancel").disabled = false;
+      benchmarkingDom.progress.style.display = "block";
+      benchmarkingDom.progressBar.style.width = "0%";
+      try {
+        const job = await benchmarkingApi("/api/benchmarking/jobs", {
+          method: "POST", body: JSON.stringify({ policies }),
+        });
+        benchmarkingState.jobId = job.id;
+        pollBenchmarkJob();
+      } catch (error) {
+        finishBenchmarkJob();
+        benchmarkingDom.progressText.innerHTML = `<span class="benchmark-danger">${benchmarkEscape(error.message)}</span>`;
+      }
+    }
+
+    async function pollBenchmarkJob() {
+      if (!benchmarkingState.jobId) return;
+      try {
+        const job = await benchmarkingApi(`/api/benchmarking/jobs/${benchmarkingState.jobId}`);
+        const percent = job.total ? Math.min(100, job.completed / job.total * 100) : 2;
+        benchmarkingDom.progressBar.style.width = `${percent}%`;
+        benchmarkingDom.progressText.textContent = `${job.stage}${job.fighter ? ` — ${job.fighter}` : ""} · ${job.completed}/${job.total || "?"} · ${job.elapsed_seconds}s`;
+        if (job.status === "complete") {
+          finishBenchmarkJob();
+          await loadBenchmarkResult(job.run_id);
+          await refreshBenchmarkingTab(true);
+          return;
+        }
+        if (job.status === "failed" || job.status === "cancelled") {
+          finishBenchmarkJob();
+          benchmarkingDom.progressText.innerHTML = `<span class="benchmark-danger">${benchmarkEscape(job.error || job.stage)}</span>`;
+          return;
+        }
+        benchmarkingState.pollTimer = setTimeout(pollBenchmarkJob, 800);
+      } catch (error) {
+        finishBenchmarkJob();
+        benchmarkingDom.progressText.innerHTML = `<span class="benchmark-danger">${benchmarkEscape(error.message)}</span>`;
+      }
+    }
+
+    function finishBenchmarkJob() {
+      if (benchmarkingState.pollTimer) clearTimeout(benchmarkingState.pollTimer);
+      benchmarkingState.pollTimer = null;
+      benchmarkingState.jobId = null;
+      document.getElementById("btn-benchmarking-run").disabled = !(benchmarkingState.context?.oracle_ready);
+      document.getElementById("btn-benchmarking-cancel").disabled = true;
+    }
+
+    async function cancelBenchmarkTournament() {
+      if (!benchmarkingState.jobId) return;
+      try {
+        await benchmarkingApi(`/api/benchmarking/jobs/${benchmarkingState.jobId}/cancel`, { method: "POST" });
+        benchmarkingDom.progressText.textContent = "Cancellation requested; the current fighter will stop at the next safe boundary.";
+      } catch (error) {
+        benchmarkingDom.progressText.textContent = error.message;
+      }
+    }
+
+    async function loadBenchmarkResult(runId) {
+      try {
+        const result = await benchmarkingApi(`/api/benchmarking/runs/${runId}`);
+        benchmarkingState.result = result;
+        renderBenchmarkResult();
+      } catch (error) {
+        benchmarkingDom.resultNote.innerHTML = `<span class="benchmark-danger">${benchmarkEscape(error.message)}</span>`;
+      }
+    }
+
+    function renderBenchmarkResult() {
+      const result = benchmarkingState.result;
+      if (!result) return;
+      benchmarkingDom.results.style.display = "block";
+      benchmarkingDom.visuals.style.display = "grid";
+      benchmarkingDom.detectiveArea.style.display = "grid";
+      benchmarkingDom.resultNote.textContent = `Frozen ${new Date(result.created * 1000).toLocaleString()} · ${result.snapshot.dataset.filename} · fingerprint ${result.fingerprint.slice(0, 12)} · wear is an estimate, not a utility charge.`;
+      benchmarkingDom.exportCsv.style.display = "inline-block";
+      benchmarkingDom.exportJson.style.display = "inline-block";
+      benchmarkingDom.exportCsv.href = `/api/benchmarking/runs/${result.id}/export.csv`;
+      benchmarkingDom.exportJson.href = `/api/benchmarking/runs/${result.id}/export.json`;
+
+      const blocks = result.contestants?.[0]?.summary?.blocks || [];
+      benchmarkingDom.scope.innerHTML = `<option value="all">Entire CSV</option>` + blocks.map((block) =>
+        `<option value="${block.start_day}">Days ${block.start_day}–${block.end_day}</option>`
+      ).join("");
+      renderBenchmarkChampions();
+      fillBenchmarkFighterSelects();
+      renderBenchmarkScope();
+    }
+
+    function scopedBenchmarkRows() {
+      const result = benchmarkingState.result;
+      const scope = benchmarkingDom.scope.value;
+      const fullById = new Map(result.leaderboard.map((row) => [row.id, row]));
+      if (scope === "all") return result.contestants.map((contestant) => ({ ...fullById.get(contestant.id) }));
+      const start = Number(scope);
+      const base = result.contestants.find((row) => row.id === "no_bess")?.summary.blocks.find((block) => block.start_day === start);
+      const oracle = result.contestants.find((row) => row.id === "oracle")?.summary.blocks.find((block) => block.start_day === start);
+      return result.contestants.map((contestant) => {
+        const block = contestant.summary.blocks.find((candidate) => candidate.start_day === start) || {};
+        const total = block.total_operating_cost_vnd ?? 0;
+        let relation = "Between no-BESS and Oracle";
+        if (total >= (base?.total_operating_cost_vnd ?? 0)) relation = "Worse than no-BESS";
+        if (total < (oracle?.total_operating_cost_vnd ?? 0)) relation = "Beats Oracle — investigate accounting";
+        return { ...fullById.get(contestant.id), ...block, oracle_relation: relation };
+      });
+    }
+
+    function renderBenchmarkChampions() {
+      const result = benchmarkingState.result;
+      const labels = {
+        cheapest: "💰 Cheapest total", lowest_peak: "🪓 Lowest peak",
+        most_utility_saving: "🚀 Most utility saving", closest_oracle: "🧙 Closest to Oracle",
+        lowest_wear: "🩹 Lowest wear", safest: "🛡️ Safest",
+      };
+      const names = new Map(result.leaderboard.map((row) => [row.id, row.label]));
+      benchmarkingDom.champions.innerHTML = Object.entries(labels).map(([key, label]) =>
+        `<div class="benchmark-champion"><span>${label}</span><b>${benchmarkEscape(names.get(result.champions[key]) || "Unavailable")}</b></div>`
+      ).join("");
+    }
+
+    function renderBenchmarkScope() {
+      const rows = scopedBenchmarkRows();
+      const key = benchmarkingState.sortKey;
+      const direction = benchmarkingState.sortDirection;
+      rows.sort((a, b) => {
+        const av = a[key]; const bv = b[key];
+        if (typeof av === "string" || typeof bv === "string") return String(av).localeCompare(String(bv)) * direction;
+        return ((Number(av) || 0) - (Number(bv) || 0)) * direction || a.id.localeCompare(b.id);
+      });
+      benchmarkingDom.leaderboard.innerHTML = rows.map((row) => {
+        const safety = (row.zero_export_violation_days || 0) + (row.soc_violation_days || 0);
+        return `<tr><td><b>${benchmarkEscape(row.label)}</b>${row.body_mismatch ? `<div class="benchmark-danger">TRAINED FOR ANOTHER BODY</div>` : ""}</td>` +
+          `<td>${benchmarkEscape(row.type)}</td><td>${formatVnd(row.total_operating_cost_vnd)}</td>` +
+          `<td>${formatVnd(row.energy_cost_vnd)}</td><td>${formatVnd(row.demand_cost_vnd)}</td>` +
+          `<td>${formatVnd(row.wear_cost_vnd)}</td><td>${formatNumber(row.peak_kw, 1)} kW</td>` +
+          `<td>${benchmarkEscape(row.oracle_relation)}</td><td>${safety ? `${safety} violation day(s)` : "Clean"}</td></tr>`;
+      }).join("");
+      renderBenchmarkCharts(rows);
+    }
+
+    function prepareBenchmarkCanvas(id) {
+      const canvas = document.getElementById(id);
+      const width = Math.max(320, canvas.clientWidth || 600);
+      const height = 260;
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = width * ratio; canvas.height = height * ratio;
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+      ctx.font = "11px system-ui";
+      return { canvas, ctx, width, height };
+    }
+
+    function benchmarkColor(type, alpha = 1) {
+      const rgb = type === "policy" ? "79,70,229" : type === "oracle" ? "220,38,38" : type === "rule" ? "5,150,105" : "100,116,139";
+      return `rgba(${rgb},${alpha})`;
+    }
+
+    function drawBenchmarkBars(id, rows, valueKey, stacked = false) {
+      const { ctx, width, height } = prepareBenchmarkCanvas(id);
+      const pad = { left: 58, right: 12, top: 12, bottom: 66 };
+      const values = rows.map((row) => stacked
+        ? (row.energy_cost_vnd || 0) + (row.demand_cost_vnd || 0) + (row.wear_cost_vnd || 0)
+        : Number(row[valueKey] || 0));
+      const max = Math.max(...values, 1);
+      const barWidth = Math.max(7, (width - pad.left - pad.right) / Math.max(rows.length, 1) * .68);
+      rows.forEach((row, index) => {
+        const center = pad.left + (index + .5) * (width - pad.left - pad.right) / rows.length;
+        let y = height - pad.bottom;
+        const parts = stacked
+          ? [[row.energy_cost_vnd, "#2563eb"], [row.demand_cost_vnd, "#f97316"], [row.wear_cost_vnd, "#a855f7"]]
+          : [[row[valueKey], benchmarkColor(row.type)]];
+        parts.forEach(([value, color]) => {
+          const h = Number(value || 0) / max * (height - pad.top - pad.bottom);
+          ctx.fillStyle = color; ctx.fillRect(center - barWidth / 2, y - h, barWidth, h); y -= h;
+        });
+        ctx.save(); ctx.translate(center + 3, height - pad.bottom + 5); ctx.rotate(Math.PI / 4);
+        ctx.fillStyle = "#334155"; ctx.fillText(String(row.label).slice(0, 22), 0, 0); ctx.restore();
+      });
+      ctx.fillStyle = "#64748b"; ctx.fillText(formatNumber(max, max > 100000 ? 0 : 1), 4, 16);
+    }
+
+    function drawBenchmarkScatter(rows) {
+      const { ctx, width, height } = prepareBenchmarkCanvas("benchmarking-scatter-chart");
+      const pad = 42;
+      const maxX = Math.max(...rows.map((row) => row.peak_kw || 0), 1);
+      const costs = rows.map((row) => row.total_operating_cost_vnd || 0);
+      const minY = Math.min(...costs); const maxY = Math.max(...costs, minY + 1);
+      rows.forEach((row) => {
+        const x = pad + (row.peak_kw || 0) / maxX * (width - pad * 2);
+        const y = height - pad - ((row.total_operating_cost_vnd || 0) - minY) / (maxY - minY) * (height - pad * 2);
+        const radius = Math.max(5, Math.min(16, 5 + Math.sqrt(Math.max(0, row.wear_cost_vnd || 0)) / 180));
+        ctx.fillStyle = benchmarkColor(row.type, .75); ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#334155"; ctx.fillText(String(row.label).slice(0, 14), x + radius + 2, y + 3);
+      });
+      ctx.fillStyle = "#64748b"; ctx.fillText("lower peak →", pad, height - 8); ctx.fillText("lower cost ↑", 4, 14);
+    }
+
+    function renderBenchmarkCharts(rows = scopedBenchmarkRows()) {
+      if (!benchmarkingState.result || !document.getElementById("tab-benchmarking").classList.contains("active")) return;
+      drawBenchmarkBars("benchmarking-cost-chart", rows, "total_operating_cost_vnd", true);
+      drawBenchmarkBars("benchmarking-peak-chart", rows, "peak_kw", false);
+      const noBess = rows.find((row) => row.id === "no_bess")?.total_operating_cost_vnd || 0;
+      drawBenchmarkBars("benchmarking-saving-chart", rows.map((row) => ({ ...row, saving: noBess - row.total_operating_cost_vnd })), "saving", false);
+      drawBenchmarkScatter(rows);
+      drawBenchmarkVersus();
+    }
+
+    function fillBenchmarkFighterSelects() {
+      const contestants = benchmarkingState.result.contestants || [];
+      const options = contestants.map((row) => `<option value="${benchmarkEscape(row.id)}">${benchmarkEscape(row.label)}</option>`).join("");
+      benchmarkingDom.detectiveFighter.innerHTML = options;
+      benchmarkingDom.versusA.innerHTML = options;
+      benchmarkingDom.versusB.innerHTML = options;
+      const firstPolicy = contestants.find((row) => row.type === "policy")?.id || contestants[0]?.id;
+      benchmarkingDom.detectiveFighter.value = firstPolicy;
+      benchmarkingDom.versusA.value = firstPolicy;
+      benchmarkingDom.versusB.value = contestants.find((row) => row.id === "oracle")?.id || contestants[1]?.id;
+      renderBenchmarkDetectives();
+    }
+
+    function renderBenchmarkDetectives() {
+      const contestant = benchmarkingState.result?.contestants.find((row) => row.id === benchmarkingDom.detectiveFighter.value);
+      if (!contestant) return;
+      const cases = [
+        ["Peak-setting day", contestant.detectives.peak_day],
+        ["Most expensive owner day", contestant.detectives.most_expensive_day],
+        ["Largest Oracle regret", contestant.detectives.largest_oracle_regret_day],
+        ["Highest wear day", contestant.detectives.highest_wear_day],
+      ];
+      const safety = contestant.detectives.safety_violation_days || [];
+      if (safety.length) cases.push(["First safety violation", safety[0]]);
+      benchmarkingDom.detectives.innerHTML = cases.map(([label, day]) =>
+        `<button type="button" class="benchmark-detective" data-benchmark-day="${day}"><b>${benchmarkEscape(label)}</b><br>Day ${day}</button>`
+      ).join("");
+      benchmarkingDom.detectives.querySelectorAll("[data-benchmark-day]").forEach((button) => {
+        button.addEventListener("click", () => { benchmarkingState.detectiveDay = Number(button.dataset.benchmarkDay); drawBenchmarkVersus(); });
+      });
+      benchmarkingState.detectiveDay = cases[0]?.[1] || null;
+      drawBenchmarkVersus();
+    }
+
+    function drawBenchmarkVersus() {
+      if (!benchmarkingState.result) return;
+      const a = benchmarkingState.result.contestants.find((row) => row.id === benchmarkingDom.versusA.value);
+      const b = benchmarkingState.result.contestants.find((row) => row.id === benchmarkingDom.versusB.value);
+      if (!a || !b) return;
+      const dayIndex = benchmarkingState.detectiveDay || a.detectives?.peak_day || a.days[0]?.day_index;
+      const dayA = a.days.find((day) => day.day_index === dayIndex);
+      const dayB = b.days.find((day) => day.day_index === dayIndex);
+      if (!dayA || !dayB) return;
+      benchmarkingDom.versusDelta.textContent = `Day ${dayIndex}: ${a.label} owner-day operating cost ${formatVnd(dayA.total_operating_owner_vnd)} vs ${b.label} ${formatVnd(dayB.total_operating_owner_vnd)}. Full monthly demand belongs to the peak-setting owner day; prorating is only a comparison view.`;
+      const { ctx, width, height } = prepareBenchmarkCanvas("benchmarking-versus-chart");
+      const pad = 34; const series = [dayA.grid || [], dayB.grid || []];
+      const max = Math.max(...series.flat(), 1);
+      series.forEach((values, seriesIndex) => {
+        ctx.strokeStyle = seriesIndex ? "#dc2626" : "#4f46e5"; ctx.lineWidth = 2; ctx.beginPath();
+        values.forEach((value, index) => {
+          const x = pad + index / Math.max(1, values.length - 1) * (width - pad * 2);
+          const y = height - pad - value / max * (height - pad * 2);
+          if (index) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+        }); ctx.stroke();
+      });
+      ctx.fillStyle = "#4f46e5"; ctx.fillText(a.label, pad, 14);
+      ctx.fillStyle = "#dc2626"; ctx.fillText(b.label, pad + 170, 14);
+      ctx.fillStyle = "#64748b"; ctx.fillText("Grid import kW across selected detective day", pad, height - 8);
+    }
+
+    document.getElementById("btn-benchmarking-run").addEventListener("click", startBenchmarkTournament);
+    document.getElementById("btn-benchmarking-cancel").addEventListener("click", cancelBenchmarkTournament);
+    document.getElementById("btn-benchmarking-select-all").addEventListener("click", () => {
+      benchmarkingDom.policyList.querySelectorAll("input:not(:disabled)").forEach((input) => { input.checked = true; });
+      checkBenchmarkCache();
+    });
+    document.getElementById("btn-benchmarking-clear").addEventListener("click", () => {
+      benchmarkingDom.policyList.querySelectorAll("input").forEach((input) => { input.checked = false; });
+      benchmarkingDom.cache.style.display = "none";
+    });
+    benchmarkingDom.scope.addEventListener("change", renderBenchmarkScope);
+    benchmarkingDom.detectiveFighter.addEventListener("change", renderBenchmarkDetectives);
+    benchmarkingDom.versusA.addEventListener("change", drawBenchmarkVersus);
+    benchmarkingDom.versusB.addEventListener("change", drawBenchmarkVersus);
+    document.querySelectorAll("[data-benchmark-sort]").forEach((header) => header.addEventListener("click", () => {
+      const key = header.dataset.benchmarkSort;
+      if (benchmarkingState.sortKey === key) benchmarkingState.sortDirection *= -1;
+      else { benchmarkingState.sortKey = key; benchmarkingState.sortDirection = 1; }
+      renderBenchmarkScope();
+    }));
+
     function bindTabs() {
       document.querySelectorAll("[data-tab-target]").forEach((button) => {
         button.addEventListener("click", () => {
@@ -2629,6 +3190,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           });
           if (target === "training-lab") {
             refreshTrainingLab();
+          } else if (target === "benchmarking") {
+            refreshBenchmarkingTab();
           } else if (target === "dispatch-viewer") {
             hideTooltip();
             hideDispatchTooltip();

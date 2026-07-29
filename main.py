@@ -1,5 +1,12 @@
+import csv
+import io
+import json
+
 from flask import Flask, Response, jsonify, render_template, request
 
+import benchmark_jobs
+import benchmark_store
+import benchmarking
 import dispatch_runner
 import dispatch_store
 import oracle_cache
@@ -198,6 +205,116 @@ def dispatch_run():
         results,
     )
     return jsonify({"run_id": run_id, "policies": list(results), "warnings": warnings})
+
+
+@app.route("/api/benchmarking/context", methods=["GET"])
+def benchmarking_context():
+    return jsonify(benchmarking.context(PARAMETERS))
+
+
+@app.route("/api/benchmarking/cache", methods=["POST"])
+def benchmarking_cache():
+    payload = request.get_json(silent=True) or {}
+    try:
+        cached = benchmarking.cached_result(PARAMETERS, payload.get("policies") or [])
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 422
+    return jsonify({"cached": cached})
+
+
+@app.route("/api/benchmarking/jobs", methods=["POST"])
+def benchmarking_start():
+    payload = request.get_json(silent=True) or {}
+    policy_names = payload.get("policies") or []
+    parameters = dict(PARAMETERS)
+    try:
+        benchmarking.fingerprint(parameters, policy_names)
+        current = benchmarking.context(parameters)
+        if not current["oracle_ready"]:
+            return jsonify({"error": "Exact Oracle is missing. Calculate it in Sizing Demo first."}), 422
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 422
+
+    job = benchmark_jobs.MANAGER.start(
+        lambda progress, cancelled: benchmarking.run_and_save(
+            parameters, list(policy_names), progress, cancelled
+        )
+    )
+    return jsonify(job.public())
+
+
+@app.route("/api/benchmarking/jobs/<job_id>", methods=["GET"])
+def benchmarking_job(job_id):
+    detail = benchmark_jobs.MANAGER.get(job_id)
+    if detail is None:
+        return jsonify({"error": "Benchmark job not found."}), 404
+    return jsonify(detail)
+
+
+@app.route("/api/benchmarking/jobs/<job_id>/cancel", methods=["POST"])
+def benchmarking_cancel(job_id):
+    if not benchmark_jobs.MANAGER.cancel(job_id):
+        return jsonify({"error": "Benchmark job is not running."}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/benchmarking/runs", methods=["GET"])
+def benchmarking_runs():
+    return jsonify({"runs": benchmark_store.list_runs()})
+
+
+@app.route("/api/benchmarking/runs/<run_id>", methods=["GET"])
+def benchmarking_result(run_id):
+    result = benchmark_store.get_result(run_id)
+    if result is None:
+        return jsonify({"error": "Benchmark result not found."}), 404
+    return jsonify(result)
+
+
+@app.route("/api/benchmarking/runs/<run_id>/export.<format_name>", methods=["GET"])
+def benchmarking_export(run_id, format_name):
+    result = benchmark_store.get_result(run_id)
+    if result is None:
+        return jsonify({"error": "Benchmark result not found."}), 404
+    if format_name == "json":
+        return Response(
+            json.dumps(result, indent=2),
+            mimetype="application/json",
+            headers={"Content-Disposition": f'attachment; filename="benchmark-{run_id}.json"'},
+        )
+    if format_name != "csv":
+        return jsonify({"error": "Export format must be csv or json."}), 404
+
+    output = io.StringIO()
+    fields = [
+        "contestant", "type", "scope", "start_day", "end_day",
+        "energy_cost_vnd", "demand_cost_vnd", "wear_cost_vnd",
+        "total_operating_cost_vnd", "peak_kw", "oracle_relation",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fields)
+    writer.writeheader()
+    for contestant in result.get("contestants", []):
+        summary = contestant.get("summary", {})
+        common = {
+            "contestant": contestant.get("label"),
+            "type": contestant.get("type"),
+            "oracle_relation": summary.get("oracle_relation"),
+        }
+        writer.writerow(
+            common | {
+                "scope": "entire_csv",
+                "start_day": "",
+                "end_day": "",
+                **{field: summary.get(field) for field in fields if field in summary},
+            }
+        )
+        for block in summary.get("blocks", []):
+            writer.writerow(common | {"scope": "30_day_block", **block})
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="benchmark-{run_id}.csv"'},
+    )
 
 
 def _parameters_from_form():

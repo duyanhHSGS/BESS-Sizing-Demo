@@ -60,6 +60,8 @@ def run_sadrbc(month: MonthData, cfg) -> dict:
     grids, socs, pbs = [], [], []
     days = month.days
     for i, day in enumerate(days):
+        if i and (day.day_index - 1) % 30 == 0:
+            runner.reset_monthly(reason="30_day_billing_boundary")
         nxt = days[i + 1].day_type if i + 1 < len(days) else "working"
         _, soc, pb, pg, _ = runner.step_day(
             list(day.load), list(day.pv), day.day_type, day_type_next=nxt)
