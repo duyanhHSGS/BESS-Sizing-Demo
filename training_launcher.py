@@ -227,6 +227,11 @@ def build_training_command(
             ]
         )
     else:
+        device = str(payload.get("device", "auto")).strip().lower()
+        if device not in {"auto", "cpu", "cuda"}:
+            raise TrainingLaunchError(
+                "GREPO device must be auto, cpu, or cuda"
+            )
         gamma = _bounded_float(
             payload,
             "grepo_gamma",
@@ -247,6 +252,8 @@ def build_training_command(
                 str(_float(payload, "std", 0.30)),
                 "--gamma",
                 str(gamma),
+                "--device",
+                device,
             ]
         )
     return {"cmd": cmd, "tag": tag, "checkpoint": str(checkpoint), "algo": algo}

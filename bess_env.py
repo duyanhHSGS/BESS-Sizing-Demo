@@ -91,7 +91,8 @@ class BESSEnv:
                  fc_sigma_load: float = 0.05, fc_sigma_pv: float = 0.15,
                  fc_rho: float = 0.9, fc_seed: int = 12345,
                  n_steps: int = STEPS_PER_DAY,
-                 dt_hours: float = DT_HOURS):
+                 dt_hours: float = DT_HOURS,
+                 record_trajectory: bool = True):
         # Resolution is derived from configured dt or the supplied day length.
         # (ch  bi bo GREPO). Ngy d liu phi c ng n_steps mu.
         if dt_hours == DT_HOURS and getattr(cfg, "dt", DT_HOURS) != DT_HOURS:
@@ -120,6 +121,7 @@ class BESSEnv:
         self.d_run_init = (float(d_run_init_kw) if d_run_init_kw is not None
                            else float(d_run_init_frac) * self.p_ref)
         self.gamma = float(gamma)
+        self.record_trajectory = bool(record_trajectory)
         # forecast-informed variant: obs gains 4 look-ahead features fed by
         # a NOISY short-horizon forecast (never the actuals)
         self.use_forecast = bool(use_forecast)
@@ -144,6 +146,7 @@ class BESSEnv:
         self.log_grid: list[np.ndarray] = []
         self.log_soc: list[np.ndarray] = []
         self.log_pbess: list[np.ndarray] = []
+        self._obs_static: np.ndarray | None = None
         self._refresh_cached_coefficients()
 
     def _refresh_cached_coefficients(self) -> None:
@@ -184,7 +187,8 @@ class BESSEnv:
         self.native_steps_per_action = int(rounded_ratio)
 
     # ------------------------------------------------------------------
-    def reset(self, month: MonthData, soc_init: float | None = None) -> np.ndarray:
+    def reset(self, month: MonthData, soc_init: float | None = None,
+              static_observation_cache: np.ndarray | None = None) -> np.ndarray:
         self.month = month
         if month.days:
             detected_steps = len(month.days[0].load)
@@ -207,14 +211,29 @@ class BESSEnv:
         self.g_prev = 0.0               # previous-step grid import (kW)
         self.d_run_nb = self.d_run_init  # counterfactual no-BESS running peak
         self.g_prev_nb = 0.0
-        self.log_grid = [np.zeros(self.n_steps) for _ in month.days]
-        self.log_soc = [np.zeros(self.n_steps + 1) for _ in month.days]
-        self.log_pbess = [np.zeros(self.n_steps) for _ in month.days]
+        if self.record_trajectory:
+            self.log_grid = [np.zeros(self.n_steps) for _ in month.days]
+            self.log_soc = [np.zeros(self.n_steps + 1) for _ in month.days]
+            self.log_pbess = [np.zeros(self.n_steps) for _ in month.days]
+        else:
+            self.log_grid = []
+            self.log_soc = []
+            self.log_pbess = []
         self._reset_demand_window()
         self._day_fraction = 1.0 / max(1, len(month.days))
-        self.log_soc[0][0] = self.soc
+        if self.record_trajectory:
+            self.log_soc[0][0] = self.soc
         self._set_day_tariff()
         self._make_day_forecast()
+        if static_observation_cache is None:
+            self._cache_static_observations()
+        else:
+            expected = (self.n_steps, self.obs_dim)
+            if static_observation_cache.shape != expected:
+                raise ValueError(
+                    "static observation cache has incompatible shape"
+                )
+            self._obs_static = static_observation_cache
         return self._obs()
 
     def _set_day_tariff(self):
@@ -230,6 +249,37 @@ class BESSEnv:
                                           self.fc_rho, self._fc_rng)
         self._fc_pv = _ar1_noise_series(day.pv, self.fc_sigma_pv,
                                         self.fc_rho, self._fc_rng)
+
+    def _cache_static_observations(self):
+        """Cache observation fields that cannot change within the day."""
+        day = self.month.days[self.day]
+        cache = np.empty((self.n_steps, self.obs_dim), dtype=np.float32)
+        inv_ref = self._inv_p_ref
+        working = 1.0 if day.day_type == "working" else 0.0
+        day_fraction = self.day * self._day_fraction
+        hour_steps = self.n_steps // 24
+        for t in range(self.n_steps):
+            load, pv = day.load[t], day.pv[t]
+            eff = max(0.0, load - pv)
+            sur = max(0.0, pv - load)
+            t_next = min(t + hour_steps, self.n_steps - 1)
+            angle = 2.0 * np.pi * t / self.n_steps
+            cache[t, 0] = np.sin(angle)
+            cache[t, 1] = np.cos(angle)
+            cache[t, 2] = eff * inv_ref
+            cache[t, 3] = pv * inv_ref
+            cache[t, 4] = sur * inv_ref
+            cache[t, 5] = 0.0
+            cache[t, 6] = self.tariff[t] * self._inv_peak_price
+            cache[t, 7] = self.tariff[t_next] * self._inv_peak_price
+            cache[t, 8] = 0.0
+            cache[t, 9] = 0.0
+            cache[t, 10] = working
+            cache[t, 11] = day_fraction
+            cache[t, 12] = t / self.n_steps
+            if self.use_forecast:
+                cache[t, 13:] = self._fc_features(t)
+        self._obs_static = cache
 
     def _fc_features(self, t):
         """4 look-ahead features: mean forecast eff-load & PV over the next
@@ -248,32 +298,13 @@ class BESSEnv:
 
     # ------------------------------------------------------------------
     def _obs(self) -> np.ndarray:
-        day = self.month.days[self.day]
         t = self.t
-        load, pv = day.load[t], day.pv[t]
-        eff = max(0.0, load - pv)
-        sur = max(0.0, pv - load)
-        t_next = min(t + self.n_steps // 24, self.n_steps - 1)  # 1h ti
-        ang = 2.0 * np.pi * t / self.n_steps
         # A fresh array is required because callers retain the current
         # observation until after step() has produced the next one.
-        base = np.empty(self.obs_dim, dtype=np.float32)
-        inv_ref = self._inv_p_ref
-        base[0] = np.sin(ang)
-        base[1] = np.cos(ang)
-        base[2] = eff * inv_ref
-        base[3] = pv * inv_ref
-        base[4] = sur * inv_ref
+        base = self._obs_static[t].copy()
         base[5] = self.soc
-        base[6] = self.tariff[t] * self._inv_peak_price
-        base[7] = self.tariff[t_next] * self._inv_peak_price
-        base[8] = self.d_run * inv_ref
-        base[9] = self.g_prev * inv_ref
-        base[10] = 1.0 if day.day_type == "working" else 0.0
-        base[11] = self.day * self._day_fraction
-        base[12] = t / self.n_steps
-        if self.use_forecast:
-            base[13:] = self._fc_features(t)
+        base[8] = self.d_run * self._inv_p_ref
+        base[9] = self.g_prev * self._inv_p_ref
         return base
 
     # ------------------------------------------------------------------
@@ -344,9 +375,10 @@ class BESSEnv:
         energy_delta = self.tariff[t] * (cg - d) * self.dt
         peak_delta = peak_pen - peak_pen_nb
         # --- logs ------------------------------------------------------
-        self.log_grid[self.day][t] = grid
-        self.log_pbess[self.day][t] = d - (cg + cp)
-        self.log_soc[self.day][t + 1] = self.soc
+        if self.record_trajectory:
+            self.log_grid[self.day][t] = grid
+            self.log_pbess[self.day][t] = d - (cg + cp)
+            self.log_soc[self.day][t + 1] = self.soc
         self.g_prev = grid
         self.g_prev_nb = eff
 
@@ -362,9 +394,11 @@ class BESSEnv:
             if self.day >= len(self.month.days):
                 done = True
             else:
-                self.log_soc[self.day][0] = self.soc
+                if self.record_trajectory:
+                    self.log_soc[self.day][0] = self.soc
                 self._set_day_tariff()
                 self._make_day_forecast()
+                self._cache_static_observations()
         obs = None if done else self._obs()
         return (
             obs,
