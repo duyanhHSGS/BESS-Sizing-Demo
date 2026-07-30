@@ -828,10 +828,10 @@
         <div class="info">Selected CSV: {{ selected_data_csv }}. Detected time step dt is {{ dt }} h.</div>
         {% if exact_oracle_cache_exists %}
         <div class="info cache-notice">This selected CSV file already has cached Oracle LP for the current inputs, and
-          the app is using it right now. If you want to calculate again, click Calculate.</div>
+          the app is using it right now. Use Recalculate fresh only when you intentionally want to rebuild it.</div>
         {% elif csv_has_oracle_cache %}
         <div class="info cache-notice">This selected CSV file has cached Oracle LP from another input combo. Save
-          matching inputs to use it, or click Calculate to make a fresh cache.</div>
+          matching inputs to use it, or click Calculate to reuse exact matches and solve only missing ones.</div>
         {% endif %}
 
         <h2>Battery operation inputs</h2>
@@ -965,7 +965,9 @@
           <button id="btn-tf-save" class="primary" type="submit" name="form_action" value="save">Save bill and finance
             inputs</button>
           <button id="btn-calculate" class="secondary" type="submit" name="form_action"
-            value="calculate">Calculate</button>
+            value="calculate">Calculate (use cache)</button>
+          <button id="btn-recalculate" class="secondary" type="submit" name="form_action"
+            value="recalculate">Recalculate fresh</button>
         </div>
         <div class="info">Real-world savings factor means: if Oracle says the battery can save 100, the real controller
           may
@@ -1563,6 +1565,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const candidateOracles = {{ candidate_oracles | tojson }};
     const selectedCandidateIndex = {{ selected_candidate_index | tojson }};
     const shouldRunCandidateCalculation = {{ should_calculate | tojson }};
+    const forceCandidateCalculation = {{ should_force_calculate | tojson }};
     const exactOracleCacheExists = {{ exact_oracle_cache_exists | tojson }};
     const csvHasOracleCache = {{ csv_has_oracle_cache | tojson }};
     const daySelect = document.getElementById("benchmark-day");
@@ -1589,6 +1592,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const sampleBatterySelect = document.getElementById("sample-battery");
     const useSampleBatterySelect = document.getElementById("use-sample-battery");
     const calculateButton = document.getElementById("btn-calculate");
+    const recalculateButton = document.getElementById("btn-recalculate");
     const batteryCapacityInput = document.getElementById("tf-bcap");
     const batteryPowerInput = document.getElementById("tf-bpow");
     const oracleProgress = document.getElementById("oracle-progress");
@@ -1986,21 +1990,46 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         calculateButton.disabled = true;
         calculateButton.textContent = "Calculating...";
       }
+      if (recalculateButton) {
+        recalculateButton.disabled = true;
+      }
 
       resetProgress();
-      appendProgress(`Starting ${candidateOracles.length} battery calculations...`);
+      appendProgress(
+        `Starting ${candidateOracles.length} battery calculations (${forceCandidateCalculation ? "fresh solve" : "cache-first"})...`
+      );
+      const resolvedByBattery = new Map();
 
       try {
         for (let index = 0; index < candidateOracles.length; index += 1) {
           const label = candidateOracles[index].label;
+          const batteryKey = [
+            Number(candidateOracles[index].battery_capacity_kWh || 0),
+            Number(candidateOracles[index].battery_power_limit_kW || 0),
+          ].join("|");
+          if (resolvedByBattery.has(batteryKey)) {
+            const reused = resolvedByBattery.get(batteryKey);
+            candidateOracles[index] = {
+              ...candidateOracles[index],
+              oracle: reused.oracle,
+            };
+            updateSizingRow(index, candidateOracles[index]);
+            appendProgress(
+              `[${index + 1}/${candidateOracles.length}] Reused identical battery result for ${label}`,
+              "done"
+            );
+            continue;
+          }
           appendProgress(`[${index + 1}/${candidateOracles.length}] Calculating ${label}`);
           try {
-            const response = await fetch(`/candidate-oracle/${index}?force=1&t=${Date.now()}`);
+            const query = forceCandidateCalculation ? `?force=1&t=${Date.now()}` : "";
+            const response = await fetch(`/candidate-oracle/${index}${query}`);
             if (!response.ok) {
               throw new Error(`HTTP ${response.status}`);
             }
             const payload = await response.json();
             candidateOracles[payload.index] = payload.candidate;
+            resolvedByBattery.set(batteryKey, payload.candidate);
             updateSizingRow(payload.index, payload.candidate);
             const cacheMode = payload.candidate.oracle && payload.candidate.oracle.cache && payload.candidate.oracle.cache.hit
               ? "loaded cached"
@@ -2027,7 +2056,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         isCalculating = false;
         if (calculateButton) {
           calculateButton.disabled = false;
-          calculateButton.textContent = "Calculate";
+          calculateButton.textContent = "Calculate (use cache)";
+        }
+        if (recalculateButton) {
+          recalculateButton.disabled = false;
         }
       }
     }
@@ -3752,9 +3784,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     if (!shouldRunCandidateCalculation) {
       resetProgress();
       if (exactOracleCacheExists) {
-        appendProgress("Selected CSV already has cached Oracle LP for these inputs. Using cached results. Click Calculate to calculate again.", "done");
+        appendProgress("Selected CSV already has cached Oracle LP for these inputs. Calculate uses it; Recalculate fresh rebuilds it.", "done");
       } else if (csvHasOracleCache) {
-        appendProgress("Selected CSV has Oracle LP cache for another input combo. Change inputs back or click Calculate for a fresh cache.");
+        appendProgress("Selected CSV has Oracle LP cache for another input combo. Calculate reuses exact matches and solves only missing combinations.");
       } else {
         appendProgress("Waiting to start...");
       }

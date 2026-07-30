@@ -46,14 +46,27 @@ PARAMETERS = DEFAULT_PARAMETERS.copy()
 
 @app.route("/", methods=["GET"])
 def home():
-    return render_template("index.html", saved=False, should_calculate=False, **view_context())
+    return render_template(
+        "index.html",
+        saved=False,
+        should_calculate=False,
+        should_force_calculate=False,
+        **view_context(),
+    )
 
 
 @app.route("/set-parameters", methods=["POST"])
 def set_parameters():
     PARAMETERS.update(_parameters_from_form())
-    should_calculate = request.form.get("form_action") == "calculate"
-    return render_template("index.html", saved=True, should_calculate=should_calculate, **view_context())
+    form_action = request.form.get("form_action")
+    should_calculate = form_action in {"calculate", "recalculate"}
+    return render_template(
+        "index.html",
+        saved=True,
+        should_calculate=should_calculate,
+        should_force_calculate=form_action == "recalculate",
+        **view_context(),
+    )
 
 
 @app.route("/candidate-oracle/<int:index>", methods=["GET"])
@@ -360,8 +373,8 @@ def _policy_names_from_query():
 
 def view_context():
     PARAMETERS["selected_data_csv"] = selected_data_filename(PARAMETERS)
-    PARAMETERS["dt"] = str(detect_dt_hours(selected_data_path(PARAMETERS)))
     benchmark = build_benchmark(PARAMETERS)
+    PARAMETERS["dt"] = str(benchmark["dt"])
     candidate_oracles = _cached_candidate_oracles()
     return {
         **PARAMETERS,

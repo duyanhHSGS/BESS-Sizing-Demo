@@ -1,7 +1,11 @@
+from functools import lru_cache
+from pathlib import Path
+
 from benchmark import (
     _annotate_day_billing,
     _day_energy_cost,
     _demand_windows,
+    _detect_dt_from_rows,
     _demand_charge,
     _group_days,
     _load_rows,
@@ -11,7 +15,6 @@ from benchmark import (
     _rounded_series,
     _rolling_30_minute_average,
     _to_float,
-    detect_dt_hours,
     selected_data_path,
 )
 
@@ -28,7 +31,12 @@ def build_oracle_lp(parameters):
         }
 
     csv_path = selected_data_path(parameters)
-    dt = detect_dt_hours(csv_path)
+    csv_stat = csv_path.stat()
+    dt, base_days = _prepared_oracle_input(
+        str(csv_path.resolve()),
+        csv_stat.st_size,
+        csv_stat.st_mtime_ns,
+    )
     capacity = max(0.0, _to_float(parameters.get("battery_capacity_kWh"), 0.0))
     power_limit = max(0.0, _to_float(parameters.get("battery_power_limit_kW"), 0.0))
     charge_efficiency = _clamp(_to_float(parameters.get("charge_efficiency"), 1.0), 0.001, 1.0)
@@ -37,11 +45,8 @@ def build_oracle_lp(parameters):
     maximum_soc = _clamp(_to_float(parameters.get("maximum_soc"), 1.0), minimum_soc, 1.0)
     required_final_soc = _clamp(_to_float(parameters.get("required_final_soc"), minimum_soc), minimum_soc, maximum_soc)
 
-    base_days = _group_days(_load_rows(csv_path), dt)
     if not base_days:
         return {"available": True, "status": "No CSV rows found.", "days": [], "summary": _empty_summary()}
-
-    _refresh_rolling_peaks(base_days, dt)
 
     if capacity <= 0.0 or power_limit <= 0.0:
         return _no_battery_result(base_days, parameters, dt)
@@ -75,6 +80,17 @@ def build_oracle_lp(parameters):
         "days": month_results,
         "summary": summary,
     }
+
+
+@lru_cache(maxsize=8)
+def _prepared_oracle_input(path_text, file_size, file_mtime_ns):
+    """Parse and group an unchanged CSV once for all battery candidates."""
+    del file_size, file_mtime_ns
+    rows = _load_rows(Path(path_text))
+    dt = _detect_dt_from_rows(rows)
+    days = _group_days(rows, dt)
+    _refresh_rolling_peaks(days, dt)
+    return dt, days
 
 
 def _solve_month(

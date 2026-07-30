@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
@@ -203,8 +204,19 @@ def _csv_cache_prefix(parameters: dict[str, Any]) -> str:
 
 
 def _file_fingerprint(path: Path) -> str:
+    stat = path.stat()
+    return _cached_file_fingerprint(
+        str(path.resolve()),
+        stat.st_size,
+        stat.st_mtime_ns,
+    )
+
+
+@lru_cache(maxsize=32)
+def _cached_file_fingerprint(path_text: str, file_size: int, file_mtime_ns: int) -> str:
+    del file_size, file_mtime_ns
     digest = hashlib.sha256()
-    with path.open("rb") as file:
+    with Path(path_text).open("rb") as file:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -234,7 +246,9 @@ def _with_cache_meta(
     hit: bool,
     parameters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    cloned = json.loads(json.dumps(result, default=_json_default))
+    cloned = dict(result)
+    if isinstance(result.get("summary"), dict):
+        cloned["summary"] = dict(result["summary"])
     if parameters is not None:
         _refresh_economics(cloned, parameters)
     cloned["cache"] = {
