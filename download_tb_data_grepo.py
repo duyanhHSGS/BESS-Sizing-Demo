@@ -24,18 +24,18 @@ from zoneinfo import ZoneInfo
 
 
 SPEC = {
-    "name": "Tande",
+    "name": "tande",
     "base_url": "https://solar.datainsight.vn",
     "username": "oee2024@gmail.com",
     "password": "Oee@2124",
     "device_id": "ca1a3d20-8933-11f0-bac1-2533bc830589",
-    "key_load": "INVT_T:P_Load",
+    "key_load": "INVT_T:PLoad",
     "key_pv": "INVT_T:ActivePowerSum",
     "unit_scale": 1.0,
     "timezone": "Asia/Bangkok",
 }
 
-START_DATE = "2025-07-01"
+START_DATE = "2025-06-01"
 END_DATE = "2026-07-01"
 INTERVAL_MINUTES = 1
 
@@ -153,6 +153,16 @@ def _fetch_chunk(start_ms: int, end_ms: int, interval_ms: int) -> dict:
         ) from error
 
 
+def _format_local_minute(timestamp_ms: int, timezone: ZoneInfo) -> str:
+    return datetime.fromtimestamp(timestamp_ms / 1000, timezone).strftime(
+        "%Y-%m-%d %H:%M"
+    )
+
+
+def _format_point_counts(keys: list[str], counts: dict[str, int]) -> str:
+    return " | ".join(f"{key}={counts.get(key, 0)}" for key in keys)
+
+
 def _fetch_range(start_iso: str, end_iso: str, interval_min: int) -> dict:
     start_day = date.fromisoformat(start_iso)
     end_day = date.fromisoformat(end_iso)
@@ -177,20 +187,74 @@ def _fetch_range(start_iso: str, end_iso: str, interval_min: int) -> dict:
     )
     interval_ms = interval_min * 60_000
     chunk_ms = MAX_INTERVALS_PER_REQUEST * interval_ms
+    total_chunks = math.ceil((exclusive_end_ms - start_ms) / chunk_ms)
+    telemetry_keys = list(dict.fromkeys(_telemetry_keys()))
     merged: dict[str, list] = defaultdict(list)
+    total_points = {key: 0 for key in telemetry_keys}
+    nonempty_chunks = 0
+    empty_chunks = 0
+    empty_run_start_ms: int | None = None
+    empty_run_chunks = 0
 
     print(
         f"ThingsBoard {SPEC['base_url']} device "
         f"{str(SPEC['device_id'])[:8]}... [{start_day} -> {end_day}]"
     )
     cursor = start_ms
+    chunk_number = 0
     while cursor < exclusive_end_ms:
+        chunk_number += 1
         chunk_end = min(cursor + chunk_ms, exclusive_end_ms)
         part = _fetch_chunk(cursor, chunk_end, interval_ms)
         for key, values in part.items():
             merged[key].extend(values)
-        print(f"  chunk +{sum(len(values) for values in part.values())} points")
+
+        chunk_counts = {
+            key: len(part.get(key, []))
+            for key in telemetry_keys
+        }
+        for key, count in chunk_counts.items():
+            total_points[key] += count
+
+        point_count = sum(len(values) for values in part.values())
+        if point_count:
+            if empty_run_start_ms is not None:
+                print(
+                    f"[gap] {empty_run_chunks} empty chunks | "
+                    f"{_format_local_minute(empty_run_start_ms, timezone)} -> "
+                    f"{_format_local_minute(cursor, timezone)}"
+                )
+                empty_run_start_ms = None
+                empty_run_chunks = 0
+
+            nonempty_chunks += 1
+            progress = chunk_number / total_chunks * 100.0
+            print(
+                f"[{chunk_number}/{total_chunks} | {progress:.1f}%] "
+                f"{_format_local_minute(cursor, timezone)} -> "
+                f"{_format_local_minute(chunk_end, timezone)} | "
+                f"{_format_point_counts(telemetry_keys, chunk_counts)}"
+            )
+        else:
+            empty_chunks += 1
+            if empty_run_start_ms is None:
+                empty_run_start_ms = cursor
+            empty_run_chunks += 1
+
         cursor = chunk_end
+
+    if empty_run_start_ms is not None:
+        print(
+            f"[gap] {empty_run_chunks} empty chunks | "
+            f"{_format_local_minute(empty_run_start_ms, timezone)} -> "
+            f"{_format_local_minute(exclusive_end_ms, timezone)}"
+        )
+
+    print(
+        f"Download summary: {total_chunks} chunks | "
+        f"{nonempty_chunks} nonempty | {empty_chunks} empty | "
+        f"{_format_point_counts(telemetry_keys, total_points)}"
+    )
 
     if not merged:
         raise ValueError("ThingsBoard returned no telemetry for the selected range")
