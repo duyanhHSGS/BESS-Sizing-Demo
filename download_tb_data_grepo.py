@@ -44,6 +44,8 @@ OUTPUT_CSV = BASE_DIR / "data" / f"offline_{SPEC['name']}_grepo.csv"
 
 TOKEN_TTL_SECONDS = 2 * 60 * 60
 MAX_INTERVALS_PER_REQUEST = 650
+MAX_INTERPOLATION_GAP_MINUTES = 15
+PV_ZERO_THRESHOLD_KW = 1.0
 CSV_HEADERS = (
     "day_index",
     "date_iso",
@@ -291,28 +293,58 @@ def _channel_values(
     return dict(channel)
 
 
-def _interpolate(values: list[float | None]) -> list[float]:
+def _interpolate(
+    values: list[float | None],
+    max_gap_steps: int,
+    zero_threshold: float | None = None,
+) -> list[float] | None:
     known = [index for index, value in enumerate(values) if value is not None]
     if not known:
-        return [0.0] * len(values)
+        return None
 
-    result = [0.0] * len(values)
+    result: list[float | None] = list(values)
     first = known[0]
-    for index in range(first + 1):
-        result[index] = float(values[first])
+    first_value = float(values[first])
+    if first > max_gap_steps and not (
+        zero_threshold is not None and abs(first_value) <= zero_threshold
+    ):
+        return None
+    edge_value = 0.0 if (
+        zero_threshold is not None and abs(first_value) <= zero_threshold
+    ) else first_value
+    for index in range(first):
+        result[index] = edge_value
 
     for left, right in zip(known, known[1:]):
         left_value = float(values[left])
         right_value = float(values[right])
+        missing_steps = right - left - 1
+        zero_gap = (
+            zero_threshold is not None
+            and abs(left_value) <= zero_threshold
+            and abs(right_value) <= zero_threshold
+        )
+        if missing_steps > max_gap_steps and not zero_gap:
+            return None
         width = right - left
-        for index in range(left, right + 1):
+        for index in range(left + 1, right):
             fraction = (index - left) / width
             result[index] = left_value + (right_value - left_value) * fraction
 
     last = known[-1]
-    for index in range(last, len(values)):
-        result[index] = float(values[last])
-    return result
+    last_value = float(values[last])
+    trailing_steps = len(values) - last - 1
+    if trailing_steps > max_gap_steps and not (
+        zero_threshold is not None and abs(last_value) <= zero_threshold
+    ):
+        return None
+    edge_value = 0.0 if (
+        zero_threshold is not None and abs(last_value) <= zero_threshold
+    ) else last_value
+    for index in range(last + 1, len(values)):
+        result[index] = edge_value
+
+    return [float(value) for value in result]
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -363,7 +395,10 @@ def _despike_load(load: list[float], max_run: int) -> tuple[list[float], int]:
     return cleaned, changed
 
 
-def _build_days(telemetry: dict, interval_min: int) -> tuple[list[dict], int, int]:
+def _build_days(
+    telemetry: dict,
+    interval_min: int,
+) -> tuple[list[dict], int, int, int]:
     interval_ms = interval_min * 60_000
     scale = float(SPEC.get("unit_scale", 1.0))
     load_by_time = _channel_values(
@@ -392,17 +427,38 @@ def _build_days(telemetry: dict, interval_min: int) -> tuple[list[dict], int, in
         )
 
     steps_per_day = 24 * 60 // interval_min
+    max_gap_steps = MAX_INTERPOLATION_GAP_MINUTES // interval_min
     days = []
     bad_sensor_days = 0
+    incomplete_sensor_days = 0
     despiked_points = 0
     for calendar_day in sorted(samples_by_day):
         samples = samples_by_day[calendar_day]
         load = _interpolate(
-            [samples.get(step, (None, None))[0] for step in range(steps_per_day)]
+            [samples.get(step, (None, None))[0] for step in range(steps_per_day)],
+            max_gap_steps,
         )
+        if load is None:
+            incomplete_sensor_days += 1
+            print(
+                f"[skip] {calendar_day}: load telemetry has a gap longer than "
+                f"{MAX_INTERPOLATION_GAP_MINUTES} minutes or misses a day edge."
+            )
+            continue
+
         pv = _interpolate(
-            [samples.get(step, (None, None))[1] for step in range(steps_per_day)]
+            [samples.get(step, (None, None))[1] for step in range(steps_per_day)],
+            max_gap_steps,
+            zero_threshold=PV_ZERO_THRESHOLD_KW,
         )
+        if pv is None:
+            incomplete_sensor_days += 1
+            print(
+                f"[skip] {calendar_day}: PV telemetry has a nonzero gap longer "
+                f"than {MAX_INTERPOLATION_GAP_MINUTES} minutes or misses a "
+                "nonzero day edge."
+            )
+            continue
 
         dead_load_fraction = sum(value < 1.0 for value in load) / steps_per_day
         if dead_load_fraction > 0.98 and max(pv) > 50.0:
@@ -427,7 +483,7 @@ def _build_days(telemetry: dict, interval_min: int) -> tuple[list[dict], int, in
 
     if not days:
         raise ValueError("No usable telemetry days were found")
-    return days, bad_sensor_days, despiked_points
+    return days, bad_sensor_days, incomplete_sensor_days, despiked_points
 
 
 def _write_csv(days: list[dict], output_path: Path) -> int:
@@ -454,7 +510,7 @@ def _write_csv(days: list[dict], output_path: Path) -> int:
 
 def main() -> None:
     telemetry = _fetch_range(START_DATE, END_DATE, INTERVAL_MINUTES)
-    days, bad_sensor_days, despiked_points = _build_days(
+    days, bad_sensor_days, incomplete_sensor_days, despiked_points = _build_days(
         telemetry,
         INTERVAL_MINUTES,
     )
@@ -462,6 +518,7 @@ def main() -> None:
     print(
         f"Saved {row_count} rows ({len(days)} days) to {OUTPUT_CSV}"
         f"; skipped {bad_sensor_days} dead-sensor days"
+        f"; skipped {incomplete_sensor_days} incomplete-sensor days"
         f"; repaired {despiked_points} load-spike points."
     )
 
