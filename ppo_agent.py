@@ -70,6 +70,7 @@ class PPOAgent:
         self.epochs, self.minibatch = epochs, minibatch
         self.ent_coef, self.vf_coef = ent_coef, vf_coef
         self.meta = {}          # deployment context (p_ref_kw, obs_variant)
+        self.forecast_bundle = None
 
     # ------------------------------------------------------------------
     @torch.inference_mode()
@@ -140,15 +141,23 @@ class PPOAgent:
     # self.meta carries deployment context (e.g. p_ref_kw the observation
     # normalisation was trained with) so loaders can reconstruct the env.
     def save(self, path):
-        torch.save({"algo": "ppo", "state_dict": self.net.state_dict(),
-                    "meta": dict(self.meta)}, path)
+        payload = {"algo": "ppo", "state_dict": self.net.state_dict(),
+                   "meta": dict(self.meta)}
+        if self.forecast_bundle is not None:
+            payload["forecast_bundle"] = {
+                **self.forecast_bundle,
+                "values": torch.as_tensor(self.forecast_bundle["values"]).cpu(),
+            }
+        torch.save(payload, path)
 
     def load(self, path):
         ck = torch.load(path, map_location="cpu")
         if isinstance(ck, dict) and "state_dict" in ck:
             self.net.load_state_dict(ck["state_dict"])
             self.meta = ck.get("meta", {}) or {}
+            self.forecast_bundle = ck.get("forecast_bundle")
         else:                                   # legacy raw state_dict
             self.net.load_state_dict(ck)
             self.meta = {}
+            self.forecast_bundle = None
         self.net.eval()

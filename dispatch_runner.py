@@ -21,7 +21,12 @@ from benchmark import (
     selected_data_path,
 )
 from training_checkpoints import CHECKPOINT_DIR, _load_checkpoint_meta
-from weather_forecast import WeatherError, attach_forecast_artifact
+from weather_forecast import (
+    FORECAST_DIR,
+    WeatherError,
+    attach_forecast_artifact,
+    attach_forecast_bundle,
+)
 from baselines import run_sadrbc
 
 
@@ -178,6 +183,75 @@ def load_policy(checkpoint_name: str, checkpoint_dir: Path = CHECKPOINT_DIR):
     return agent, algo, meta
 
 
+def prepare_policy_forecast(
+    checkpoint_name: str,
+    agent,
+    meta: dict,
+    month: MonthData,
+    p_ref_kw: float,
+) -> None:
+    """Attach forecast inputs for Dispatch and Benchmarking alike."""
+    if meta.get("obs_variant") != "fc":
+        return
+    embedded = getattr(agent, "forecast_bundle", None)
+    if embedded is not None:
+        try:
+            attach_forecast_bundle(month.days, embedded)
+            return
+        except WeatherError as exc:
+            raise DispatchRunWarning(
+                f"{checkpoint_name}: embedded forecast does not match the selected dataset ({exc})"
+            ) from exc
+
+    artifact_value = meta.get("forecast_artifact")
+    basename = Path(str(artifact_value or "forecast_missing.csv")).name
+    candidates = []
+    if artifact_value:
+        configured = Path(str(artifact_value))
+        candidates.append(configured if configured.is_absolute() else BASE_DIR / configured)
+    candidates.append(FORECAST_DIR / basename)
+    for candidate in candidates:
+        try:
+            local = ensure_inside_sizing_demo(candidate)
+        except ValueError:
+            continue
+        if not local.is_file():
+            continue
+        try:
+            attach_forecast_artifact(month.days, local, p_ref_kw)
+            return
+        except (OSError, ValueError, WeatherError) as exc:
+            raise DispatchRunWarning(
+                f"{checkpoint_name}: local forecast sidecar is incompatible ({exc})"
+            ) from exc
+    raise DispatchRunWarning(
+        f"{checkpoint_name}: this older 17-input checkpoint is not self-contained. "
+        f"Copy user_data/forecasts/{basename} from the training computer, then retry. "
+        "Do not substitute newly invented forecasts for a scientific comparison."
+    )
+
+
+def forecast_portability_error(meta: dict) -> str | None:
+    if meta.get("obs_variant") != "fc" or meta.get("forecast_embedded"):
+        return None
+    artifact_value = meta.get("forecast_artifact")
+    basename = Path(str(artifact_value or "forecast_missing.csv")).name
+    candidates = [FORECAST_DIR / basename]
+    if artifact_value:
+        configured = Path(str(artifact_value))
+        candidates.insert(0, configured if configured.is_absolute() else BASE_DIR / configured)
+    for candidate in candidates:
+        try:
+            if ensure_inside_sizing_demo(candidate).is_file():
+                return None
+        except ValueError:
+            continue
+    return (
+        f"Older 17-input checkpoint needs user_data/forecasts/{basename} "
+        "from its training computer."
+    )
+
+
 def run_policy_dispatch(
     checkpoint_name: str,
     parameters: dict[str, Any],
@@ -207,22 +281,7 @@ def run_policy_dispatch(
             f"{control_dt:g}-minute decisions and {actual_native_dt:g}-minute physics"
         )
     p_ref = float(meta.get("p_ref_kw") or _policy_reference_kw(month))
-    if meta.get("obs_variant") == "fc":
-        artifact_value = meta.get("forecast_artifact")
-        if not artifact_value:
-            raise DispatchRunWarning(
-                f"{checkpoint_name}: forecast checkpoint has no real forecast artifact"
-            )
-        try:
-            artifact_path = Path(artifact_value)
-            if not artifact_path.is_absolute():
-                artifact_path = BASE_DIR / artifact_path
-            artifact = ensure_inside_sizing_demo(artifact_path)
-            attach_forecast_artifact(month.days, artifact, p_ref)
-        except (OSError, ValueError, WeatherError) as exc:
-            raise DispatchRunWarning(
-                f"{checkpoint_name}: forecast data cannot be attached ({exc})"
-            ) from exc
+    prepare_policy_forecast(checkpoint_name, agent, meta, month, p_ref)
     rollout = run_drl_policy(month, cfg, agent, p_ref_kw=p_ref)
     days = policy_result_to_days(month, rollout, cfg, parameters)
     return {

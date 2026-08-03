@@ -92,6 +92,7 @@ class GREPOAgent:
         self.vf_coef = vf_coef
         self.obs_dim = obs_dim
         self.meta = {}
+        self.forecast_bundle = None
         self.last_collect_stats = {}
         self.last_update_stats = {}
 
@@ -402,16 +403,23 @@ class GREPOAgent:
             key: value.detach().cpu()
             for key, value in self.critic.state_dict().items()
         }
-        torch.save({"actor": actor_state,
-                    "critic": critic_state,
-                    "obs_dim": self.obs_dim, "std": self.std,
-                    "algo": "grepo", "meta": dict(self.meta)}, path)
+        payload = {"actor": actor_state,
+                   "critic": critic_state,
+                   "obs_dim": self.obs_dim, "std": self.std,
+                   "algo": "grepo", "meta": dict(self.meta)}
+        if self.forecast_bundle is not None:
+            payload["forecast_bundle"] = {
+                **self.forecast_bundle,
+                "values": torch.as_tensor(self.forecast_bundle["values"]).cpu(),
+            }
+        torch.save(payload, path)
 
     def load(self, path):
         ck = torch.load(path, map_location=self.device)
         self.actor.load_state_dict(ck["actor"])
         self.critic.load_state_dict(ck["critic"])
         self.meta = ck.get("meta", {}) or {}
+        self.forecast_bundle = ck.get("forecast_bundle")
         self.actor.eval()
         self.critic.eval()
         self._sync_collector_actor()

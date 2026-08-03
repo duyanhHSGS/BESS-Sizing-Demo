@@ -46,6 +46,8 @@ def context(parameters: dict[str, Any]) -> dict[str, Any]:
             reason = reason or "Legacy checkpoint lacks required sampling metadata."
         elif incompatible_dt:
             reason = reason or f"Needs {float(expected_dt):g}-minute data; selected CSV is {actual_dt_minutes:g}-minute."
+        else:
+            reason = reason or dispatch_runner.forecast_portability_error(meta)
         policies.append(
             {
                 **checkpoint,
@@ -125,6 +127,7 @@ def run_and_save(
         progress("Running policy brain", index, total_stages, name)
         agent, algo, meta = dispatch_runner.load_policy(name)
         p_ref = float(meta.get("p_ref_kw") or dispatch_runner._policy_reference_kw(month))
+        dispatch_runner.prepare_policy_forecast(name, agent, meta, month, p_ref)
         rollout = dispatch_runner.run_drl_policy(month, cfg, agent, p_ref_kw=p_ref)
         contestant = _rollout_contestant(name, name, "policy", rollout, month, cfg, parameters)
         contestant["algo"] = algo
@@ -195,6 +198,9 @@ def _selected_checkpoints(policy_names: list[str]) -> list[dict[str, Any]]:
             raise ValueError(f"{name}: unsupported algorithm {row.get('algo')}")
         if not SAMPLING_FIELDS.issubset(row.get("meta", {})):
             raise ValueError(f"{name}: legacy checkpoint lacks required sampling metadata")
+        portability_error = dispatch_runner.forecast_portability_error(row.get("meta", {}))
+        if portability_error:
+            raise ValueError(f"{name}: {portability_error}")
         selected.append(row)
     return selected
 

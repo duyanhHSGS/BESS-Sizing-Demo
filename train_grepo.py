@@ -28,7 +28,7 @@ from baselines import run_no_bess, run_drl_policy
 from oracle_cache import load_cached_training_grids
 from training_reports import write_curve, write_report
 from settings import GREPO_GAMMA
-from weather_forecast import fit_attach_forecasts
+from weather_forecast import build_forecast_bundle, fit_attach_forecasts
 
 VAL_EVERY = 10
 LOG_EVERY_ITERS = 4
@@ -211,6 +211,8 @@ def main():
         agent.meta["forecast_artifact"] = forecast_model["artifact"]
         agent.meta["forecast_model_artifact"] = forecast_model["model_artifact"]
         agent.meta["weather_data"] = str(Path(args.weather_data))
+        agent.meta["forecast_embedded"] = True
+        agent.forecast_bundle = build_forecast_bundle(csv_days)
     if d_run0 is not None:
         agent.meta["d_run_init_kw"] = d_run0
     agent.meta["native_steps_per_action"] = control_probe.native_steps_per_action

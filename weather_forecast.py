@@ -366,3 +366,54 @@ def attach_forecast_artifact(days, artifact: Path, p_ref_kw: float) -> None:
                 raise WeatherError(f"Forecast artifact has no row for {key[0]} step {step}")
             rows.append(by_key[key])
         day.forecast = np.asarray(rows, dtype=np.float64)
+
+
+def build_forecast_bundle(days) -> dict:
+    """Create a portable, already-normalized forecast payload for a .pt file."""
+    dates = []
+    day_indices = []
+    lengths = []
+    values = []
+    for day in days:
+        forecast = getattr(day, "forecast", None)
+        expected = (len(day.pv), 4)
+        if forecast is None or np.asarray(forecast).shape != expected:
+            raise WeatherError(f"Cannot package forecast for {day.date_iso}: expected {expected}")
+        dates.append(str(day.date_iso))
+        day_indices.append(int(day.day_index))
+        lengths.append(len(day.pv))
+        values.append(np.asarray(forecast, dtype=np.float32))
+    return {
+        "version": 1,
+        "dates": dates,
+        "day_indices": day_indices,
+        "lengths": lengths,
+        "values": np.concatenate(values, axis=0),
+    }
+
+
+def attach_forecast_bundle(days, bundle: dict) -> None:
+    if not isinstance(bundle, dict) or int(bundle.get("version", 0)) != 1:
+        raise WeatherError("Checkpoint forecast bundle is missing or unsupported")
+    raw_values = bundle.get("values")
+    if hasattr(raw_values, "detach"):
+        raw_values = raw_values.detach().cpu().numpy()
+    values = np.asarray(raw_values, dtype=np.float64)
+    dates = list(bundle.get("dates") or [])
+    lengths = [int(value) for value in (bundle.get("lengths") or [])]
+    if len(dates) != len(lengths) or values.ndim != 2 or values.shape[1] != 4:
+        raise WeatherError("Checkpoint forecast bundle has an invalid layout")
+    by_date = {}
+    offset = 0
+    for date_iso, length in zip(dates, lengths):
+        by_date[str(date_iso)] = values[offset:offset + length]
+        offset += length
+    if offset != len(values):
+        raise WeatherError("Checkpoint forecast bundle length does not match its metadata")
+    for day in days:
+        forecast = by_date.get(str(day.date_iso))
+        if forecast is None or len(forecast) != len(day.pv):
+            raise WeatherError(
+                f"Checkpoint forecast bundle does not cover {day.date_iso} at this resolution"
+            )
+        day.forecast = forecast.copy()

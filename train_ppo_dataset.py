@@ -18,7 +18,7 @@ from scenario_gen import DayData, MonthData
 from oracle_cache import load_cached_training_grids
 from training_reports import write_curve, write_report
 from settings import PPO_GAMMA, PPO_LAMBDA
-from weather_forecast import fit_attach_forecasts
+from weather_forecast import build_forecast_bundle, fit_attach_forecasts
 
 
 ROLLOUT_DAYS = 32
@@ -228,6 +228,8 @@ def main() -> None:
         agent.meta["forecast_artifact"] = forecast_model["artifact"]
         agent.meta["forecast_model_artifact"] = forecast_model["model_artifact"]
         agent.meta["weather_data"] = str(Path(args.weather_data))
+        agent.meta["forecast_embedded"] = True
+        agent.forecast_bundle = build_forecast_bundle(days)
     decisions_per_day = len(days[0].load) // env.native_steps_per_action
     buffer = RolloutBuffer(decisions_per_day * ROLLOUT_DAYS, env.obs_dim)
 
