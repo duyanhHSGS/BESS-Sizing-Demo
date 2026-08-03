@@ -26,9 +26,6 @@ import torch.nn as nn
 
 torch.set_num_threads(2)
 
-CUDA_AUTO_MIN_SAMPLES = 4096
-
-
 def _mlp(inp, out, h1=256, h2=128):
     return nn.Sequential(
         nn.Linear(inp, h1), nn.Tanh(),
@@ -52,13 +49,7 @@ def resolve_grepo_device(device: str = "auto",
         return "cuda"
     if requested == "cpu":
         return "cpu"
-    if (
-        torch.cuda.is_available()
-        and batch_samples is not None
-        and batch_samples >= CUDA_AUTO_MIN_SAMPLES
-    ):
-        return "cuda"
-    return "cpu"
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class GREPOAgent:

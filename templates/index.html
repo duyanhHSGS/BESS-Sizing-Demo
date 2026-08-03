@@ -1382,6 +1382,13 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
               <option value="fc">Forecast — 17 inputs</option>
             </select>
           </label>
+          <label>Training device
+            <select id="train-device">
+              <option value="auto">Auto — CUDA, else CPU</option>
+              <option value="cuda">CUDA — require GPU</option>
+              <option value="cpu">CPU — force CPU</option>
+            </select>
+          </label>
           <label>E_cap (kWh) <input type="number" id="train-ecap" step="50" value="{{ battery_capacity_kWh }}"></label>
           <label>P_rated (kW) <input type="number" id="train-prated" step="25"
               value="{{ battery_power_limit_kW }}"></label>
@@ -3379,6 +3386,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const trainDataset = document.getElementById("train-dataset");
     const trainAlgo = document.getElementById("train-algo");
     const trainObservation = document.getElementById("train-observation");
+    const trainDevice = document.getElementById("train-device");
     const trainEcap = document.getElementById("train-ecap");
     const trainPrated = document.getElementById("train-prated");
     const trainValDays = document.getElementById("train-val-days");
@@ -3549,6 +3557,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         reportMetric("Best saving vs no-BESS", reportValue(bestSaving.saving_vs_nobess_pct, (value) => `${formatNumber(value, 2)}%`)),
         reportMetric("Smallest Oracle gap", reportValue(bestGap.oracle_gap_pct, (value) => `${formatNumber(value, 2)}%`)),
         reportMetric("Test saving", reportValue(testSaving, (value) => `${formatNumber(value, 2)}%`)),
+        reportMetric("Test Oracle gap", reportValue(test.oracle_gap_pct ?? meta.test_oracle_gap_pct, (value) => `${formatNumber(value, 2)}%`)),
+        reportMetric("Test peak", reportValue(test.peak_kw ?? meta.test_peak_kw, (value) => `${formatNumber(value, 1)} kW`)),
         reportMetric("Trained steps", reportValue(summary.max_steps, (value) => formatNumber(value))),
       ].join("");
       const datasetRange = dataset.validation_range ? dataset.validation_range.join(" → ") : meta.test_range?.join(" → ");
@@ -3558,11 +3568,13 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       const details = [
         ["Algorithm", checkpoint.algo || saved.algorithm],
         ["Brain mode", meta.obs_variant === "fc" ? "Forecast — 17 inputs" : "Reactive — 13 inputs"],
+        ["Learner device", `${training.device ?? meta.device ?? "unknown"} (requested ${training.device_requested ?? meta.device_requested ?? "legacy"})`],
         ["Battery E/P", `${checkpoint.e_cap_kwh ?? saved.battery?.e_cap_kwh ?? "?"} kWh / ${checkpoint.p_rated_kw ?? saved.battery?.p_rated_kw ?? "?"} kW`],
         ["Billing mode", checkpoint.billing_mode || saved.billing_mode],
         ["Dataset", dataset.source || meta.train_csv],
         ["Train / validation / test days", dataset.total_days ? `${dataset.train_days} / ${dataset.validation_days} / ${dataset.test_days}` : "Unknown"],
         ["Validation range", datasetRange],
+        ["Test range", dataset.test_range ? dataset.test_range.join(" → ") : (meta.test_range?.join(" → ") || "Unknown")],
         ["Hyperparameters", hyperparameters],
         ["Sampling Δt", meta.control_dt_minutes == null
           ? "Legacy / missing"
@@ -3573,6 +3585,11 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         ["Initial running peak", reportValue(saved.d_run_init_kw ?? meta.d_run_init_kw, (value) => `${formatNumber(value, 1)} kW`)],
         ["Validation no-BESS", reportValue(validation.no_bess_vnd ?? summary.val_no_bess_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
         ["Validation Oracle (native perfect)", reportValue(validation.oracle_vnd ?? summary.val_oracle_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
+        ["Test policy bill", reportValue(test.policy_cost_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
+        ["Test no-BESS", reportValue(test.no_bess_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
+        ["Test Oracle", reportValue(test.oracle_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
+        ["Test energy cost", reportValue(test.energy_cost_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
+        ["Test demand cost", reportValue(test.demand_cost_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
         ["Report status", saved.status || (payload.artifacts?.report ? "saved" : "legacy / reconstructed")],
         ["Curve artifact", payload.artifacts?.curve || "Unavailable"],
       ].map(([label, value]) => reportDetail(label, value)).join("");
@@ -3655,7 +3672,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           ? `${trainSteps.value} PPO steps; gamma ${trainGamma.value}; lambda ${trainLambda.value}`
           : `${trainIters.value} GREPO iterations; gamma ${trainGrepoGamma.value}`;
         const brainLabel = brainMode === "fc" ? "Forecast brain (17 real inputs)" : "Reactive brain (13 inputs)";
-        trainPlan.textContent = `Checking required data... Plan: ${brainLabel}; train ${trainDays} days, validation ${valDays}, test ${testDays}; ${budget}; sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action); E/P ${trainEcap.value}/${trainPrated.value}.`;
+        trainPlan.textContent = `Checking required data... Plan: ${brainLabel}; device ${trainDevice.value}; train ${trainDays} days, validation ${valDays}, test ${testDays}; ${budget}; sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action); E/P ${trainEcap.value}/${trainPrated.value}.`;
         trainOracleStatusTimer = setTimeout(refreshTrainingOracleStatus, 250);
       }
     }
@@ -3824,6 +3841,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             dataset_id: trainDataset.value,
             algo: trainAlgo.value,
             obs_variant: trainObservation.value,
+            device: trainDevice.value,
             e_cap_kwh: Number(trainEcap.value),
             p_rated_kw: Number(trainPrated.value),
             val_days: Number(trainValDays.value),
@@ -3845,7 +3863,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         selectedCheckpointName = activeTrainingCheckpointName;
         trainButton.disabled = true;
         trainStopButton.disabled = false;
-        trainLog.textContent += `Started ${payload.algo} -> ${payload.checkpoint}\n`;
+        trainLog.textContent += `Started ${payload.algo} on ${payload.device} -> ${payload.checkpoint}\n`;
         followTrainingJob(payload.job_id);
       } catch (error) {
         trainLog.textContent += `ERROR: ${error.message}\n`;
@@ -3863,6 +3881,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
 
     trainAlgo.addEventListener("change", updateTrainAlgoFields);
     trainObservation.addEventListener("change", updateTrainPlan);
+    trainDevice.addEventListener("change", updateTrainPlan);
     trainDataset.addEventListener("change", () => {
       refreshControlDtOptions(true);
       updateTrainPlan();

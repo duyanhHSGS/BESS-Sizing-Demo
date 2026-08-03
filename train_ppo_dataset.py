@@ -13,7 +13,7 @@ from baselines import run_drl_policy, run_no_bess
 from bess_env import BESSEnv
 from benchmark import _rolling_30_minute_average
 from common import RESULTS_DIR, load_system_config, make_bess_config, score_month
-from ppo_agent import PPOAgent, RolloutBuffer
+from ppo_agent import PPOAgent, RolloutBuffer, resolve_ppo_device
 from scenario_gen import DayData, MonthData
 from oracle_cache import load_cached_training_grids
 from training_reports import write_curve, write_report
@@ -124,6 +124,7 @@ def main() -> None:
     parser.add_argument("--obs-variant", choices=("base", "fc"), default="base")
     parser.add_argument("--weather-data", default="")
     parser.add_argument("--forecast-artifact", default="")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     args = parser.parse_args()
     if not math.isfinite(args.gamma) or not 0.0 < args.gamma <= 1.0:
         raise SystemExit("gamma must be finite and in (0, 1]")
@@ -200,11 +201,13 @@ def main() -> None:
         control_dt_minutes=args.control_dt_minutes,
         use_forecast=args.obs_variant == "fc",
     )
+    learner_device = resolve_ppo_device(args.device)
     agent = PPOAgent(
         env.obs_dim,
         gamma=gamma,
         lam=args.lambda_value,
         seed=args.seed,
+        device=learner_device,
     )
     assert env.gamma == agent.gamma
     agent.meta = {
@@ -220,6 +223,8 @@ def main() -> None:
         "control_dt_minutes": env.control_dt_minutes,
         "native_steps_per_action": env.native_steps_per_action,
         "billing_mode": billing,
+        "device_requested": args.device,
+        "device": learner_device,
         "train_csv": str(args.csv),
         "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
     }
@@ -265,6 +270,8 @@ def main() -> None:
             "native_dt_minutes": csv_dt * 60.0,
             "control_dt_minutes": env.control_dt_minutes,
             "native_steps_per_action": env.native_steps_per_action,
+            "device_requested": args.device,
+            "device": learner_device,
         },
         "billing_mode": billing,
         "p_ref_kw": p_ref,
@@ -277,6 +284,7 @@ def main() -> None:
         f"[train-ds] {len(days)} days | train {len(train_days)} / "
         f"val {len(val_days)} / test {len(test_days)} | "
         f"gamma {gamma:g} | lambda {args.lambda_value:g} | "
+        f"learner {learner_device} (requested {args.device}) | "
         f"native dt {csv_dt * 60:g}m | control dt {env.control_dt_minutes:g}m | "
         f"p_ref {p_ref:.0f} | val no-BESS {val_base/1e6:.0f}M, oracle {val_oracle/1e6:.0f}M",
         flush=True,
@@ -412,7 +420,7 @@ def main() -> None:
     persist_progress()
 
     test_month = MonthData(days=test_days, source="test")
-    best_agent = PPOAgent(env.obs_dim)
+    best_agent = PPOAgent(env.obs_dim, device=learner_device)
     best_agent.load(RESULTS_DIR / f"policy_{tag}.pt")
     result = run_drl_policy(test_month, cfg, best_agent, p_ref_kw=p_ref)
     test_cost = score_month(result["p_grid_days"], cfg, days=test_days)["total_cost_vnd"]

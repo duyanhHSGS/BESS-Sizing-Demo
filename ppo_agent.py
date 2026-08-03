@@ -15,6 +15,21 @@ torch.set_num_threads(6)
 _LOG_2PI = float(np.log(2.0 * np.pi))
 
 
+def resolve_ppo_device(device: str = "auto") -> str:
+    requested = str(device).lower()
+    if requested not in {"auto", "cpu", "cuda"}:
+        raise ValueError("PPO device must be 'auto', 'cpu', or 'cuda'")
+    if requested == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "PPO device='cuda' requested, but PyTorch reports that CUDA is unavailable"
+            )
+        return "cuda"
+    if requested == "cpu":
+        return "cpu"
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def _mlp(inp, out, hidden=64):
     return nn.Sequential(
         nn.Linear(inp, hidden), nn.Tanh(),
@@ -62,29 +77,44 @@ class RolloutBuffer:
 class PPOAgent:
     def __init__(self, obs_dim: int, lr=3e-4, gamma=PPO_GAMMA, lam=PPO_LAMBDA,
                  clip=0.2, epochs=8, minibatch=256, ent_coef=3e-3,
-                 vf_coef=0.5, seed=0):
+                 vf_coef=0.5, seed=0, device="auto"):
         torch.manual_seed(seed)
-        self.net = ActorCritic(obs_dim)
+        self.device = torch.device(resolve_ppo_device(device))
+        self.net = ActorCritic(obs_dim).to(self.device)
         self.opt = torch.optim.Adam(self.net.parameters(), lr=lr)
+        # Keep tiny step-by-step environment inference on CPU. Only large PPO
+        # minibatches cross to CUDA, avoiding thousands of tiny PCIe transfers.
+        with torch.random.fork_rng(devices=[]):
+            self.collector_net = ActorCritic(obs_dim).cpu()
+        self._sync_collector()
         self.gamma, self.lam, self.clip = gamma, lam, clip
         self.epochs, self.minibatch = epochs, minibatch
         self.ent_coef, self.vf_coef = ent_coef, vf_coef
         self.meta = {}          # deployment context (p_ref_kw, obs_variant)
         self.forecast_bundle = None
 
+    @torch.inference_mode()
+    def _sync_collector(self):
+        state = {
+            key: value.detach().cpu()
+            for key, value in self.net.state_dict().items()
+        }
+        self.collector_net.load_state_dict(state)
+        self.collector_net.eval()
+
     # ------------------------------------------------------------------
     @torch.inference_mode()
     def act(self, obs: np.ndarray, deterministic: bool = False):
         o = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
-        mean = torch.tanh(self.net.actor(o))
-        std = self.net.log_std.exp()
+        mean = torch.tanh(self.collector_net.actor(o))
+        std = self.collector_net.log_std.exp()
         a = mean if deterministic else torch.normal(mean, std)
         logp = (
             -0.5 * ((a - mean) / std).square()
-            - self.net.log_std
+            - self.collector_net.log_std
             - 0.5 * _LOG_2PI
         ).sum(-1)
-        v = self.net.value(o)
+        v = self.collector_net.value(o)
         return (float(np.clip(a.item(), -1.0, 1.0)),
                 float(logp.item()), float(v.item()))
 
@@ -93,7 +123,7 @@ class PPOAgent:
     def predict_action(self, obs: np.ndarray) -> float:
         """Deterministic actor-only inference for evaluation rollouts."""
         o = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
-        mean = torch.tanh(self.net.actor(o))
+        mean = torch.tanh(self.collector_net.actor(o))
         return float(np.clip(mean.item(), -1.0, 1.0))
 
     # ------------------------------------------------------------------
@@ -111,17 +141,20 @@ class PPOAgent:
         ret = adv + buf.val[:n]
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-        obs = torch.as_tensor(buf.obs[:n])
-        act = torch.as_tensor(buf.act[:n])
-        logp_old = torch.as_tensor(buf.logp[:n])
-        adv_t = torch.as_tensor(adv)
-        ret_t = torch.as_tensor(ret)
+        obs = torch.as_tensor(buf.obs[:n], device=self.device)
+        act = torch.as_tensor(buf.act[:n], device=self.device)
+        logp_old = torch.as_tensor(buf.logp[:n], device=self.device)
+        adv_t = torch.as_tensor(adv, device=self.device)
+        ret_t = torch.as_tensor(ret, device=self.device)
 
         idx = np.arange(n)
         for _ in range(self.epochs):
             np.random.shuffle(idx)
             for s in range(0, n, self.minibatch):
-                mb = idx[s:s + self.minibatch]
+                mb = torch.as_tensor(
+                    idx[s:s + self.minibatch], dtype=torch.long,
+                    device=self.device,
+                )
                 dist = self.net.dist(obs[mb])
                 logp = dist.log_prob(act[mb]).sum(-1)
                 ratio = torch.exp(logp - logp_old[mb])
@@ -135,13 +168,18 @@ class PPOAgent:
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.opt.step()
+        self._sync_collector()
         buf.ptr = 0
 
     # ------------------------------------------------------------------
     # self.meta carries deployment context (e.g. p_ref_kw the observation
     # normalisation was trained with) so loaders can reconstruct the env.
     def save(self, path):
-        payload = {"algo": "ppo", "state_dict": self.net.state_dict(),
+        state = {
+            key: value.detach().cpu()
+            for key, value in self.net.state_dict().items()
+        }
+        payload = {"algo": "ppo", "state_dict": state,
                    "meta": dict(self.meta)}
         if self.forecast_bundle is not None:
             payload["forecast_bundle"] = {
@@ -151,7 +189,7 @@ class PPOAgent:
         torch.save(payload, path)
 
     def load(self, path):
-        ck = torch.load(path, map_location="cpu")
+        ck = torch.load(path, map_location=self.device)
         if isinstance(ck, dict) and "state_dict" in ck:
             self.net.load_state_dict(ck["state_dict"])
             self.meta = ck.get("meta", {}) or {}
@@ -160,4 +198,5 @@ class PPOAgent:
             self.net.load_state_dict(ck)
             self.meta = {}
             self.forecast_bundle = None
+        self._sync_collector()
         self.net.eval()

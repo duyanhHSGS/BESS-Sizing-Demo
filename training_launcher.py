@@ -173,6 +173,9 @@ def build_training_command(
     obs_variant = str(payload.get("obs_variant", "base")).strip().lower()
     if obs_variant not in {"base", "fc"}:
         raise TrainingLaunchError("obs_variant must be base or fc")
+    device = str(payload.get("device", "auto")).strip().lower()
+    if device not in {"auto", "cpu", "cuda"}:
+        raise TrainingLaunchError("Training device must be auto, cpu, or cuda")
     control_dt_minutes = _control_dt_minutes(payload, csv_path)
     tag = _training_tag(
         payload, dataset_id, e_cap, p_rated, algo, control_dt_minutes, obs_variant
@@ -206,6 +209,8 @@ def build_training_command(
         str(control_dt_minutes),
         "--obs-variant",
         obs_variant,
+        "--device",
+        device,
     ]
     if obs_variant == "fc":
         status = weather_status(dataset_id)
@@ -241,11 +246,6 @@ def build_training_command(
             ]
         )
     else:
-        device = str(payload.get("device", "auto")).strip().lower()
-        if device not in {"auto", "cpu", "cuda"}:
-            raise TrainingLaunchError(
-                "GREPO device must be auto, cpu, or cuda"
-            )
         gamma = _bounded_float(
             payload,
             "grepo_gamma",
@@ -266,12 +266,10 @@ def build_training_command(
                 str(_float(payload, "std", 0.30)),
                 "--gamma",
                 str(gamma),
-                "--device",
-                device,
             ]
         )
     return {"cmd": cmd, "tag": tag, "checkpoint": str(checkpoint), "algo": algo,
-            "obs_variant": obs_variant}
+            "obs_variant": obs_variant, "device": device}
 
 
 def training_oracle_parameters(payload: dict, parameters: dict) -> tuple[Path, dict]:

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import argparse
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -369,13 +369,72 @@ def main():
                   f"val {val_cost/1e6:8.1f}M | saving {sav:5.1f}% | "
                   f"gap {gap:6.1f}% | no new best", flush=True)
 
+    test_days = csv_days[-args.test_days:]
+    test_month = MonthData(days=test_days, source="csv_test")
+    best_agent = GREPOAgent(
+        control_probe.obs_dim,
+        n_group=args.group,
+        gamma=args.gamma,
+        std=args.std,
+        beta=args.beta,
+        seed=args.seed,
+        device=learner_device,
+        batch_samples=batch_samples,
+    )
+    best_agent.load(RESULTS_DIR / f"policy_{tag}.pt")
+    test_result = run_drl_policy(test_month, cfg, best_agent, p_ref_kw=p_ref)
+    test_policy = score_month(
+        test_result["p_grid_days"], cfg, days=test_days
+    )
+    test_no_bess = score_month(
+        run_no_bess(test_month, cfg)["p_grid_days"], cfg, days=test_days
+    )
+    test_oracle_grids = load_cached_training_grids(
+        args.oracle_cache, [day.day_index for day in test_days]
+    )
+    test_oracle = score_month(test_oracle_grids, cfg, days=test_days)
+    test_saving = (
+        (test_no_bess["total_cost_vnd"] - test_policy["total_cost_vnd"])
+        / test_no_bess["total_cost_vnd"] * 100
+    )
+    test_oracle_gap = (
+        (test_policy["total_cost_vnd"] - test_oracle["total_cost_vnd"])
+        / test_oracle["total_cost_vnd"] * 100
+    )
+    best_agent.meta = {
+        **best_agent.meta,
+        "test_saving_pct": round(test_saving, 2),
+        "test_oracle_gap_pct": round(test_oracle_gap, 2),
+        "test_peak_kw": round(test_policy["pmax_month_kw"], 2),
+        "trained": date.today().isoformat(),
+    }
+    best_agent.save(RESULTS_DIR / f"policy_{tag}.pt")
+
     report["status"] = "complete"
     report["completed_at"] = datetime.now(timezone.utc).isoformat()
     report["runtime"] = _runtime_snapshot(perf)
+    report["test"] = {
+        "policy_cost_vnd": test_policy["total_cost_vnd"],
+        "no_bess_vnd": test_no_bess["total_cost_vnd"],
+        "oracle_vnd": test_oracle["total_cost_vnd"],
+        "saving_pct": test_saving,
+        "oracle_gap_pct": test_oracle_gap,
+        "energy_cost_vnd": test_policy["energy_cost_vnd"],
+        "demand_cost_vnd": test_policy["demand_cost_vnd"],
+        "peak_kw": test_policy["pmax_month_kw"],
+    }
     io_started = time.perf_counter()
     write_curve(curve_path, curve)
     write_report(report_path, report)
     perf["checkpoint_report_io_seconds"] += time.perf_counter() - io_started
+    print(
+        f"[grepo] TEST {test_days[0].date_iso}->{test_days[-1].date_iso}: "
+        f"{test_policy['total_cost_vnd']/1e6:.1f}M vs no-BESS "
+        f"{test_no_bess['total_cost_vnd']/1e6:.1f}M -> saving {test_saving:.2f}% | "
+        f"oracle {test_oracle['total_cost_vnd']/1e6:.1f}M -> gap {test_oracle_gap:.2f}% | "
+        f"peak {test_policy['pmax_month_kw']:.1f} kW",
+        flush=True,
+    )
     print(f"[grepo] done in {time.time()-t0:.0f}s. Best val "
           f"{best_val/1e6:.1f}M VND -> policy_{tag}.pt", flush=True)
 
