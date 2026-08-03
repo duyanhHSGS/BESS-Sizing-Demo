@@ -18,6 +18,7 @@ from scenario_gen import DayData, MonthData
 from oracle_cache import load_cached_training_grids
 from training_reports import write_curve, write_report
 from settings import PPO_GAMMA, PPO_LAMBDA
+from weather_forecast import fit_attach_forecasts
 
 
 ROLLOUT_DAYS = 32
@@ -120,6 +121,9 @@ def main() -> None:
     parser.add_argument("--oracle-cache", required=True)
     parser.add_argument("--val-days", type=int, default=30)
     parser.add_argument("--test-days", type=int, default=30)
+    parser.add_argument("--obs-variant", choices=("base", "fc"), default="base")
+    parser.add_argument("--weather-data", default="")
+    parser.add_argument("--forecast-artifact", default="")
     args = parser.parse_args()
     if not math.isfinite(args.gamma) or not 0.0 < args.gamma <= 1.0:
         raise SystemExit("gamma must be finite and in (0, 1]")
@@ -146,6 +150,14 @@ def main() -> None:
         for day in train_days
     ]
     d_run0 = 0.5 * float(np.mean(daily_peaks))
+    forecast_model = None
+    if args.obs_variant == "fc":
+        if not args.weather_data or not args.forecast_artifact:
+            raise SystemExit("forecast mode requires --weather-data and --forecast-artifact")
+        forecast_model = fit_attach_forecasts(
+            days, Path(args.weather_data), len(train_days),
+            Path(args.forecast_artifact), p_ref,
+        )
 
     base = load_system_config()
     cfg = make_bess_config(base, args.e_cap, args.p_rated, base.P_target_user)
@@ -186,6 +198,7 @@ def main() -> None:
         d_run_init_kw=d_run0,
         gamma=gamma,
         control_dt_minutes=args.control_dt_minutes,
+        use_forecast=args.obs_variant == "fc",
     )
     agent = PPOAgent(
         env.obs_dim,
@@ -198,7 +211,7 @@ def main() -> None:
         "p_ref_kw": p_ref,
         "e_cap_kwh": args.e_cap,
         "p_rated_kw": args.p_rated,
-        "obs_variant": "base",
+        "obs_variant": args.obs_variant,
         "obs_dim": env.obs_dim,
         "d_run_init_kw": d_run0,
         "gamma": gamma,
@@ -210,6 +223,11 @@ def main() -> None:
         "train_csv": str(args.csv),
         "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
     }
+    if forecast_model:
+        agent.meta["forecast_model"] = forecast_model["model"]
+        agent.meta["forecast_artifact"] = forecast_model["artifact"]
+        agent.meta["forecast_model_artifact"] = forecast_model["model_artifact"]
+        agent.meta["weather_data"] = str(Path(args.weather_data))
     decisions_per_day = len(days[0].load) // env.native_steps_per_action
     buffer = RolloutBuffer(decisions_per_day * ROLLOUT_DAYS, env.obs_dim)
 
@@ -306,7 +324,7 @@ def main() -> None:
 
     month_index = 0
     augment_started = time.perf_counter()
-    first_month = augment_month(train_months[0], rng)
+    first_month = train_months[0] if args.obs_variant == "fc" else augment_month(train_months[0], rng)
     perf["augment"] += time.perf_counter() - augment_started
     obs = env.reset(first_month)
     steps = 0
@@ -323,9 +341,8 @@ def main() -> None:
         if done:
             month_index += 1
             augment_started = time.perf_counter()
-            next_month = augment_month(
-                train_months[month_index % len(train_months)], rng
-            )
+            source_month = train_months[month_index % len(train_months)]
+            next_month = source_month if args.obs_variant == "fc" else augment_month(source_month, rng)
             perf["augment"] += time.perf_counter() - augment_started
             next_obs = env.reset(next_month)
         obs = next_obs

@@ -37,6 +37,7 @@ class DayData:
     weather: str
     day_index: int = 0
     date_iso: str | None = None  # calendar date (API-sourced data)
+    forecast: np.ndarray | None = None  # [step, 4], real causal model output / p_ref
 
 
 @dataclass

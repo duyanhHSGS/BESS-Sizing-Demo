@@ -18,6 +18,7 @@ from training_datasets import (
     require_min_days,
 )
 from training_jobs import Job, JobManager
+from weather_forecast import forecast_artifact_path, weather_path, weather_status
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -117,12 +118,13 @@ def _training_tag(
     p_rated: float,
     algo: str,
     control_dt_minutes: int,
+    obs_variant: str = "base",
 ) -> str:
     explicit = sanitize_tag(payload.get("tag", ""))
     if explicit:
         return explicit
     return sanitize_tag(
-        f"{algo}_{dataset_id}_{e_cap:.0f}kwh_{p_rated:.0f}kw_dt{control_dt_minutes}m"
+        f"{algo}_{dataset_id}_{obs_variant}_{e_cap:.0f}kwh_{p_rated:.0f}kw_dt{control_dt_minutes}m"
     )
 
 
@@ -168,9 +170,12 @@ def build_training_command(
     p_rated = _float(payload, "p_rated_kw")
     val_days, test_days = _split_days(payload)
     dataset_id = str(payload.get("dataset_id", "dataset"))
+    obs_variant = str(payload.get("obs_variant", "base")).strip().lower()
+    if obs_variant not in {"base", "fc"}:
+        raise TrainingLaunchError("obs_variant must be base or fc")
     control_dt_minutes = _control_dt_minutes(payload, csv_path)
     tag = _training_tag(
-        payload, dataset_id, e_cap, p_rated, algo, control_dt_minutes
+        payload, dataset_id, e_cap, p_rated, algo, control_dt_minutes, obs_variant
     )
     checkpoint = ensure_inside_base(base_dir / "checkpoints" / f"policy_{tag}.pt", base_dir)
     script = PPO_SCRIPT if algo == "ppo" else GREPO_SCRIPT
@@ -199,7 +204,16 @@ def build_training_command(
         str(oracle_cache_path),
         "--control-dt-minutes",
         str(control_dt_minutes),
+        "--obs-variant",
+        obs_variant,
     ]
+    if obs_variant == "fc":
+        status = weather_status(dataset_id)
+        if not status.get("ready"):
+            raise TrainingLaunchError(status.get("message") or "real weather is not ready")
+        weather_file = ensure_inside_base(weather_path(dataset_id), base_dir)
+        artifact = ensure_inside_base(forecast_artifact_path(tag), base_dir)
+        cmd.extend(["--weather-data", str(weather_file), "--forecast-artifact", str(artifact)])
     if algo == "ppo":
         gamma = _bounded_float(
             payload,
@@ -256,7 +270,8 @@ def build_training_command(
                 device,
             ]
         )
-    return {"cmd": cmd, "tag": tag, "checkpoint": str(checkpoint), "algo": algo}
+    return {"cmd": cmd, "tag": tag, "checkpoint": str(checkpoint), "algo": algo,
+            "obs_variant": obs_variant}
 
 
 def training_oracle_parameters(payload: dict, parameters: dict) -> tuple[Path, dict]:

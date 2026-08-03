@@ -22,12 +22,13 @@ import numpy as np
 from common import RESULTS_DIR, load_system_config, make_bess_config, score_month
 from benchmark import _rolling_30_minute_average
 from scenario_gen import MonthData
-from bess_env import BESSEnv, OBS_DIM
+from bess_env import BESSEnv
 from grepo_agent import GREPOAgent, resolve_grepo_device
 from baselines import run_no_bess, run_drl_policy
 from oracle_cache import load_cached_training_grids
 from training_reports import write_curve, write_report
 from settings import GREPO_GAMMA
+from weather_forecast import fit_attach_forecasts
 
 VAL_EVERY = 10
 LOG_EVERY_ITERS = 4
@@ -100,6 +101,9 @@ def main():
                     help="Number of CSV days reserved for validation.")
     ap.add_argument("--test-days", type=int, default=30,
                     help="Number of CSV days reserved for test holdout.")
+    ap.add_argument("--obs-variant", choices=("base", "fc"), default="base")
+    ap.add_argument("--weather-data", default="")
+    ap.add_argument("--forecast-artifact", default="")
     args = ap.parse_args()
     if not np.isfinite(args.gamma) or not 0.0 < args.gamma <= 1.0:
         raise SystemExit("gamma must be finite and in (0, 1]")
@@ -152,6 +156,14 @@ def main():
     ]
     d_run0 = 0.5 * float(np.mean(peaks))
     train_days = csv_days[:-split_days]
+    forecast_model = None
+    if args.obs_variant == "fc":
+        if not args.weather_data or not args.forecast_artifact:
+            raise SystemExit("forecast mode requires --weather-data and --forecast-artifact")
+        forecast_model = fit_attach_forecasts(
+            csv_days, Path(args.weather_data), len(train_days),
+            Path(args.forecast_artifact), p_ref,
+        )
     val_month = MonthData(source="csv_val")
     val_month.days = csv_days[-split_days:-args.test_days]
     tag = args.tag or f"grepo_{cfg.E_cap:.0f}kwh_{cfg.P_rated_nominal:.0f}kw"
@@ -161,6 +173,7 @@ def main():
         p_ref_kw=p_ref,
         gamma=args.gamma,
         control_dt_minutes=args.control_dt_minutes,
+        use_forecast=args.obs_variant == "fc",
         record_trajectory=False,
     )
     control_probe = make_env()
@@ -172,7 +185,7 @@ def main():
         args.device, batch_samples=batch_samples
     )
     agent = GREPOAgent(
-        OBS_DIM, n_group=args.group, seed=args.seed,
+        control_probe.obs_dim, n_group=args.group, seed=args.seed,
         gamma=args.gamma, beta=args.beta, std=args.std,
         device=learner_device, batch_samples=batch_samples,
     )
@@ -188,9 +201,16 @@ def main():
         "beta": args.beta,
         "std": args.std,
         "gamma": args.gamma,
+        "obs_variant": args.obs_variant,
+        "obs_dim": control_probe.obs_dim,
         "native_dt_minutes": cfg.dt * 60.0,
         "control_dt_minutes": args.control_dt_minutes,
     }
+    if forecast_model:
+        agent.meta["forecast_model"] = forecast_model["model"]
+        agent.meta["forecast_artifact"] = forecast_model["artifact"]
+        agent.meta["forecast_model_artifact"] = forecast_model["model_artifact"]
+        agent.meta["weather_data"] = str(Path(args.weather_data))
     if d_run0 is not None:
         agent.meta["d_run_init_kw"] = d_run0
     agent.meta["native_steps_per_action"] = control_probe.native_steps_per_action

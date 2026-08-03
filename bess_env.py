@@ -1,9 +1,9 @@
-"""bess_env.py  CMDP environment for forecast-free BESS dispatch.
+"""bess_env.py  CMDP environment for reactive or real-forecast BESS dispatch.
 
 Design follows the two-layer framework in CoSoLyThuyet_DRL_BESS_Sizing.html
-(Hu et al. 2026): the agent sees only real-time measurements (load, PV, SOC,
-tariff, running monthly peak)  NO forecast  and outputs one continuous
-action a in [-1, 1] mapped to a desired BESS power.
+(Hu et al. 2026): the 13-input variant sees real-time measurements only.
+The 17-input variant adds four externally prepared, causal look-ahead
+predictions. Both output one continuous action in [-1, 1].
 
 HARD-CONSTRAINT SAFETY PROJECTION (never learned, always enforced):
   * zero export : discharge is capped at the net load, so
@@ -63,21 +63,6 @@ OBS_DIM_FC = 17             # forecast-informed variant (+4 features)
 REWARD_SCALE = 1e6          # rewards in millions of VND
 
 
-def _ar1_noise_series(actual: np.ndarray, sigma: float, rho: float,
-                      rng: np.random.Generator) -> np.ndarray:
-    """Multiplicative AR(1) forecast error  same model Tool A/benchmark
-    uses for the SADRBC forecast, so both controllers see equal quality."""
-    if sigma <= 0:
-        return actual.copy()
-    n = len(actual)
-    e = np.zeros(n)
-    w = sigma * np.sqrt(1.0 - rho ** 2)
-    innovations = w * rng.standard_normal(max(0, n - 1))
-    for t in range(1, n):
-        e[t] = rho * e[t - 1] + innovations[t - 1]
-    return np.maximum(0.0, actual * (1.0 + e))
-
-
 class BESSEnv:
     """Month-long episode using the selected data resolution."""
 
@@ -88,8 +73,6 @@ class BESSEnv:
                  gamma: float = PPO_GAMMA,
                  control_dt_minutes: float | None = None,
                  use_forecast: bool = False,
-                 fc_sigma_load: float = 0.05, fc_sigma_pv: float = 0.15,
-                 fc_rho: float = 0.9, fc_seed: int = 12345,
                  n_steps: int = STEPS_PER_DAY,
                  dt_hours: float = DT_HOURS,
                  record_trajectory: bool = True):
@@ -122,14 +105,10 @@ class BESSEnv:
                            else float(d_run_init_frac) * self.p_ref)
         self.gamma = float(gamma)
         self.record_trajectory = bool(record_trajectory)
-        # forecast-informed variant: obs gains 4 look-ahead features fed by
-        # a NOISY short-horizon forecast (never the actuals)
+        # Forecast mode accepts only externally prepared causal predictions.
+        # Missing predictions are an error; future actuals are never used here.
         self.use_forecast = bool(use_forecast)
         self.obs_dim = OBS_DIM_FC if self.use_forecast else OBS_DIM
-        self.fc_sigma_load, self.fc_sigma_pv = fc_sigma_load, fc_sigma_pv
-        self.fc_rho = fc_rho
-        self._fc_rng = np.random.default_rng(fc_seed)
-        self._fc_load = self._fc_pv = None
         base_tar = tariff_vector(cfg)
         self._tar_base = base_tar
         # Ch nht khng cao im (quy tc EVN, bt qua TOU_RULES):
@@ -245,10 +224,14 @@ class BESSEnv:
         if not self.use_forecast:
             return
         day = self.month.days[self.day]
-        self._fc_load = _ar1_noise_series(day.load, self.fc_sigma_load,
-                                          self.fc_rho, self._fc_rng)
-        self._fc_pv = _ar1_noise_series(day.pv, self.fc_sigma_pv,
-                                        self.fc_rho, self._fc_rng)
+        forecast = getattr(day, "forecast", None)
+        expected = (self.n_steps, 4)
+        if forecast is None or np.asarray(forecast).shape != expected:
+            raise ValueError(
+                f"forecast mode requires real causal predictions shaped {expected}"
+            )
+        if not np.isfinite(forecast).all():
+            raise ValueError("forecast predictions contain non-finite values")
 
     def _cache_static_observations(self):
         """Cache observation fields that cannot change within the day."""
@@ -282,19 +265,9 @@ class BESSEnv:
         self._obs_static = cache
 
     def _fc_features(self, t):
-        """4 look-ahead features: mean forecast eff-load & PV over the next
-        1 h (t+1..t+4) and the following 2 h (t+5..t+12), /p_ref."""
-        fc_eff = np.maximum(0.0, self._fc_load - self._fc_pv)
-        out = []
-        q = self.n_steps // 24  # s mu / gi
-        for lo, hi in ((t + 1, t + 1 + q), (t + 1 + q, t + 1 + 3 * q)):
-            lo, hi = min(lo, self.n_steps), min(hi, self.n_steps)
-            if lo >= hi:                       # end of day  hold last value
-                out += [fc_eff[-1] / self.p_ref, self._fc_pv[-1] / self.p_ref]
-            else:
-                out += [float(fc_eff[lo:hi].mean()) / self.p_ref,
-                        float(self._fc_pv[lo:hi].mean()) / self.p_ref]
-        return out
+        """Real model predictions: next-hour and following-two-hour
+        effective load/PV means, already normalized by p_ref."""
+        return self.month.days[self.day].forecast[t]
 
     # ------------------------------------------------------------------
     def _obs(self) -> np.ndarray:

@@ -37,6 +37,7 @@ from training_launcher import (
     start_training,
     training_oracle_status,
 )
+from weather_forecast import WeatherError, fetch_weather, weather_status
 
 
 app = Flask(__name__)
@@ -88,6 +89,36 @@ def candidate_oracle(index):
 @app.route("/api/training/datasets", methods=["GET"])
 def training_datasets():
     return jsonify(list_datasets())
+
+
+@app.route("/api/weather/context", methods=["GET"])
+def weather_context():
+    rows = []
+    for dataset in list_datasets():
+        try:
+            status = weather_status(dataset["id"])
+        except (DatasetError, WeatherError, ValueError) as exc:
+            status = {"ready": False, "message": str(exc)}
+        rows.append({**dataset, "weather": status})
+    return jsonify({"datasets": rows})
+
+
+@app.route("/api/weather/status", methods=["GET"])
+def weather_dataset_status():
+    try:
+        return jsonify(weather_status(request.args.get("dataset_id", "")))
+    except (DatasetError, WeatherError, ValueError) as exc:
+        return jsonify({"ready": False, "error": str(exc)}), 422
+
+
+@app.route("/api/weather/fetch", methods=["POST"])
+def weather_fetch():
+    try:
+        return jsonify(fetch_weather(request.get_json(silent=True) or {}))
+    except (DatasetError, WeatherError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 422
+    except Exception as exc:  # network/provider failures are shown, never replaced
+        return jsonify({"error": f"Weather provider failed: {exc}"}), 502
 
 
 @app.route("/api/training/checkpoints", methods=["GET"])

@@ -24,11 +24,11 @@ from zoneinfo import ZoneInfo
 
 
 SPEC = {
-    "name": "tande",
+    "name": "namduoc",
     "base_url": "https://solar.datainsight.vn",
     "username": "oee2024@gmail.com",
     "password": "Oee@2124",
-    "device_id": "ca1a3d20-8933-11f0-bac1-2533bc830589",
+    "device_id": "39ce5a90-84b4-11f0-afa5-2533bc830589",
     "key_load": "INVT_T:PLoad",
     "key_pv": "INVT_T:ActivePowerSum",
     "unit_scale": 1.0,

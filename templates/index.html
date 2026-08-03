@@ -801,6 +801,7 @@
   <main>
     <nav class="tabs" aria-label="Sizing Demo sections">
       <button class="tab-button active" type="button" data-tab-target="sizing-demo">Sizing Demo</button>
+      <button class="tab-button" type="button" data-tab-target="get-weather">Get Weather</button>
       <button class="tab-button" type="button" data-tab-target="training-lab">Training Lab</button>
       <button class="tab-button" type="button" data-tab-target="benchmarking">Benchmarking</button>
       <button class="tab-button" type="button" data-tab-target="dispatch-viewer">Dispatch Viewer</button>
@@ -1327,6 +1328,42 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       </section>
     </section>
 
+    <section id="tab-get-weather" class="tab-panel">
+      <div class="card">
+        <h2>Get Weather</h2>
+        <p class="chart-help">Download real hourly weather aligned to a dated site dataset. Forecast training is blocked when coverage is missing; no synthetic fallback is created.</p>
+        <div class="row">
+          <label>Dataset <select id="weather-dataset"></select></label>
+          <label>Provider
+            <select id="weather-provider">
+              <option value="open-meteo">Open-Meteo archive</option>
+              <option value="custom">Custom compatible API</option>
+            </select>
+          </label>
+          <label>Latitude <input id="weather-latitude" type="number" min="-90" max="90" step="0.000001" placeholder="10.8231" required></label>
+          <label>Longitude <input id="weather-longitude" type="number" min="-180" max="180" step="0.000001" placeholder="106.6297" required></label>
+          <label>Timezone <input id="weather-timezone" value="Asia/Ho_Chi_Minh" size="20"></label>
+          <label class="weather-custom-field" style="display:none">HTTPS URL template
+            <input id="weather-custom-url" size="48" placeholder="https://api.example.com?...{start_date}...">
+          </label>
+          <label class="weather-custom-field" style="display:none">API-key header
+            <input id="weather-api-key-header" size="18" placeholder="X-API-Key">
+          </label>
+          <label class="weather-custom-field" style="display:none">API key
+            <input id="weather-api-key" type="password" autocomplete="off" size="24">
+          </label>
+          <button id="btn-weather-fetch" class="primary" type="button">Get real weather</button>
+        </div>
+        <div id="weather-status" class="info">Choose a dated dataset and site coordinates.</div>
+        <pre id="weather-log" class="log"></pre>
+        <p class="chart-help">Open-Meteo data source: <a href="https://open-meteo.com/" target="_blank" rel="noopener">open-meteo.com</a>. Custom providers must return the same hourly JSON field shape.</p>
+      </div>
+      <div class="card">
+        <h2>Forecast contract</h2>
+        <div class="info">The site forecaster uses only current/past PV, 1/5/15-minute PV changes, recent load/PV, weather freshness, cloud cover, irradiance, temperature and precipitation. It predicts next-hour and following-two-hour effective load/PV. Training Lab injects those four predictions into the 17-input policy.</div>
+      </div>
+    </section>
+
     <section id="tab-training-lab" class="tab-panel">
       <div class="card">
         <h2>Training Lab</h2>
@@ -1337,6 +1374,12 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
               <option value="ppo">PPO</option>
               <option value="grepo">GREPO</option>
               <option value="grpo">GRPO (not implemented)</option>
+            </select>
+          </label>
+          <label>Brain mode
+            <select id="train-observation">
+              <option value="base">Reactive — 13 inputs</option>
+              <option value="fc">Forecast — 17 inputs</option>
             </select>
           </label>
           <label>E_cap (kWh) <input type="number" id="train-ecap" step="50" value="{{ battery_capacity_kWh }}"></label>
@@ -3224,6 +3267,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           });
           if (target === "training-lab") {
             refreshTrainingLab();
+          } else if (target === "get-weather") {
+            loadWeatherContext();
           } else if (target === "benchmarking") {
             refreshBenchmarkingTab();
           } else if (target === "dispatch-viewer") {
@@ -3238,8 +3283,102 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       });
     }
 
+    const weatherDataset = document.getElementById("weather-dataset");
+    const weatherProvider = document.getElementById("weather-provider");
+    const weatherLatitude = document.getElementById("weather-latitude");
+    const weatherLongitude = document.getElementById("weather-longitude");
+    const weatherTimezone = document.getElementById("weather-timezone");
+    const weatherCustomUrl = document.getElementById("weather-custom-url");
+    const weatherApiKeyHeader = document.getElementById("weather-api-key-header");
+    const weatherApiKey = document.getElementById("weather-api-key");
+    const weatherFetchButton = document.getElementById("btn-weather-fetch");
+    const weatherStatus = document.getElementById("weather-status");
+    const weatherLog = document.getElementById("weather-log");
+
+    async function weatherApi(path, options = {}) {
+      const response = await fetch(path, options);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      return payload;
+    }
+
+    function selectedWeatherDatasetStatus() {
+      const option = weatherDataset.selectedOptions[0];
+      return option ? JSON.parse(option.dataset.weather || "{}") : {};
+    }
+
+    function renderWeatherStatus() {
+      const status = selectedWeatherDatasetStatus();
+      if (!weatherDataset.value) {
+        weatherStatus.textContent = "No dated local dataset is available.";
+        weatherFetchButton.disabled = true;
+        return;
+      }
+      weatherFetchButton.disabled = false;
+      weatherStatus.textContent = status.ready
+        ? `Ready: ${status.provider}, ${status.start_date} to ${status.end_date}, ${status.hours} real hourly rows.`
+        : (status.message || "Real weather has not been downloaded.");
+    }
+
+    async function loadWeatherContext() {
+      const previous = weatherDataset.value;
+      const payload = await weatherApi("/api/weather/context");
+      weatherDataset.innerHTML = payload.datasets.map((dataset) => (
+        `<option value="${escapeHtml(dataset.id)}" data-weather="${escapeHtml(JSON.stringify(dataset.weather || {}))}">` +
+        `${escapeHtml(dataset.source)} (${dataset.n_days} days)</option>`
+      )).join("");
+      if (previous && Array.from(weatherDataset.options).some((option) => option.value === previous)) {
+        weatherDataset.value = previous;
+      }
+      renderWeatherStatus();
+    }
+
+    function updateWeatherProvider() {
+      document.querySelectorAll(".weather-custom-field").forEach((field) => {
+        field.style.display = weatherProvider.value === "custom" ? "inline-flex" : "none";
+      });
+    }
+
+    async function getRealWeather() {
+      if (weatherLatitude.value === "" || weatherLongitude.value === "") {
+        weatherLog.textContent = "ERROR: Enter the site's real latitude and longitude.\n";
+        return;
+      }
+      weatherFetchButton.disabled = true;
+      weatherLog.textContent = "Requesting real hourly weather...\n";
+      try {
+        const payload = await weatherApi("/api/weather/fetch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            dataset_id: weatherDataset.value,
+            provider: weatherProvider.value,
+            latitude: Number(weatherLatitude.value),
+            longitude: Number(weatherLongitude.value),
+            timezone: weatherTimezone.value.trim(),
+            custom_url: weatherCustomUrl.value.trim(),
+            api_key_header: weatherApiKeyHeader.value.trim(),
+            api_key: weatherApiKey.value,
+          }),
+        });
+        weatherApiKey.value = "";
+        weatherLog.textContent += `Saved ${payload.hours} real hourly rows for ${payload.start_date} to ${payload.end_date}.\n`;
+        await loadWeatherContext();
+      } catch (error) {
+        weatherLog.textContent += `ERROR: ${error.message}\nNo fallback data was created.\n`;
+      } finally {
+        weatherFetchButton.disabled = false;
+      }
+    }
+
+    weatherProvider.addEventListener("change", updateWeatherProvider);
+    weatherDataset.addEventListener("change", renderWeatherStatus);
+    weatherFetchButton.addEventListener("click", getRealWeather);
+    updateWeatherProvider();
+
     const trainDataset = document.getElementById("train-dataset");
     const trainAlgo = document.getElementById("train-algo");
+    const trainObservation = document.getElementById("train-observation");
     const trainEcap = document.getElementById("train-ecap");
     const trainPrated = document.getElementById("train-prated");
     const trainValDays = document.getElementById("train-val-days");
@@ -3418,6 +3557,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         : `gamma ${training.gamma ?? meta.gamma ?? "?"}, group ${training.group ?? meta.group ?? "?"}, beta ${training.beta ?? meta.beta ?? "?"}, std ${training.std ?? meta.std ?? "?"}`;
       const details = [
         ["Algorithm", checkpoint.algo || saved.algorithm],
+        ["Brain mode", meta.obs_variant === "fc" ? "Forecast — 17 inputs" : "Reactive — 13 inputs"],
         ["Battery E/P", `${checkpoint.e_cap_kwh ?? saved.battery?.e_cap_kwh ?? "?"} kWh / ${checkpoint.p_rated_kw ?? saved.battery?.p_rated_kw ?? "?"} kW`],
         ["Billing mode", checkpoint.billing_mode || saved.billing_mode],
         ["Dataset", dataset.source || meta.train_csv],
@@ -3499,6 +3639,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       const trainDays = days - splitDays;
       const nativeDt = selectedNativeDt();
       const controlDt = selectedControlDt();
+      const brainMode = trainObservation.value;
       const validControlDt = isCompatibleControlDt(controlDt, nativeDt);
       trainButton.disabled = valDays < 1 || testDays < 1 || trainDays < 1 || algo === "grpo" || !validControlDt;
       if (algo === "grpo") {
@@ -3513,13 +3654,24 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         const budget = algo === "ppo"
           ? `${trainSteps.value} PPO steps; gamma ${trainGamma.value}; lambda ${trainLambda.value}`
           : `${trainIters.value} GREPO iterations; gamma ${trainGrepoGamma.value}`;
-        trainPlan.textContent = `Checking exact native-resolution Oracle cache... Plan: train ${trainDays} days, validation ${valDays}, test ${testDays}; ${budget}; sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action); E/P ${trainEcap.value}/${trainPrated.value}.`;
+        const brainLabel = brainMode === "fc" ? "Forecast brain (17 real inputs)" : "Reactive brain (13 inputs)";
+        trainPlan.textContent = `Checking required data... Plan: ${brainLabel}; train ${trainDays} days, validation ${valDays}, test ${testDays}; ${budget}; sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action); E/P ${trainEcap.value}/${trainPrated.value}.`;
         trainOracleStatusTimer = setTimeout(refreshTrainingOracleStatus, 250);
       }
     }
 
     async function refreshTrainingOracleStatus() {
       const requestId = ++trainOracleStatusRequest;
+      if (trainObservation.value === "fc") {
+        const weatherResponse = await fetch(`/api/weather/status?dataset_id=${encodeURIComponent(trainDataset.value)}`);
+        const weatherPayload = await weatherResponse.json().catch(() => ({}));
+        if (requestId !== trainOracleStatusRequest) return;
+        if (!weatherResponse.ok || !weatherPayload.ready) {
+          trainButton.disabled = true;
+          trainPlan.textContent = `Forecast brain blocked: ${weatherPayload.error || weatherPayload.message || "download real weather in Get Weather first."}`;
+          return;
+        }
+      }
       const response = await fetch("/api/training/oracle-status", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3540,7 +3692,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       trainButton.disabled = false;
       const nativeDt = selectedNativeDt();
       const controlDt = selectedControlDt();
-      trainPlan.textContent = `Oracle Chad ready: ${payload.solved_days} native-resolution cached days. Sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action). Training may start without any daily LP.`;
+      const forecastReady = trainObservation.value === "fc" ? " Real weather and the 17-input forecast contract are ready." : "";
+      trainPlan.textContent = `Oracle Chad ready: ${payload.solved_days} native-resolution cached days.${forecastReady} Sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action). Training may start without any daily LP.`;
     }
 
     function drawTrainCurve() {
@@ -3670,6 +3823,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           body: JSON.stringify({
             dataset_id: trainDataset.value,
             algo: trainAlgo.value,
+            obs_variant: trainObservation.value,
             e_cap_kwh: Number(trainEcap.value),
             p_rated_kw: Number(trainPrated.value),
             val_days: Number(trainValDays.value),
@@ -3708,6 +3862,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     }
 
     trainAlgo.addEventListener("change", updateTrainAlgoFields);
+    trainObservation.addEventListener("change", updateTrainPlan);
     trainDataset.addEventListener("change", () => {
       refreshControlDtOptions(true);
       updateTrainPlan();

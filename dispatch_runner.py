@@ -21,6 +21,7 @@ from benchmark import (
     selected_data_path,
 )
 from training_checkpoints import CHECKPOINT_DIR, _load_checkpoint_meta
+from weather_forecast import WeatherError, attach_forecast_artifact
 from baselines import run_sadrbc
 
 
@@ -206,6 +207,22 @@ def run_policy_dispatch(
             f"{control_dt:g}-minute decisions and {actual_native_dt:g}-minute physics"
         )
     p_ref = float(meta.get("p_ref_kw") or _policy_reference_kw(month))
+    if meta.get("obs_variant") == "fc":
+        artifact_value = meta.get("forecast_artifact")
+        if not artifact_value:
+            raise DispatchRunWarning(
+                f"{checkpoint_name}: forecast checkpoint has no real forecast artifact"
+            )
+        try:
+            artifact_path = Path(artifact_value)
+            if not artifact_path.is_absolute():
+                artifact_path = BASE_DIR / artifact_path
+            artifact = ensure_inside_sizing_demo(artifact_path)
+            attach_forecast_artifact(month.days, artifact, p_ref)
+        except (OSError, ValueError, WeatherError) as exc:
+            raise DispatchRunWarning(
+                f"{checkpoint_name}: forecast data cannot be attached ({exc})"
+            ) from exc
     rollout = run_drl_policy(month, cfg, agent, p_ref_kw=p_ref)
     days = policy_result_to_days(month, rollout, cfg, parameters)
     return {

@@ -106,8 +106,7 @@ def validate_dispatch_sampling(meta: dict, native_dt_minutes: float) -> float:
 
 # ---------------------------------------------------------------------------
 def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
-                   measure_latency: bool = False,
-                   fc_seed: int = 12345) -> dict:
+                   measure_latency: bool = False) -> dict:
     """Deterministic rollout of a trained policy. The env variant
     (forecast-informed or not) follows the checkpoint's meta."""
     import time
@@ -117,7 +116,6 @@ def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
     native_dt_minutes = cfg.dt * 60.0
     control_dt_minutes = validate_dispatch_sampling(meta, native_dt_minutes)
     env = BESSEnv(cfg, p_ref_kw=p_ref_kw, use_forecast=use_fc,
-                  fc_seed=fc_seed,
                   d_run_init_kw=meta.get("d_run_init_kw"),
                   gamma=float(meta.get("gamma", PPO_GAMMA)),
                   control_dt_minutes=control_dt_minutes)
