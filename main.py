@@ -24,6 +24,7 @@ from settings import (
     DEFAULT_PARAMETERS,
     FORM_FIELDS,
     GREPO_GAMMA,
+    GREPRO_GAMMA,
     PPO_GAMMA,
     PPO_LAMBDA,
     SAMPLE_BATTERY_CANDIDATES,
@@ -416,6 +417,7 @@ def view_context():
         "ppo_gamma": PPO_GAMMA,
         "ppo_lambda": PPO_LAMBDA,
         "grepo_gamma": GREPO_GAMMA,
+        "grepro_gamma": GREPRO_GAMMA,
         "candidate_oracles": candidate_oracles,
         "csv_has_oracle_cache": oracle_cache.selected_csv_has_cache(PARAMETERS),
         "exact_oracle_cache_exists": any(

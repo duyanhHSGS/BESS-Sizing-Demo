@@ -9,7 +9,7 @@ from pathlib import Path
 
 import oracle_cache
 from benchmark import detect_dt_hours
-from settings import GREPO_GAMMA, PPO_GAMMA, PPO_LAMBDA
+from settings import GREPO_GAMMA, GREPRO_GAMMA, PPO_GAMMA, PPO_LAMBDA
 from training_datasets import (
     DatasetError,
     detect_resolution_minutes,
@@ -26,7 +26,8 @@ CHECKPOINT_DIR = BASE_DIR / "checkpoints"
 USER_DATA_DIR = BASE_DIR / "user_data"
 PPO_SCRIPT = BASE_DIR / "train_ppo_dataset.py"
 GREPO_SCRIPT = BASE_DIR / "train_grepo.py"
-ALGORITHMS = {"ppo", "grepo", "grpo"}
+GREPRO_SCRIPT = BASE_DIR / "train_grepro.py"
+ALGORITHMS = {"ppo", "grepo", "grepro", "grpo"}
 
 
 class TrainingLaunchError(ValueError):
@@ -181,7 +182,11 @@ def build_training_command(
         payload, dataset_id, e_cap, p_rated, algo, control_dt_minutes, obs_variant
     )
     checkpoint = ensure_inside_base(base_dir / "checkpoints" / f"policy_{tag}.pt", base_dir)
-    script = PPO_SCRIPT if algo == "ppo" else GREPO_SCRIPT
+    script = {
+        "ppo": PPO_SCRIPT,
+        "grepo": GREPO_SCRIPT,
+        "grepro": GREPRO_SCRIPT,
+    }[algo]
 
     cmd = [
         python_executable,
@@ -246,10 +251,12 @@ def build_training_command(
             ]
         )
     else:
+        gamma_key = "grepro_gamma" if algo == "grepro" else "grepo_gamma"
+        gamma_default = GREPRO_GAMMA if algo == "grepro" else GREPO_GAMMA
         gamma = _bounded_float(
             payload,
-            "grepo_gamma",
-            GREPO_GAMMA,
+            gamma_key,
+            gamma_default,
             minimum=0.0,
             minimum_inclusive=False,
             maximum=1.0,
@@ -257,13 +264,13 @@ def build_training_command(
         cmd.extend(
             [
                 "--iters",
-                str(_int(payload, "iters", 400)),
+                str(_int(payload, "grepro_iters" if algo == "grepro" else "iters", 200 if algo == "grepro" else 400)),
                 "--group",
-                str(_int(payload, "group", 8)),
+                str(_int(payload, "grepro_group" if algo == "grepro" else "group", 6 if algo == "grepro" else 8)),
                 "--beta",
-                str(_float(payload, "beta", 0.5)),
+                str(_float(payload, "grepro_beta" if algo == "grepro" else "beta", 0.5)),
                 "--std",
-                str(_float(payload, "std", 0.30)),
+                str(_float(payload, "grepro_std" if algo == "grepro" else "std", 0.20 if algo == "grepro" else 0.30)),
                 "--gamma",
                 str(gamma),
             ]
@@ -306,12 +313,18 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
     dataset_id = str(payload.get("dataset_id", "")).strip()
     val_days, test_days = _split_days(payload)
     source, oracle_parameters = training_oracle_parameters(payload, parameters)
-    n_days = require_min_days(source, val_days + test_days + 1)
+    algo = str(payload.get("algo", "ppo")).lower()
+    required_train_days = 30 if algo == "grepro" else 1
+    n_days = require_min_days(source, val_days + test_days + required_train_days)
     oracle_path, _ = oracle_cache.require_cached_oracle(oracle_parameters)
 
     USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    csv_path = export_training_csv(dataset_id, USER_DATA_DIR, min_days=val_days + test_days + 1)
+    csv_path = export_training_csv(
+        dataset_id,
+        USER_DATA_DIR,
+        min_days=val_days + test_days + required_train_days,
+    )
     config_path = write_training_config(oracle_parameters, USER_DATA_DIR)
     spec = build_training_command(payload, csv_path, config_path, oracle_path)
 

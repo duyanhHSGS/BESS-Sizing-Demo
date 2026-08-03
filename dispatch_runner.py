@@ -42,6 +42,7 @@ from common import (  # noqa: E402
     steps_per_day_from_dt,
 )
 from grepo_agent import GREPOAgent  # noqa: E402
+from grepro_agent import GREPROAgent  # noqa: E402
 from ppo_agent import PPOAgent  # noqa: E402
 from sadrbc import SADRBCConfig  # noqa: E402
 from scenario_gen import DayData, MonthData  # noqa: E402
@@ -152,7 +153,7 @@ def load_policy(checkpoint_name: str, checkpoint_dir: Path = CHECKPOINT_DIR):
     algo = algo.lower()
     if algo == "grpo":
         raise DispatchRunWarning(f"{checkpoint_name}: GRPO is not implemented in this repo yet")
-    if algo not in {"ppo", "grepo"}:
+    if algo not in {"ppo", "grepo", "grepro"}:
         raise DispatchRunWarning(f"{checkpoint_name}: unsupported checkpoint algorithm {algo}")
     sampling_fields = {
         "native_dt_minutes",
@@ -173,7 +174,8 @@ def load_policy(checkpoint_name: str, checkpoint_dir: Path = CHECKPOINT_DIR):
 
         raw = torch.load(path, map_location="cpu")
         obs_dim = int(raw.get("obs_dim") or meta.get("obs_dim") or 13)
-        agent = GREPOAgent(
+        agent_class = GREPROAgent if algo == "grepro" else GREPOAgent
+        agent = agent_class(
             obs_dim=obs_dim,
             n_group=int(meta.get("group") or meta.get("n_group") or 6),
             std=float(raw.get("std") or meta.get("std") or 0.30),
