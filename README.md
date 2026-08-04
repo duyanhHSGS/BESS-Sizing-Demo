@@ -59,6 +59,14 @@ controller chain from that cache after restarts. Connector secrets remain in
 the local ignored runtime folder and are never returned by the configuration
 API.
 
+The adjacent **Shadow Weather Forecast** panel configures Open-Meteo or a
+compatible custom HTTPS provider with site coordinates, timezone, and optional
+API-key authentication. For a ThingsBoard forecast policy, catch-up downloads
+and caches real hourly weather, loads the checkpoint's saved causal ridge
+`.npz`, reproduces the training feature pipeline, and generates the four live
+forecast inputs without reading future load/PV actuals. Save Weather first,
+then save the main Shadow configuration to freeze both data contracts.
+
 The connector initially uses the Tande ThingsBoard `SPEC` embedded in
 `thingsboard_connector.py`, so the Shadow panel opens prefilled and can be
 tested without re-entering the site fields.

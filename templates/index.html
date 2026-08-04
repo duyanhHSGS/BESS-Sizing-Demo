@@ -1651,6 +1651,29 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         <div id="shadow-connector-status" class="info">Connector not inspected yet.</div>
       </section>
 
+      <section class="card">
+        <div class="section-head">
+          <div>
+            <h2>Shadow Weather Forecast 🌦️</h2>
+            <div>Real hourly weather feeds the checkpoint's saved causal model for 17-input forecast policies. No future actuals and no synthetic fallback.</div>
+          </div>
+          <div class="row">
+            <button id="btn-shadow-weather-save" class="primary" type="button">Save weather</button>
+            <button id="btn-shadow-weather-test" type="button">Test weather provider</button>
+          </div>
+        </div>
+        <div class="row">
+          <label>Provider <select id="shadow-weather-provider"><option value="open-meteo">Open-Meteo automatic</option><option value="custom">Custom compatible HTTPS API</option></select></label>
+          <label>Latitude <input id="shadow-weather-latitude" type="number" min="-90" max="90" step="0.000001" placeholder="site latitude"></label>
+          <label>Longitude <input id="shadow-weather-longitude" type="number" min="-180" max="180" step="0.000001" placeholder="site longitude"></label>
+          <label>Timezone <input id="shadow-weather-timezone" type="text" value="Asia/Bangkok"></label>
+          <label class="shadow-weather-custom" style="display:none">HTTPS URL template <input id="shadow-weather-url" type="url" size="48" placeholder="https://api.example.com?...{start_date}..."></label>
+          <label class="shadow-weather-custom" style="display:none">API-key header <input id="shadow-weather-key-header" type="text" placeholder="X-API-Key"></label>
+          <label class="shadow-weather-custom" style="display:none">API key <input id="shadow-weather-key" type="password" placeholder="unchanged when blank"></label>
+        </div>
+        <div id="shadow-weather-status" class="info">Weather provider not configured yet.</div>
+      </section>
+
       <section class="card shadow-hero">
         <div class="section-head">
           <div>
@@ -3695,12 +3718,75 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       }
     }
 
+    function updateShadowWeatherFields() {
+      const custom = document.getElementById("shadow-weather-provider").value === "custom";
+      document.querySelectorAll(".shadow-weather-custom").forEach((field) => {
+        field.style.display = custom ? "inline-flex" : "none";
+      });
+    }
+
+    function fillShadowWeather(config) {
+      document.getElementById("shadow-weather-provider").value = config.provider || "open-meteo";
+      document.getElementById("shadow-weather-latitude").value = config.latitude ?? "";
+      document.getElementById("shadow-weather-longitude").value = config.longitude ?? "";
+      document.getElementById("shadow-weather-timezone").value = config.timezone || "Asia/Bangkok";
+      document.getElementById("shadow-weather-url").value = config.custom_url || "";
+      document.getElementById("shadow-weather-key-header").value = config.api_key_header || "";
+      document.getElementById("shadow-weather-key").value = "";
+      document.getElementById("shadow-weather-key").placeholder = config.has_api_key ? "saved · unchanged when blank" : "optional";
+      document.getElementById("shadow-weather-status").textContent = config.latitude == null
+        ? "Enter the real site coordinates and save weather settings."
+        : `Saved ${config.provider} weather · ${config.latitude}, ${config.longitude} · ${config.timezone}.`;
+      updateShadowWeatherFields();
+    }
+
+    function shadowWeatherPayload() {
+      const latitude = document.getElementById("shadow-weather-latitude").value;
+      const longitude = document.getElementById("shadow-weather-longitude").value;
+      return {
+        provider: document.getElementById("shadow-weather-provider").value,
+        latitude: latitude === "" ? null : Number(latitude),
+        longitude: longitude === "" ? null : Number(longitude),
+        timezone: document.getElementById("shadow-weather-timezone").value.trim(),
+        custom_url: document.getElementById("shadow-weather-url").value.trim(),
+        api_key_header: document.getElementById("shadow-weather-key-header").value.trim(),
+        api_key: document.getElementById("shadow-weather-key").value,
+      };
+    }
+
+    async function saveShadowWeather() {
+      const status = document.getElementById("shadow-weather-status");
+      try {
+        status.textContent = "Saving Shadow weather settings...";
+        const config = await liveApi("/api/shadow/weather", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(shadowWeatherPayload()),
+        });
+        fillShadowWeather(config);
+        status.textContent = "Weather settings saved. Now save the main Shadow configuration to freeze the experiment.";
+      } catch (error) {
+        status.textContent = `ERROR: ${error.message}`;
+      }
+    }
+
+    async function testShadowWeather() {
+      const status = document.getElementById("shadow-weather-status");
+      try {
+        status.textContent = "Downloading one historical weather day...";
+        const result = await liveApi("/api/shadow/weather/test", { method: "POST" });
+        status.textContent = `${result.message} ${result.date} · ${result.hours} hourly rows.`;
+      } catch (error) {
+        status.textContent = `ERROR: ${error.message}`;
+      }
+    }
+
     async function refreshShadowRunning() {
       try {
-        const [config, checkpoints, connector] = await Promise.all([
+        const [config, checkpoints, connector, weather] = await Promise.all([
           liveApi("/api/shadow/config"),
           liveApi("/api/training/checkpoints"),
           liveApi("/api/shadow/connector"),
+          liveApi("/api/shadow/weather"),
         ]);
         shadowSource.innerHTML = shadowSources.map((source) =>
           `<option value="${escapeHtml(source)}">${escapeHtml(source)}</option>`
@@ -3714,6 +3800,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         shadowEcap.value = config.e_cap_kwh || "";
         shadowPrated.value = config.p_rated_kw || "";
         fillShadowConnector(connector);
+        fillShadowWeather(weather);
         updateShadowSourceFields();
         await renderShadowData();
       } catch (error) {
@@ -3777,6 +3864,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             shadowProgress.textContent += ` · ${job.error}`;
           } else if (job.result) {
             shadowProgress.textContent += ` · ${job.result.processed_ok} saved, ${job.result.skipped} skipped, ${job.result.already_done} already done.`;
+            if (job.result.weather) {
+              shadowProgress.textContent += ` · weather ${job.result.weather.hours}h · model ${job.result.weather.model_artifact}`;
+            }
           }
           shadowJobId = null;
           document.getElementById("btn-shadow-run").disabled = false;
@@ -3876,10 +3966,13 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     document.getElementById("btn-shadow-save").addEventListener("click", saveShadowConfig);
     document.getElementById("btn-shadow-connector-save").addEventListener("click", saveShadowConnector);
     document.getElementById("btn-shadow-connector-test").addEventListener("click", testShadowConnector);
+    document.getElementById("btn-shadow-weather-save").addEventListener("click", saveShadowWeather);
+    document.getElementById("btn-shadow-weather-test").addEventListener("click", testShadowWeather);
     document.getElementById("btn-shadow-run").addEventListener("click", startShadowCatchup);
     document.getElementById("btn-shadow-cancel").addEventListener("click", cancelShadowJob);
     document.getElementById("btn-shadow-reset").addEventListener("click", resetShadowHistory);
     shadowSourceKind.addEventListener("change", updateShadowSourceFields);
+    document.getElementById("shadow-weather-provider").addEventListener("change", updateShadowWeatherFields);
 
     function bindTabs() {
       document.querySelectorAll("[data-tab-target]").forEach((button) => {

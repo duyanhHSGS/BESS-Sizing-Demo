@@ -28,6 +28,7 @@ from dispatch_runner import (
 from settings import DEFAULT_PARAMETERS, PPO_GAMMA
 from scenario_gen import DayData, MonthData
 import thingsboard_connector
+import shadow_weather
 from training_checkpoints import list_checkpoints
 
 
@@ -172,8 +173,10 @@ def _set_config_unlocked(payload: dict[str, Any], parameters: dict[str, Any]) ->
     if source_kind == "thingsboard":
         connector_snapshot = _connector_snapshot()
         snapshot["dt"] = str(float(connector_snapshot["interval_minutes"]) / 60.0)
+        weather_snapshot = shadow_weather.scientific_snapshot()
     else:
         connector_snapshot = None
+        weather_snapshot = None
     config = {
         "source_kind": source_kind,
         "source": source,
@@ -182,6 +185,7 @@ def _set_config_unlocked(payload: dict[str, Any], parameters: dict[str, Any]) ->
         "p_rated_kw": p_rated,
         "parameters": snapshot,
         "connector": connector_snapshot,
+        "weather": weather_snapshot,
     }
     with _conn() as conn:
         existing = conn.execute("SELECT COUNT(*) FROM shadow_days").fetchone()[0]
@@ -276,11 +280,16 @@ def _build_rollouts(config: dict[str, Any], month: MonthData, progress: Callable
     agent, algo, meta = load_policy(config["policy"])
     control_minutes = validate_dispatch_sampling(meta, cfg.dt * 60.0)
     p_ref = float(meta.get("p_ref_kw") or _policy_reference_kw(month))
-    prepare_policy_forecast(config["policy"], agent, meta, month, p_ref)
+    weather_status = None
+    if meta.get("obs_variant") == "fc" and config.get("source_kind") == "thingsboard":
+        progress("Fetching real weather + generating causal forecasts", 0, len(month.days), config["policy"])
+        weather_status = shadow_weather.attach_live_forecasts(month.days, meta, p_ref)
+    else:
+        prepare_policy_forecast(config["policy"], agent, meta, month, p_ref)
     policy = run_drl_policy(month, cfg, agent, p_ref_kw=p_ref)
     progress("Running shadow SADRBC", 0, len(month.days), "SADRBC v13")
     sadrbc = run_sadrbc(month, cfg)
-    return month, cfg, policy, sadrbc, algo, control_minutes
+    return month, cfg, policy, sadrbc, algo, control_minutes, weather_status
 
 
 def catchup(
@@ -307,6 +316,11 @@ def catchup(
             if current_connector != config.get("connector"):
                 raise ShadowRunError(
                     "ThingsBoard connector changed after Shadow configuration was saved. "
+                    "Reset history and save the Shadow configuration again."
+                )
+            if shadow_weather.scientific_snapshot() != config.get("weather"):
+                raise ShadowRunError(
+                    "Shadow weather settings changed after Shadow configuration was saved. "
                     "Reset history and save the Shadow configuration again."
                 )
             yesterday = date.today() - timedelta(days=1)
@@ -348,11 +362,14 @@ def catchup(
             raise ShadowRunError("Shadow start date must not be after the end date.")
         by_date = {day.date_iso: (index, day) for index, day in enumerate(month.days)}
         if month.days:
-            month, cfg, policy, sadrbc, algo, control_minutes = _build_rollouts(config, month, progress)
+            month, cfg, policy, sadrbc, algo, control_minutes, weather_status = _build_rollouts(
+                config, month, progress
+            )
         else:
             cfg = policy = sadrbc = None
             algo = None
             control_minutes = None
+            weather_status = None
         total = (end - start).days + 1
         processed = skipped = already_done = 0
         cursor = start
@@ -389,6 +406,7 @@ def catchup(
             "control_dt_minutes": control_minutes,
             "connector": connector_stats,
             "missing_reasons": connector_failures,
+            "weather": weather_status,
         }
     finally:
         _RUN_LOCK.release()

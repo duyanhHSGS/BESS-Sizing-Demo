@@ -15,6 +15,7 @@ import oracle_cache
 import shadow_jobs
 import shadow_runs
 import thingsboard_connector
+import shadow_weather
 from benchmark import (
     build_benchmark,
     detect_dt_hours,
@@ -387,6 +388,28 @@ def shadow_connector_test():
     try:
         return jsonify(thingsboard_connector.test_connection())
     except thingsboard_connector.ThingsBoardError as exc:
+        return jsonify({"error": str(exc)}), 502
+
+
+@app.route("/api/shadow/weather", methods=["GET"])
+def shadow_weather_config():
+    return jsonify(shadow_weather.public_config())
+
+
+@app.route("/api/shadow/weather", methods=["POST"])
+def shadow_weather_save():
+    try:
+        config = shadow_weather.save_config(request.get_json(silent=True) or {})
+    except shadow_weather.ShadowWeatherError as exc:
+        return jsonify({"error": str(exc)}), 422
+    return jsonify(config)
+
+
+@app.route("/api/shadow/weather/test", methods=["POST"])
+def shadow_weather_test():
+    try:
+        return jsonify(shadow_weather.test_connection())
+    except shadow_weather.ShadowWeatherError as exc:
         return jsonify({"error": str(exc)}), 502
 
 
