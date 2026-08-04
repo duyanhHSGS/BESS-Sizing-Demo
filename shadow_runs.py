@@ -17,7 +17,7 @@ from typing import Any, Callable
 import numpy as np
 
 from baselines import run_drl_policy, run_sadrbc, validate_dispatch_sampling
-from benchmark import list_data_csvs, selected_data_path
+from benchmark import list_data_csvs, selected_data_filename, selected_data_path
 from common import check_hard_constraints, rolling_pmax_day, tariff_vector_day
 from dispatch_runner import (
     build_dispatch_config,
@@ -25,7 +25,7 @@ from dispatch_runner import (
     load_policy,
     prepare_policy_forecast,
 )
-from settings import PPO_GAMMA
+from settings import DEFAULT_PARAMETERS, PPO_GAMMA
 from training_checkpoints import list_checkpoints
 
 
@@ -75,13 +75,15 @@ def _conn() -> sqlite3.Connection:
 
 
 def _default_config(parameters: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(DEFAULT_PARAMETERS)
+    merged.update(parameters or {})
     checkpoints = [row for row in list_checkpoints() if not row.get("error")]
     return {
-        "source": str(parameters.get("selected_data_csv") or ""),
+        "source": selected_data_filename(merged),
         "policy": checkpoints[0]["name"] if checkpoints else "",
-        "e_cap_kwh": _float(parameters.get("battery_capacity_kWh"), 0.0),
-        "p_rated_kw": _float(parameters.get("battery_power_limit_kW"), 0.0),
-        "parameters": dict(parameters),
+        "e_cap_kwh": _float(merged.get("battery_capacity_kWh"), 0.0),
+        "p_rated_kw": _float(merged.get("battery_power_limit_kW"), 0.0),
+        "parameters": merged,
     }
 
 
@@ -93,16 +95,28 @@ def _float(value: Any, fallback: float) -> float:
 
 
 def get_config(parameters: dict[str, Any] | None = None) -> dict[str, Any]:
+    fallback = _default_config(parameters or {})
     with _conn() as conn:
         row = conn.execute("SELECT payload FROM shadow_config WHERE id = 1").fetchone()
     if row:
         try:
             payload = json.loads(row["payload"])
             if isinstance(payload, dict):
-                return payload
+                stored_parameters = payload.get("parameters")
+                normalized_parameters = dict(fallback["parameters"])
+                if isinstance(stored_parameters, dict):
+                    normalized_parameters.update(stored_parameters)
+                for field in ("billing_windows_expensive", "billing_windows_cheap"):
+                    if not str(normalized_parameters.get(field) or "").strip():
+                        normalized_parameters[field] = DEFAULT_PARAMETERS[field]
+                return {
+                    **fallback,
+                    **payload,
+                    "parameters": normalized_parameters,
+                }
         except json.JSONDecodeError:
             pass
-    return _default_config(parameters or {})
+    return fallback
 
 
 def set_config(payload: dict[str, Any], parameters: dict[str, Any]) -> dict[str, Any]:
@@ -335,6 +349,9 @@ def list_days(month: str | None = None) -> list[dict[str, Any]]:
 
 
 def monthly_report() -> list[dict[str, Any]]:
+    with _conn() as conn:
+        if conn.execute("SELECT 1 FROM shadow_days LIMIT 1").fetchone() is None:
+            return []
     config = get_config()
     parameters = config.get("parameters", {})
     cfg = build_dispatch_config(
