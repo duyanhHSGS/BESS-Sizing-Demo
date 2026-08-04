@@ -1617,7 +1617,12 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <div><h2>Daily dispatch</h2><div>One completed day at native resolution, matching Dispatch Viewer.</div></div>
           <label>Day <select id="live-chart-day"></select></label>
         </div>
-        <div class="chart-wrap"><canvas id="live-dispatch-chart"></canvas></div>
+        <div class="chart-wrap">
+          <canvas id="live-dispatch-chart"></canvas>
+          <div class="chart-tooltip" id="live-dispatch-tooltip" role="status" aria-live="polite"></div>
+        </div>
+        <div class="graph-actions"><button id="btn-live-dispatch-hide-all" class="tiny" type="button">Hide all lines</button></div>
+        <div class="legend" id="live-dispatch-legend" aria-label="Live dispatch chart line visibility controls"></div>
         <div class="info" id="live-chart-info">Run a day to create its dispatch trace.</div>
       </section>
 
@@ -1721,7 +1726,12 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             <div><h2>Daily shadow dispatch</h2><div>Measured load/PV with virtual SADRBC and policy behavior.</div></div>
             <label>Day <select id="shadow-chart-day"></select></label>
           </div>
-          <div class="chart-wrap"><canvas id="shadow-dispatch-chart"></canvas></div>
+          <div class="chart-wrap">
+            <canvas id="shadow-dispatch-chart"></canvas>
+            <div class="chart-tooltip" id="shadow-dispatch-tooltip" role="status" aria-live="polite"></div>
+          </div>
+          <div class="graph-actions"><button id="btn-shadow-dispatch-hide-all" class="tiny" type="button">Hide all lines</button></div>
+          <div class="legend" id="shadow-dispatch-legend" aria-label="Shadow dispatch chart line visibility controls"></div>
           <div class="info" id="shadow-chart-info">Run catch-up to create a daily dispatch trace.</div>
         </section>
         <section class="card">
@@ -3452,6 +3462,18 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const liveTableBody = document.getElementById("live-table-body");
     const liveChartDay = document.getElementById("live-chart-day");
     const liveChartInfo = document.getElementById("live-chart-info");
+    const dailyDispatchStyles = [
+      { key: "load", label: "Load", color: "#fdba74" },
+      { key: "pv", label: "PV", color: "#4ade80" },
+      { key: "no_bess_grid", label: "No BESS grid", color: "#94a3b8" },
+      { key: "sadrbc_grid", label: "SADRBC grid", color: "#f97316" },
+      { key: "sadrbc_soc", label: "SADRBC SOC", color: "#67e8f9", soc: true },
+      { key: "policy_grid", label: "Policy grid", color: "#a78bfa", policy: true },
+      { key: "policy_soc", label: "Policy SOC", color: "#fde047", policy: true, soc: true },
+    ];
+    const liveDailyActiveSeries = Object.fromEntries(dailyDispatchStyles.map((series) => [series.key, true]));
+    const shadowDailyActiveSeries = Object.fromEntries(dailyDispatchStyles.map((series) => [series.key, true]));
+    const dailyDispatchChartStates = {};
     let livePollTimer = null;
     let liveLastPayload = null;
 
@@ -3491,11 +3513,19 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           : "No loadable policy checkpoint is available.";
         liveTableBody.innerHTML = "";
         liveChartDay.innerHTML = "";
-        drawDailyDispatchChart("live-dispatch-chart", null, "Policy");
+        drawDailyDispatchChart("live-dispatch-chart", null, "Policy", liveDailyActiveSeries);
       }
     }
 
-    function drawDailyDispatchChart(canvasId, trace, policyLabel) {
+    function dailyDispatchSeries(trace, policyLabel) {
+      return dailyDispatchStyles.map((style) => ({
+        ...style,
+        label: style.policy ? `${policyLabel} ${style.soc ? "SOC" : "grid"}` : style.label,
+        values: trace?.[style.key] || [],
+      }));
+    }
+
+    function drawDailyDispatchChart(canvasId, trace, policyLabel, activeSeries) {
       const canvas = document.getElementById(canvasId);
       const width = Math.max(320, canvas.clientWidth || 600);
       const height = Math.max(320, canvas.clientHeight || 430);
@@ -3510,17 +3540,14 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         dailyCtx.fillStyle = "#8496a8";
         dailyCtx.font = "14px Segoe UI, system-ui, sans-serif";
         dailyCtx.fillText("No daily trace is available yet.", 20, 36);
+        dailyDispatchChartStates[canvasId] = null;
         return;
       }
-      const powerSeries = [
-        { label: "Load", color: "#fdba74", values: trace.load },
-        { label: "PV", color: "#4ade80", values: trace.pv },
-        { label: "No BESS grid", color: "#94a3b8", values: trace.no_bess_grid },
-        { label: "SADRBC grid", color: "#f97316", values: trace.sadrbc_grid },
-        { label: `${policyLabel} grid`, color: "#a78bfa", values: trace.policy_grid },
-      ].filter((series) => Array.isArray(series.values) && series.values.length);
-      const soc = Array.isArray(trace.policy_soc) ? trace.policy_soc : [];
-      const pad = { top: 52, right: 54, bottom: 44, left: 58 };
+      const allSeries = dailyDispatchSeries(trace, policyLabel);
+      const visibleSeries = allSeries.filter((series) => activeSeries[series.key] && series.values.length);
+      const powerSeries = visibleSeries.filter((series) => !series.soc);
+      const socSeries = visibleSeries.filter((series) => series.soc);
+      const pad = { top: 46, right: 54, bottom: 44, left: 58 };
       const plotW = width - pad.left - pad.right;
       const plotH = height - pad.top - pad.bottom;
       const maxY = Math.max(1, ...powerSeries.flatMap((series) => series.values.map(Number))) * 1.08;
@@ -3543,7 +3570,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         const y = pad.top + plotH * (1 - value / 100);
         dailyCtx.fillText(String(value), width - 40, y + 4);
       });
-      powerSeries.forEach((series, seriesIndex) => {
+      powerSeries.forEach((series) => {
         dailyCtx.strokeStyle = series.color;
         dailyCtx.lineWidth = 2;
         dailyCtx.setLineDash([]);
@@ -3554,33 +3581,88 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           if (index) dailyCtx.lineTo(x, y); else dailyCtx.moveTo(x, y);
         });
         dailyCtx.stroke();
-        const legendX = pad.left + (seriesIndex % 3) * 165;
-        const legendY = 15 + Math.floor(seriesIndex / 3) * 18;
-        dailyCtx.fillStyle = series.color;
-        dailyCtx.fillRect(legendX, legendY - 3, 12, 3);
-        dailyCtx.fillText(series.label, legendX + 17, legendY + 1);
       });
-      if (soc.length) {
-        dailyCtx.strokeStyle = "#fde047";
+      socSeries.forEach((series) => {
+        dailyCtx.strokeStyle = series.color;
         dailyCtx.lineWidth = 2;
         dailyCtx.setLineDash([3, 4]);
         dailyCtx.beginPath();
-        soc.forEach((value, index) => {
-          const x = pad.left + plotW * index / Math.max(1, soc.length - 1);
+        series.values.forEach((value, index) => {
+          const x = pad.left + plotW * index / Math.max(1, series.values.length - 1);
           const y = pad.top + plotH * (1 - Number(value) / 100);
           if (index) dailyCtx.lineTo(x, y); else dailyCtx.moveTo(x, y);
         });
         dailyCtx.stroke();
         dailyCtx.setLineDash([]);
-        dailyCtx.fillStyle = "#fde047";
-        dailyCtx.fillText(`${policyLabel} SOC`, pad.left + 347, 34);
+      });
+      dailyDispatchChartStates[canvasId] = {
+        trace, policyLabel, activeSeries, visibleSeries, pad, plotW, plotH, width, height,
+      };
+    }
+
+    function renderDailyDispatchLegend(legendId, activeSeries, policyLabel, redraw) {
+      const legendElement = document.getElementById(legendId);
+      legendElement.innerHTML = dailyDispatchStyles.map((series) => {
+        const label = series.policy
+          ? `${policyLabel} ${series.soc ? "SOC" : "grid"}` : series.label;
+        return `<button class="legend-item" type="button" data-daily-series="${series.key}" aria-pressed="${activeSeries[series.key]}">` +
+          `<span class="swatch" style="background:${series.color};color:${series.color}"></span>${escapeHtml(label)}</button>`;
+      }).join("");
+      legendElement.querySelectorAll("[data-daily-series]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const key = button.dataset.dailySeries;
+          activeSeries[key] = !activeSeries[key];
+          button.setAttribute("aria-pressed", String(activeSeries[key]));
+          redraw();
+        });
+      });
+    }
+
+    function hideDailyDispatchTooltip(tooltipId) {
+      document.getElementById(tooltipId).style.display = "none";
+    }
+
+    function showDailyDispatchHover(event, canvasId, tooltipId) {
+      const state = dailyDispatchChartStates[canvasId];
+      const tooltipElement = document.getElementById(tooltipId);
+      if (!state) {
+        tooltipElement.style.display = "none";
+        return;
       }
+      const canvas = document.getElementById(canvasId);
+      const rect = canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      if (x < state.pad.left || x > state.pad.left + state.plotW || y < state.pad.top || y > state.pad.top + state.plotH) {
+        tooltipElement.style.display = "none";
+        return;
+      }
+      const slotCount = Math.max(1, ...state.visibleSeries.map((series) => series.values.length));
+      const index = Math.max(0, Math.min(slotCount - 1, Math.round((x - state.pad.left) / state.plotW * (slotCount - 1))));
+      const rows = state.visibleSeries
+        .map((series) => ({ series, value: Number(series.values[index]) }))
+        .filter((row) => Number.isFinite(row.value));
+      if (!rows.length) {
+        tooltipElement.style.display = "none";
+        return;
+      }
+      tooltipElement.innerHTML = `<strong>${formatSlotTime(index, slotCount)}</strong>` + rows.map((row) =>
+        `<div${row.series.soc ? " class=\"tip-soc\"" : ""}><span>${escapeHtml(row.series.label)}</span><b>${formatNumber(row.value, 1)} ${row.series.soc ? "%" : "kW"}</b></div>`
+      ).join("");
+      tooltipElement.style.display = "block";
+      const wrapRect = canvas.parentElement.getBoundingClientRect();
+      const tipRect = tooltipElement.getBoundingClientRect();
+      const offsetX = event.clientX - wrapRect.left;
+      const offsetY = event.clientY - wrapRect.top;
+      tooltipElement.style.transform = `translate(${Math.min(Math.max(8, offsetX + 14), wrapRect.width - tipRect.width - 8)}px, ${Math.min(Math.max(8, offsetY + 14), wrapRect.height - tipRect.height - 8)}px)`;
     }
 
     function renderSelectedLiveDay() {
       const days = liveLastPayload?.days || [];
       const selected = days.find((day) => String(day.day) === liveChartDay.value) || days[days.length - 1];
-      drawDailyDispatchChart("live-dispatch-chart", selected?.trace, liveLastPayload?.status?.policy || "Policy");
+      const policyLabel = liveLastPayload?.status?.policy || "Policy";
+      drawDailyDispatchChart("live-dispatch-chart", selected?.trace, policyLabel, liveDailyActiveSeries);
+      renderDailyDispatchLegend("live-dispatch-legend", liveDailyActiveSeries, policyLabel, renderSelectedLiveDay);
       liveChartInfo.textContent = selected
         ? `Day ${selected.day} · ${selected.date} · ${selected.day_type} · ${selected.trace?.load?.length || 0} native samples.`
         : "Run a day to create its dispatch trace.";
@@ -3702,6 +3784,16 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     document.getElementById("btn-live-delete").addEventListener("click", deleteLiveRun);
     liveSession.addEventListener("change", () => renderLiveRun(liveSession.value));
     liveChartDay.addEventListener("change", renderSelectedLiveDay);
+    document.getElementById("btn-live-dispatch-hide-all").addEventListener("click", () => {
+      Object.keys(liveDailyActiveSeries).forEach((key) => { liveDailyActiveSeries[key] = false; });
+      renderSelectedLiveDay();
+    });
+    document.getElementById("live-dispatch-chart").addEventListener("mousemove", (event) => {
+      showDailyDispatchHover(event, "live-dispatch-chart", "live-dispatch-tooltip");
+    });
+    document.getElementById("live-dispatch-chart").addEventListener("mouseleave", () => {
+      hideDailyDispatchTooltip("live-dispatch-tooltip");
+    });
 
     const shadowSource = document.getElementById("shadow-source");
     const shadowSourceKind = document.getElementById("shadow-source-kind");
@@ -3967,7 +4059,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     function renderSelectedShadowDay() {
       const selected = shadowLastDays.find((day) => day.date === shadowChartDay.value)
         || shadowLastDays[shadowLastDays.length - 1];
-      drawDailyDispatchChart("shadow-dispatch-chart", selected?.trace, "Policy");
+      drawDailyDispatchChart("shadow-dispatch-chart", selected?.trace, "Policy", shadowDailyActiveSeries);
+      renderDailyDispatchLegend("shadow-dispatch-legend", shadowDailyActiveSeries, "Policy", renderSelectedShadowDay);
       shadowChartInfo.textContent = selected
         ? `${selected.date} · ${selected.day_type} · ${selected.trace?.load?.length || 0} native samples.`
         : "Run catch-up to create a daily dispatch trace.";
@@ -4030,6 +4123,16 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     shadowSourceKind.addEventListener("change", updateShadowSourceFields);
     document.getElementById("shadow-weather-provider").addEventListener("change", updateShadowWeatherFields);
     shadowChartDay.addEventListener("change", renderSelectedShadowDay);
+    document.getElementById("btn-shadow-dispatch-hide-all").addEventListener("click", () => {
+      Object.keys(shadowDailyActiveSeries).forEach((key) => { shadowDailyActiveSeries[key] = false; });
+      renderSelectedShadowDay();
+    });
+    document.getElementById("shadow-dispatch-chart").addEventListener("mousemove", (event) => {
+      showDailyDispatchHover(event, "shadow-dispatch-chart", "shadow-dispatch-tooltip");
+    });
+    document.getElementById("shadow-dispatch-chart").addEventListener("mouseleave", () => {
+      hideDailyDispatchTooltip("shadow-dispatch-tooltip");
+    });
 
     function bindTabs() {
       document.querySelectorAll("[data-tab-target]").forEach((button) => {
