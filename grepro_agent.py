@@ -19,6 +19,12 @@ from grepo_agent import GREPOAgent
 class GREPROAgent(GREPOAgent):
     def __init__(self, *args, epochs: int = 4, minibatch: int = 2048, **kwargs):
         super().__init__(*args, epochs=epochs, minibatch=minibatch, **kwargs)
+        # Residual policy starts by trusting SADRBC exactly.  Exploration can
+        # still discover improvements, but deterministic inference begins at
+        # a zero correction instead of a random battery command.
+        nn.init.zeros_(self.actor[-1].weight)
+        nn.init.zeros_(self.actor[-1].bias)
+        self._sync_collector_actor()
 
     def update(self, obs_g, act_g, logp_g, rew_g):
         """Blend absolute and group-relative learning signals."""

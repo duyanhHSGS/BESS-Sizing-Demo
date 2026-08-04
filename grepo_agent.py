@@ -173,7 +173,8 @@ class GREPOAgent:
         return noise
 
     def collect_group(self, make_env, month, soc_init=None,
-                      d_run_init=None, noise_g=None):
+                      d_run_init=None, noise_g=None,
+                      residual_limit=None):
         """Rollout N_g episodes on the SAME episode data (identical exogenous
         trajectory + initial state; Sec 2.2.2.2). Per the paper, an episode
         is one day at the dataset's configured dynamic resolution; pass a
@@ -184,6 +185,8 @@ class GREPOAgent:
         for group_index, env in enumerate(envs):
             if d_run_init is not None:
                 env.d_run_init = float(d_run_init)
+            if residual_limit is not None and hasattr(env, "residual_limit"):
+                env.residual_limit = float(residual_limit)
             shared_static = (
                 envs[0]._obs_static
                 if group_index > 0 and not env.use_forecast

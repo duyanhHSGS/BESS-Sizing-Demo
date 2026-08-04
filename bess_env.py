@@ -75,7 +75,8 @@ class BESSEnv:
                  use_forecast: bool = False,
                  n_steps: int = STEPS_PER_DAY,
                  dt_hours: float = DT_HOURS,
-                 record_trajectory: bool = True):
+                 record_trajectory: bool = True,
+                 extra_obs_dim: int = 0):
         # Resolution is derived from configured dt or the supplied day length.
         # (ch  bi bo GREPO). Ngy d liu phi c ng n_steps mu.
         if dt_hours == DT_HOURS and getattr(cfg, "dt", DT_HOURS) != DT_HOURS:
@@ -108,7 +109,9 @@ class BESSEnv:
         # Forecast mode accepts only externally prepared causal predictions.
         # Missing predictions are an error; future actuals are never used here.
         self.use_forecast = bool(use_forecast)
-        self.obs_dim = OBS_DIM_FC if self.use_forecast else OBS_DIM
+        self.base_obs_dim = OBS_DIM_FC if self.use_forecast else OBS_DIM
+        self.extra_obs_dim = int(extra_obs_dim)
+        self.obs_dim = self.base_obs_dim + self.extra_obs_dim
         base_tar = tariff_vector(cfg)
         self._tar_base = base_tar
         # Ch nht khng cao im (quy tc EVN, bt qua TOU_RULES):
@@ -261,7 +264,7 @@ class BESSEnv:
             cache[t, 11] = day_fraction
             cache[t, 12] = t / self.n_steps
             if self.use_forecast:
-                cache[t, 13:] = self._fc_features(t)
+                cache[t, 13:17] = self._fc_features(t)
         self._obs_static = cache
 
     def _fc_features(self, t):
@@ -278,7 +281,11 @@ class BESSEnv:
         base[5] = self.soc
         base[8] = self.d_run * self._inv_p_ref
         base[9] = self.g_prev * self._inv_p_ref
+        self._fill_extra_observation(base, t)
         return base
+
+    def _fill_extra_observation(self, observation: np.ndarray, t: int) -> None:
+        """Subclass hook for code-native controller context fields."""
 
     # ------------------------------------------------------------------
     def project_action(self, a: float, load: float, pv: float):
@@ -313,6 +320,7 @@ class BESSEnv:
         eff = max(0.0, load - pv)
 
         d, cg, cp = self.project_action(action, load, pv)
+        self._last_p_bess_kw = d - (cg + cp)
         grid = eff + cg - d                            # >= 0 by construction
         self.soc = self.soc + (cg + cp) * self._soc_charge_coeff \
                    - d * self._soc_discharge_coeff
@@ -402,6 +410,8 @@ class BESSEnv:
         done = False
         grid = 0.0
         native_rows = 0
+        throughput_kwh = 0.0
+        abs_p_bess_sum = 0.0
         for _ in range(self.native_steps_per_action):
             (
                 obs,
@@ -415,6 +425,8 @@ class BESSEnv:
                 peak_pen_nb,
             ) = self._step_native(action)
             native_rows += 1
+            throughput_kwh += abs(self._last_p_bess_kw) * self.dt
+            abs_p_bess_sum += abs(self._last_p_bess_kw)
             energy_cost_total += energy_cost
             energy_delta_total += energy_delta
             peak_delta_total += peak_delta
@@ -446,4 +458,6 @@ class BESSEnv:
             "shaping": shaping,
             "native_rows": native_rows,
             "d_run": self.d_run,
+            "throughput_kwh": throughput_kwh,
+            "mean_abs_p_bess_kw": abs_p_bess_sum / max(1, native_rows),
         }

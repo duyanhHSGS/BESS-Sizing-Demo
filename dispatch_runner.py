@@ -285,6 +285,8 @@ def run_policy_dispatch(
     p_ref = float(meta.get("p_ref_kw") or _policy_reference_kw(month))
     prepare_policy_forecast(checkpoint_name, agent, meta, month, p_ref)
     rollout = run_drl_policy(month, cfg, agent, p_ref_kw=p_ref)
+    from sadrbc_forecast import rollout_activity
+
     days = policy_result_to_days(month, rollout, cfg, parameters)
     return {
         "policy": checkpoint_name,
@@ -293,6 +295,10 @@ def run_policy_dispatch(
         "warnings": warnings,
         "days": days,
         "kpi": score_month(rollout["p_grid_days"], cfg, month.days),
+        "activity": {
+            **rollout_activity(rollout, cfg.dt),
+            "blocked_action_pct": rollout.get("blocked_action_pct", 0.0),
+        },
     }
 
 
@@ -304,6 +310,41 @@ def run_policies(
     month = dataset_to_month(selected_data_path(parameters))
     results = {}
     warnings = []
+    sadrbc_forecast_spec = None
+    sadrbc_p_ref = None
+    for checkpoint_name in policy_names:
+        if checkpoint_name == "sadrbc_v13":
+            continue
+        try:
+            forecast_agent, _, forecast_meta = load_policy(
+                checkpoint_name, checkpoint_dir
+            )
+            contract = forecast_meta.get("sadrbc_forecast", {}) or {}
+            if contract and sadrbc_forecast_spec is None:
+                from sadrbc_forecast import SADRBCForecastSpec
+
+                sadrbc_forecast_spec = SADRBCForecastSpec(
+                    seed=int(contract.get("seed", 13_0013)),
+                    load_sigma=float(contract.get("load_sigma", 0.05)),
+                    pv_sigma=float(contract.get("pv_sigma", 0.15)),
+                    rho=float(contract.get("rho", 0.90)),
+                    replan_minutes=int(contract.get("replan_minutes", 60)),
+                )
+                sadrbc_p_ref = float(
+                    forecast_meta.get("p_ref_kw") or _policy_reference_kw(month)
+                )
+            if forecast_meta.get("obs_variant") != "fc":
+                continue
+            forecast_p_ref = float(
+                forecast_meta.get("p_ref_kw") or _policy_reference_kw(month)
+            )
+            prepare_policy_forecast(
+                checkpoint_name, forecast_agent, forecast_meta, month,
+                forecast_p_ref,
+            )
+            break
+        except DispatchRunWarning:
+            continue
     for policy_name in policy_names:
         if policy_name == "sadrbc_v13":
             cfg = build_dispatch_config(
@@ -311,7 +352,10 @@ def run_policies(
                 _to_float(parameters.get("battery_capacity_kWh"), 0.0),
                 _to_float(parameters.get("battery_power_limit_kW"), 0.0),
             )
-            rollout = run_sadrbc(month, cfg)
+            rollout = run_sadrbc(
+                month, cfg, forecast_spec=sadrbc_forecast_spec,
+                p_ref_kw=sadrbc_p_ref,
+            )
             days = policy_result_to_days(month, rollout, cfg, parameters)
             results[policy_name] = {
                 "policy": policy_name,

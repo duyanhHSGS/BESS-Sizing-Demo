@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 
-from baselines import _cfg_to_dict, validate_dispatch_sampling
+from baselines import validate_dispatch_sampling
 from bess_env import BESSEnv
 from common import check_hard_constraints, score_month, tariff_vector_day
 from dispatch_runner import (
@@ -25,6 +25,11 @@ from dispatch_runner import (
 )
 from benchmark import selected_data_path
 from settings import PPO_GAMMA
+from sadrbc_forecast import (
+    SADRBCForecastSpec,
+    SADRBCResidualEnv,
+    build_sadrbc_forecast_baseline,
+)
 
 
 _SESSIONS: dict[str, "LiveRunSession"] = {}
@@ -40,8 +45,6 @@ def _number(parameters: dict[str, Any], key: str, fallback: float = 0.0) -> floa
 
 class LiveRunSession:
     def __init__(self, policy_name: str, parameters: dict[str, Any]):
-        from sadrbc import SADRBCRunner
-
         self.id = uuid.uuid4().hex[:10]
         self.policy_name = policy_name
         self.parameters = dict(parameters)
@@ -52,7 +55,6 @@ class LiveRunSession:
         e_cap = _number(parameters, "battery_capacity_kWh")
         p_rated = _number(parameters, "battery_power_limit_kW")
         self.sadrbc_cfg = build_dispatch_config(parameters, e_cap, p_rated)
-        self.sadrbc = SADRBCRunner(_cfg_to_dict(self.sadrbc_cfg))
 
         agent, algo, meta = load_policy(policy_name)
         policy_e = float(meta.get("e_cap_kwh") or e_cap)
@@ -62,16 +64,35 @@ class LiveRunSession:
         control_minutes = validate_dispatch_sampling(meta, native_minutes)
         p_ref = float(meta.get("p_ref_kw") or self._policy_reference_kw())
         prepare_policy_forecast(policy_name, agent, meta, self.month, p_ref)
+        forecast = meta.get("sadrbc_forecast", {}) or {}
+        forecast_spec = SADRBCForecastSpec(
+            seed=int(forecast.get("seed", 13_0013)),
+            load_sigma=float(forecast.get("load_sigma", 0.05)),
+            pv_sigma=float(forecast.get("pv_sigma", 0.15)),
+            rho=float(forecast.get("rho", 0.90)),
+            replan_minutes=int(forecast.get("replan_minutes", 60)),
+        )
+        self.sadrbc_rollout = build_sadrbc_forecast_baseline(
+            self.month, self.sadrbc_cfg, p_ref_kw=p_ref, spec=forecast_spec
+        )
         self.agent = agent
         self.algo = algo
         self.meta = meta
-        self.env = BESSEnv(
+        env_class = SADRBCResidualEnv if meta.get("controller") == "sadrbc_residual" else BESSEnv
+        env_kwargs = {}
+        if env_class is SADRBCResidualEnv:
+            env_kwargs = {
+                "residual_limit": float(meta.get("residual_limit", 0.20)),
+                "forecast_spec": forecast_spec,
+            }
+        self.env = env_class(
             self.policy_cfg,
             p_ref_kw=p_ref,
             use_forecast=meta.get("obs_variant") == "fc",
             d_run_init_kw=meta.get("d_run_init_kw"),
             gamma=float(meta.get("gamma", PPO_GAMMA)),
             control_dt_minutes=control_minutes,
+            **env_kwargs,
         )
         self.observation = self.env.reset(self.month)
 
@@ -143,21 +164,8 @@ class LiveRunSession:
             day = self.month.days[index]
             no_bess_grid = np.maximum(0.0, day.load - day.pv)
 
-            if index and (day.day_index - 1) % 30 == 0:
-                self.sadrbc.reset_monthly(reason="30_day_billing_boundary")
-            next_type = (
-                self.month.days[index + 1].day_type
-                if index + 1 < len(self.month.days)
-                else "working"
-            )
-            _, sadrbc_soc, _, sadrbc_grid, _ = self.sadrbc.step_day(
-                list(day.load),
-                list(day.pv),
-                day.day_type,
-                day_type_next=next_type,
-            )
-            sadrbc_grid = np.asarray(sadrbc_grid, dtype=np.float64)
-            sadrbc_soc = np.asarray(sadrbc_soc, dtype=np.float64)
+            sadrbc_grid = self.sadrbc_rollout.p_grid_days[index]
+            sadrbc_soc = self.sadrbc_rollout.soc_days[index]
             policy_grid, policy_soc = self._advance_policy_day(index)
 
             self.grids["no_bess"].append(no_bess_grid)
@@ -236,6 +244,9 @@ class LiveRunSession:
                     "p_rated_kw": self.policy_cfg.P_rated_nominal,
                 },
             },
+            "sadrbc_forecast": self.sadrbc_rollout.spec.public(
+                self.sadrbc_rollout.mode
+            ),
         }
 
 

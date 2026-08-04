@@ -275,6 +275,23 @@ def build_training_command(
                 str(gamma),
             ]
         )
+        if algo == "grepro":
+            cmd.extend(
+                [
+                    "--forecast-seed",
+                    str(_int(payload, "grepro_forecast_seed", 13_0013)),
+                    "--forecast-load-sigma",
+                    str(_bounded_float(
+                        payload, "grepro_forecast_load_sigma", 0.05,
+                        minimum=0.0, maximum=1.0,
+                    )),
+                    "--forecast-pv-sigma",
+                    str(_bounded_float(
+                        payload, "grepro_forecast_pv_sigma", 0.15,
+                        minimum=0.0, maximum=1.0,
+                    )),
+                ]
+            )
     return {"cmd": cmd, "tag": tag, "checkpoint": str(checkpoint), "algo": algo,
             "obs_variant": obs_variant, "device": device}
 

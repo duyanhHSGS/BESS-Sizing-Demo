@@ -17,7 +17,7 @@ from common import check_hard_constraints
 from training_checkpoints import CHECKPOINT_DIR, list_checkpoints
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REFERENCE_IDS = ("no_bess", "sadrbc_v13", "oracle")
 SAMPLING_FIELDS = {"native_dt_minutes", "control_dt_minutes", "native_steps_per_action"}
 
@@ -110,6 +110,53 @@ def run_and_save(
     )
     total_stages = 3 + len(checkpoints)
     contestants: list[dict[str, Any]] = []
+    sadrbc_forecast_spec = None
+    sadrbc_p_ref = None
+
+    for checkpoint in checkpoints:
+        contract = checkpoint.get("meta", {}).get("sadrbc_forecast") or {}
+        if not contract:
+            continue
+        from sadrbc_forecast import SADRBCForecastSpec
+
+        sadrbc_forecast_spec = SADRBCForecastSpec(
+            seed=int(contract.get("seed", 13_0013)),
+            load_sigma=float(contract.get("load_sigma", 0.05)),
+            pv_sigma=float(contract.get("pv_sigma", 0.15)),
+            rho=float(contract.get("rho", 0.90)),
+            replan_minutes=int(contract.get("replan_minutes", 60)),
+        )
+        sadrbc_p_ref = float(
+            checkpoint.get("meta", {}).get("p_ref_kw")
+            or dispatch_runner._policy_reference_kw(month)
+        )
+        break
+
+    # Give the standalone SADRBC contestant the same causal forecast contract
+    # when a selected portable forecast checkpoint supplies one. Otherwise it
+    # deliberately falls back to the seeded noisy contract in baselines.py.
+    for checkpoint in checkpoints:
+        if checkpoint.get("meta", {}).get("obs_variant") != "fc":
+            continue
+        forecast_agent, _, forecast_meta = dispatch_runner.load_policy(checkpoint["name"])
+        forecast_p_ref = float(
+            forecast_meta.get("p_ref_kw") or dispatch_runner._policy_reference_kw(month)
+        )
+        dispatch_runner.prepare_policy_forecast(
+            checkpoint["name"], forecast_agent, forecast_meta, month, forecast_p_ref
+        )
+        from sadrbc_forecast import SADRBCForecastSpec
+
+        contract = forecast_meta.get("sadrbc_forecast", {}) or {}
+        sadrbc_forecast_spec = SADRBCForecastSpec(
+            seed=int(contract.get("seed", 13_0013)),
+            load_sigma=float(contract.get("load_sigma", 0.05)),
+            pv_sigma=float(contract.get("pv_sigma", 0.15)),
+            rho=float(contract.get("rho", 0.90)),
+            replan_minutes=int(contract.get("replan_minutes", 60)),
+        )
+        sadrbc_p_ref = forecast_p_ref
+        break
 
     _check_cancelled(cancelled)
     progress("Running no-BESS baseline", 0, total_stages, "No-BESS")
@@ -118,7 +165,10 @@ def run_and_save(
 
     _check_cancelled(cancelled)
     progress("Running rule-based BESS", 1, total_stages, "SADRBC v13")
-    sadrbc = run_sadrbc(month, cfg)
+    sadrbc = run_sadrbc(
+        month, cfg, forecast_spec=sadrbc_forecast_spec,
+        p_ref_kw=sadrbc_p_ref,
+    )
     contestants.append(_rollout_contestant("sadrbc_v13", "SADRBC v13", "rule", sadrbc, month, cfg, parameters))
 
     for index, checkpoint in enumerate(checkpoints, start=2):
@@ -210,13 +260,17 @@ def _rollout_contestant(identifier, label, kind, rollout, month, cfg, parameters
     safety_days = _safety_day_indices(rollout, month, cfg)
     _decorate_days(days, rollout["p_bess_days"], cfg.dt, parameters, safety_days)
     constraints = check_hard_constraints(rollout["p_grid_days"], rollout["soc_days"], cfg)
-    return {
+    contestant = {
         "id": identifier,
         "label": label,
         "type": kind,
         "days": days,
         "summary": _summary(days, parameters, constraints),
     }
+    contestant["summary"]["blocked_action_pct"] = round(
+        float(rollout.get("blocked_action_pct", 0.0)), 2
+    )
+    return contestant
 
 
 def _oracle_contestant(oracle, cfg, parameters):

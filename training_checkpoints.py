@@ -13,6 +13,15 @@ CURVE_FIELDS = (
     "val_cost_vnd",
     "oracle_gap_pct",
     "saving_vs_nobess_pct",
+    "saving_vs_sadrbc_pct",
+    "throughput_kwh",
+    "mean_abs_p_bess_kw",
+    "soc_span_pct",
+    "blocked_action_pct",
+    "residual_limit",
+    "active_gate",
+    "zero_export_violation_days",
+    "soc_violation_days",
 )
 
 
@@ -94,6 +103,11 @@ def _load_curve(path: Path) -> tuple[list[dict], list[str]]:
                             "saving_vs_nobess_pct": _finite_float(
                                 row.get("saving_vs_nobess_pct"), "saving_vs_nobess_pct"
                             ),
+                            **{
+                                field: _finite_float(row.get(field), field)
+                                for field in CURVE_FIELDS[4:]
+                                if row.get(field) not in (None, "")
+                            },
                         }
                     )
                 except (TypeError, ValueError) as exc:

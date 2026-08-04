@@ -40,6 +40,17 @@ SADRBC, DRL, SOC, and peak state alive while you run one day at a time or use
 Auto run. Sessions are held in server memory and disappear when the Flask
 process restarts.
 
+GrePRO hybrid controller
+------------------------
+
+New GrePRO checkpoints use SADRBC v13 as a causal baseline and learn only a
+bounded residual correction (5% to 10% to 20% curriculum). SADRBC receives
+the portable real-weather forecast when forecast mode is selected. Otherwise
+it receives a declared deterministic AR(1) forecast (default seed `130013`,
+5% load error, 15% PV error). Exact future load/PV is never passed directly
+to SADRBC. The seed and forecast contract are saved inside checkpoint meta so
+Dispatch, Benchmarking, and Live Runs reproduce training behavior.
+
 Shadow Running
 --------------
 

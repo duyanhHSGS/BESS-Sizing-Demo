@@ -13,17 +13,23 @@ from pathlib import Path
 
 import numpy as np
 
-from common import RESULTS_DIR, load_system_config, make_bess_config, score_month
+from common import (RESULTS_DIR, check_hard_constraints, load_system_config,
+                    make_bess_config, score_month)
 from benchmark import _rolling_30_minute_average
 from scenario_gen import MonthData
-from bess_env import BESSEnv
 from grepo_agent import resolve_grepo_device
 from grepro_agent import GREPROAgent
-from baselines import run_no_bess, run_drl_policy
+from baselines import run_no_bess, run_drl_policy, run_sadrbc
 from oracle_cache import load_cached_training_grids
 from training_reports import write_curve, write_report
 from settings import GREPRO_GAMMA
 from weather_forecast import build_forecast_bundle, fit_attach_forecasts
+from sadrbc_forecast import (
+    DEFAULT_FORECAST_SEED,
+    SADRBCForecastSpec,
+    SADRBCResidualEnv,
+    rollout_activity,
+)
 
 VAL_EVERY = 5
 LOG_EVERY_ITERS = 4
@@ -99,6 +105,9 @@ def main():
     ap.add_argument("--obs-variant", choices=("base", "fc"), default="base")
     ap.add_argument("--weather-data", default="")
     ap.add_argument("--forecast-artifact", default="")
+    ap.add_argument("--forecast-seed", type=int, default=DEFAULT_FORECAST_SEED)
+    ap.add_argument("--forecast-load-sigma", type=float, default=0.05)
+    ap.add_argument("--forecast-pv-sigma", type=float, default=0.15)
     args = ap.parse_args()
     if not np.isfinite(args.gamma) or not 0.0 < args.gamma <= 1.0:
         raise SystemExit("gamma must be finite and in (0, 1]")
@@ -167,13 +176,20 @@ def main():
     val_month.days = csv_days[-split_days:-args.test_days]
     tag = args.tag or f"grepro_{cfg.E_cap:.0f}kwh_{cfg.P_rated_nominal:.0f}kw"
 
-    make_env = lambda: BESSEnv(   # noqa: E731
+    forecast_spec = SADRBCForecastSpec(
+        seed=args.forecast_seed,
+        load_sigma=args.forecast_load_sigma,
+        pv_sigma=args.forecast_pv_sigma,
+    )
+    make_env = lambda: SADRBCResidualEnv(   # noqa: E731
         cfg,
         p_ref_kw=p_ref,
         gamma=args.gamma,
         control_dt_minutes=args.control_dt_minutes,
         use_forecast=args.obs_variant == "fc",
         record_trajectory=False,
+        residual_limit=0.05,
+        forecast_spec=forecast_spec,
     )
     control_probe = make_env()
     decisions_per_day = (
@@ -193,7 +209,8 @@ def main():
     agent.meta = {
         "p_ref_kw": p_ref,
         "algo": "grepro",
-        "method": "group-relative-progressive-horizon-v1",
+        "method": "sadrbc-residual-group-relative-progressive-horizon-v2",
+        "controller": "sadrbc_residual",
         "e_cap_kwh": cfg.E_cap,
         "p_rated_kw": cfg.P_rated_nominal,
         "billing_mode": billing_mode,
@@ -205,6 +222,11 @@ def main():
         "obs_dim": control_probe.obs_dim,
         "native_dt_minutes": cfg.dt * 60.0,
         "control_dt_minutes": args.control_dt_minutes,
+        "residual_limit": 0.20,
+        "sadrbc_forecast": forecast_spec.public(
+            "real_weather_causal_plus_declared_noisy_tail"
+            if forecast_model else "declared_noisy_ar1"
+        ),
     }
     if forecast_model:
         agent.meta["forecast_model"] = forecast_model["model"]
@@ -219,6 +241,13 @@ def main():
     val_base = score_month(
         run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_month.days
     )["total_cost_vnd"]
+    val_sadrbc_result = run_sadrbc(
+        val_month, cfg, forecast_spec=forecast_spec, p_ref_kw=p_ref
+    )
+    val_sadrbc = score_month(
+        val_sadrbc_result["p_grid_days"], cfg, days=val_month.days
+    )["total_cost_vnd"]
+    val_sadrbc_activity = rollout_activity(val_sadrbc_result, cfg.dt)
     oracle_grids = load_cached_training_grids(
         args.oracle_cache, [day.day_index for day in val_month.days]
     )
@@ -260,11 +289,21 @@ def main():
             "device_requested": args.device,
             "device": learner_device,
             "horizon_curriculum_days": [3, 7, 30],
+            "residual_limit_curriculum": [0.05, 0.10, 0.20],
+            "sadrbc_forecast": forecast_spec.public(
+                "real_weather_causal_plus_declared_noisy_tail"
+                if forecast_model else "declared_noisy_ar1"
+            ),
         },
         "billing_mode": billing_mode,
         "p_ref_kw": p_ref,
         "d_run_init_kw": d_run0,
-        "validation": {"no_bess_vnd": val_base, "oracle_vnd": val_oracle},
+        "validation": {
+            "no_bess_vnd": val_base,
+            "sadrbc_vnd": val_sadrbc,
+            "sadrbc_activity": val_sadrbc_activity,
+            "oracle_vnd": val_oracle,
+        },
     }
     perf = {
         "group_rollout_seconds": 0.0,
@@ -287,8 +326,10 @@ def main():
     )
     print(f"[grepro] config {tag} | group={args.group} | gamma={args.gamma:g} | "
           f"learner={learner_device} (requested {args.device}) | "
-          f"native dt {cfg.dt * 60:g}m | control dt {control_probe.control_dt_minutes:g}m | val no-BESS "
-          f"{val_base/1e6:.1f}M, oracle {val_oracle/1e6:.1f}M VND", flush=True)
+          f"native dt {cfg.dt * 60:g}m | control dt {control_probe.control_dt_minutes:g}m | "
+          f"SADRBC forecast seed={forecast_spec.seed}, load sigma={forecast_spec.load_sigma:g}, "
+          f"PV sigma={forecast_spec.pv_sigma:g} | val no-BESS {val_base/1e6:.1f}M, "
+          f"causal SADRBC {val_sadrbc/1e6:.1f}M, oracle {val_oracle/1e6:.1f}M VND", flush=True)
 
     curve = []
     best_val = float("inf")
@@ -298,6 +339,7 @@ def main():
     for it in range(args.iters):
         progress = (it + 1) / max(1, args.iters)
         horizon_days = 3 if progress <= 0.20 else (7 if progress <= 0.50 else 30)
+        residual_limit = 0.05 if progress <= 0.20 else (0.10 if progress <= 0.50 else 0.20)
         max_start = len(train_days) - horizon_days
         start = int(rng.integers(max_start + 1))
         episode_days = train_days[start:start + horizon_days]
@@ -311,8 +353,13 @@ def main():
             d_run_init = float(d_run0 * rng.uniform(0.8, 1.5))
         else:
             d_run_init = float(rng.uniform(0.5, 0.9) * p_ref)
-        batch = agent.collect_group(make_env, episode, soc_init=soc_init,
-                                    d_run_init=d_run_init)
+        batch = agent.collect_group(
+            make_env,
+            episode,
+            soc_init=soc_init,
+            d_run_init=d_run_init,
+            residual_limit=residual_limit,
+        )
         collect_stats = agent.last_collect_stats
         perf["group_rollout_seconds"] += collect_stats[
             "group_rollout_seconds"
@@ -327,6 +374,7 @@ def main():
         if (it + 1) % VAL_EVERY != 0 and it + 1 != args.iters:
             continue
         validation_started = time.perf_counter()
+        agent.meta["residual_limit"] = residual_limit
         res = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
         perf["validation_seconds"] += (
             time.perf_counter() - validation_started
@@ -335,14 +383,45 @@ def main():
         val_cost = score_month(res["p_grid_days"], cfg, days=val_month.days)["total_cost_vnd"]
         gap = (val_cost - val_oracle) / val_oracle * 100
         sav = (val_base - val_cost) / val_base * 100
+        sav_sadrbc = (val_sadrbc - val_cost) / val_sadrbc * 100
+        activity = rollout_activity(res, cfg.dt)
+        constraints = check_hard_constraints(
+            res["p_grid_days"], res["soc_days"], cfg
+        )
+        safe = sum(constraints.values()) == 0
+        min_throughput = 0.05 * val_sadrbc_activity["throughput_kwh"]
+        active = (
+            val_sadrbc_activity["throughput_kwh"] <= 1e-6
+            or activity["throughput_kwh"] >= min_throughput
+        )
         perf["scoring_seconds"] += time.perf_counter() - scoring_started
-        curve.append({"steps": steps, "val_cost_vnd": val_cost,
-                      "oracle_gap_pct": gap, "saving_vs_nobess_pct": sav})
+        curve.append({
+            "steps": steps,
+            "val_cost_vnd": val_cost,
+            "oracle_gap_pct": gap,
+            "saving_vs_nobess_pct": sav,
+            "saving_vs_sadrbc_pct": sav_sadrbc,
+            **activity,
+            "blocked_action_pct": res.get("blocked_action_pct", 0.0),
+            "residual_limit": residual_limit,
+            "active_gate": int(active),
+            "zero_export_violation_days": constraints["zero_export_violation_days"],
+            "soc_violation_days": constraints["soc_violation_days"],
+        })
         report["runtime"] = _runtime_snapshot(perf)
         io_started = time.perf_counter()
         write_curve(curve_path, curve)
         report["latest"] = curve[-1]
-        report["best"] = min(curve, key=lambda point: point["val_cost_vnd"])
+        eligible_curve = [
+            point for point in curve
+            if point["active_gate"]
+            and point["zero_export_violation_days"] == 0
+            and point["soc_violation_days"] == 0
+        ]
+        report["best"] = (
+            min(eligible_curve, key=lambda point: point["val_cost_vnd"])
+            if eligible_curve else {}
+        )
         write_report(report_path, report)
         perf["checkpoint_report_io_seconds"] += (
             time.perf_counter() - io_started
@@ -352,7 +431,7 @@ def main():
                   f"val {val_cost/1e6:8.1f}M | saving {sav:5.1f}% | "
                   f"gap {gap:6.1f}% | pi {losses['pi_loss']:+.3f} | "
                   f"{steps/(time.time()-t0):,.0f} sps", flush=True)
-        if val_cost < best_val:
+        if val_cost < best_val and safe and active:
             best_val = val_cost
             agent.meta = {
                 **agent.meta,
@@ -360,6 +439,12 @@ def main():
                 "std": args.std,
                 "e_cap_kwh": cfg.E_cap,
                 "p_rated_kw": cfg.P_rated_nominal,
+                "controller": "sadrbc_residual",
+                "residual_limit": residual_limit,
+                "sadrbc_forecast": forecast_spec.public(
+                    "real_weather_causal_plus_declared_noisy_tail"
+                    if forecast_model else "declared_noisy_ar1"
+                ),
             }
             if d_run0 is not None:
                 agent.meta["d_run_init_kw"] = d_run0
@@ -370,7 +455,11 @@ def main():
             )
             print(f"  best {it+1:>4} | steps {steps:>7} | "
                   f"val {val_cost/1e6:8.1f}M | saving {sav:5.1f}% | "
-                  f"gap {gap:6.1f}% | checkpoint updated", flush=True)
+                  f"vs SADRBC {sav_sadrbc:+5.1f}% | gap {gap:6.1f}% | "
+                  f"throughput {activity['throughput_kwh']:.0f} kWh | checkpoint updated", flush=True)
+        elif not safe or not active:
+            reason = "safety violations" if not safe else "idle-policy gate"
+            print(f"  iter {it+1:>3} | checkpoint REJECTED: {reason}", flush=True)
         elif (it + 1) % LOG_EVERY_ITERS == 0:
             print(f"  iter {it+1:>3}/{args.iters} | steps {steps:>7} | "
                   f"val {val_cost/1e6:8.1f}M | saving {sav:5.1f}% | "
@@ -396,6 +485,12 @@ def main():
     test_no_bess = score_month(
         run_no_bess(test_month, cfg)["p_grid_days"], cfg, days=test_days
     )
+    test_sadrbc_result = run_sadrbc(
+        test_month, cfg, forecast_spec=forecast_spec, p_ref_kw=p_ref
+    )
+    test_sadrbc = score_month(
+        test_sadrbc_result["p_grid_days"], cfg, days=test_days
+    )
     test_oracle_grids = load_cached_training_grids(
         args.oracle_cache, [day.day_index for day in test_days]
     )
@@ -408,11 +503,19 @@ def main():
         (test_policy["total_cost_vnd"] - test_oracle["total_cost_vnd"])
         / test_oracle["total_cost_vnd"] * 100
     )
+    test_sadrbc_saving = (
+        (test_sadrbc["total_cost_vnd"] - test_policy["total_cost_vnd"])
+        / test_sadrbc["total_cost_vnd"] * 100
+    )
+    test_activity = rollout_activity(test_result, cfg.dt)
+    test_sadrbc_activity = rollout_activity(test_sadrbc_result, cfg.dt)
     best_agent.meta = {
         **best_agent.meta,
         "test_saving_pct": round(test_saving, 2),
         "test_oracle_gap_pct": round(test_oracle_gap, 2),
         "test_peak_kw": round(test_policy["pmax_month_kw"], 2),
+        "test_saving_vs_sadrbc_pct": round(test_sadrbc_saving, 2),
+        "test_throughput_kwh": round(test_activity["throughput_kwh"], 2),
         "trained": date.today().isoformat(),
     }
     best_agent.save(RESULTS_DIR / f"policy_{tag}.pt")
@@ -423,12 +526,17 @@ def main():
     report["test"] = {
         "policy_cost_vnd": test_policy["total_cost_vnd"],
         "no_bess_vnd": test_no_bess["total_cost_vnd"],
+        "sadrbc_vnd": test_sadrbc["total_cost_vnd"],
         "oracle_vnd": test_oracle["total_cost_vnd"],
         "saving_pct": test_saving,
+        "saving_vs_sadrbc_pct": test_sadrbc_saving,
         "oracle_gap_pct": test_oracle_gap,
         "energy_cost_vnd": test_policy["energy_cost_vnd"],
         "demand_cost_vnd": test_policy["demand_cost_vnd"],
         "peak_kw": test_policy["pmax_month_kw"],
+        "activity": test_activity,
+        "sadrbc_activity": test_sadrbc_activity,
+        "blocked_action_pct": test_result.get("blocked_action_pct", 0.0),
     }
     io_started = time.perf_counter()
     write_curve(curve_path, curve)
@@ -438,8 +546,10 @@ def main():
         f"[grepro] TEST {test_days[0].date_iso}->{test_days[-1].date_iso}: "
         f"{test_policy['total_cost_vnd']/1e6:.1f}M vs no-BESS "
         f"{test_no_bess['total_cost_vnd']/1e6:.1f}M -> saving {test_saving:.2f}% | "
+        f"vs SADRBC {test_sadrbc_saving:+.2f}% | "
         f"oracle {test_oracle['total_cost_vnd']/1e6:.1f}M -> gap {test_oracle_gap:.2f}% | "
-        f"peak {test_policy['pmax_month_kw']:.1f} kW",
+        f"peak {test_policy['pmax_month_kw']:.1f} kW | "
+        f"throughput {test_activity['throughput_kwh']:.0f} kWh",
         flush=True,
     )
     print(f"[grepro] done in {time.time()-t0:.0f}s. Best val "

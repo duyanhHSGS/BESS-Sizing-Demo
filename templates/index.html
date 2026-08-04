@@ -1436,6 +1436,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label class="train-grepro-field" style="display:none">Std <input type="number" id="train-grepro-std" value="0.20" step="0.05"></label>
           <label class="train-grepro-field" style="display:none">GrePRO Gamma <input type="number" id="train-grepro-gamma"
               min="0.0001" max="1" step="0.0001" value="{{ grepro_gamma }}"></label>
+          <label class="train-grepro-field" style="display:none">SADRBC noise seed <input type="number" id="train-grepro-forecast-seed" step="1" value="130013"></label>
+          <label class="train-grepro-field" style="display:none">Declared load error sigma <input type="number" id="train-grepro-load-sigma" min="0" max="1" step="0.01" value="0.05"></label>
+          <label class="train-grepro-field" style="display:none">Declared PV error sigma <input type="number" id="train-grepro-pv-sigma" min="0" max="1" step="0.01" value="0.15"></label>
           <label>Checkpoint tag <input id="train-tag" size="22" placeholder="auto"></label>
           <button id="btn-train" class="primary" type="button">Start training</button>
           <button id="btn-train-stop" type="button" disabled>Stop</button>
@@ -1449,6 +1452,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <div class="training-metric-tabs" id="training-metric-tabs">
             <button type="button" class="active" data-training-metric="bill">Validation bill</button>
             <button type="button" data-training-metric="saving">Saving vs no-BESS</button>
+            <button type="button" data-training-metric="sadrbc">Saving vs SADRBC</button>
             <button type="button" data-training-metric="gap">Oracle gap</button>
           </div>
           <canvas id="train-chart" class="training-chart" width="900" height="240"></canvas>
@@ -1544,6 +1548,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
               <th class="benchmark-sort" data-benchmark-sort="energy_cost_vnd">Energy</th>
               <th class="benchmark-sort" data-benchmark-sort="demand_cost_vnd">Demand</th>
               <th class="benchmark-sort" data-benchmark-sort="wear_cost_vnd">Wear</th>
+              <th class="benchmark-sort" data-benchmark-sort="throughput_kwh">Battery throughput</th>
+              <th>Blocked actions</th>
               <th class="benchmark-sort" data-benchmark-sort="peak_kw">Highest 30-min peak</th>
               <th>Oracle relation</th>
               <th>Safety</th>
@@ -3271,7 +3277,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         return `<tr><td><b>${benchmarkEscape(row.label)}</b>${row.body_mismatch ? `<div class="benchmark-danger">TRAINED FOR ANOTHER BODY</div>` : ""}</td>` +
           `<td>${benchmarkEscape(row.type)}</td><td>${formatVnd(row.total_operating_cost_vnd)}</td>` +
           `<td>${formatVnd(row.energy_cost_vnd)}</td><td>${formatVnd(row.demand_cost_vnd)}</td>` +
-          `<td>${formatVnd(row.wear_cost_vnd)}</td><td>${formatNumber(row.peak_kw, 1)} kW</td>` +
+          `<td>${formatVnd(row.wear_cost_vnd)}</td><td>${formatNumber(row.throughput_kwh, 1)} kWh</td>` +
+          `<td>${formatNumber(row.blocked_action_pct || 0, 1)}%</td><td>${formatNumber(row.peak_kw, 1)} kW</td>` +
           `<td>${benchmarkEscape(row.oracle_relation)}</td><td>${safety ? `${safety} violation day(s)` : "Clean"}</td></tr>`;
       }).join("");
       renderBenchmarkCharts(rows);
@@ -4127,6 +4134,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const trainGreproBeta = document.getElementById("train-grepro-beta");
     const trainGreproStd = document.getElementById("train-grepro-std");
     const trainGreproGamma = document.getElementById("train-grepro-gamma");
+    const trainGreproForecastSeed = document.getElementById("train-grepro-forecast-seed");
+    const trainGreproLoadSigma = document.getElementById("train-grepro-load-sigma");
+    const trainGreproPvSigma = document.getElementById("train-grepro-pv-sigma");
     const trainTag = document.getElementById("train-tag");
     const trainPlan = document.getElementById("train-plan");
     const trainLog = document.getElementById("train-log");
@@ -4284,6 +4294,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         reportMetric("Test saving", reportValue(testSaving, (value) => `${formatNumber(value, 2)}%`)),
         reportMetric("Test Oracle gap", reportValue(test.oracle_gap_pct ?? meta.test_oracle_gap_pct, (value) => `${formatNumber(value, 2)}%`)),
         reportMetric("Test peak", reportValue(test.peak_kw ?? meta.test_peak_kw, (value) => `${formatNumber(value, 1)} kW`)),
+        reportMetric("Test vs SADRBC", reportValue(test.saving_vs_sadrbc_pct ?? meta.test_saving_vs_sadrbc_pct, (value) => `${formatNumber(value, 2)}%`)),
+        reportMetric("Battery throughput", reportValue(test.activity?.throughput_kwh ?? meta.test_throughput_kwh, (value) => `${formatNumber(value, 1)} kWh`)),
         reportMetric("Trained steps", reportValue(summary.max_steps, (value) => formatNumber(value))),
       ].join("");
       const datasetRange = dataset.validation_range ? dataset.validation_range.join(" → ") : meta.test_range?.join(" → ");
@@ -4292,7 +4304,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         : `gamma ${training.gamma ?? meta.gamma ?? "?"}, group ${training.group ?? meta.group ?? "?"}, beta ${training.beta ?? meta.beta ?? "?"}, std ${training.std ?? meta.std ?? "?"}`;
       const details = [
         ["Algorithm", checkpoint.algo || saved.algorithm],
-        ["Brain mode", meta.obs_variant === "fc" ? "Forecast — 17 inputs" : "Reactive — 13 inputs"],
+        ["Brain mode", `${meta.obs_variant === "fc" ? "Forecast" : "Reactive"} — ${meta.obs_dim || (meta.obs_variant === "fc" ? 17 : 13)} inputs`],
         ["Learner device", `${training.device ?? meta.device ?? "unknown"} (requested ${training.device_requested ?? meta.device_requested ?? "legacy"})`],
         ["Battery E/P", `${checkpoint.e_cap_kwh ?? saved.battery?.e_cap_kwh ?? "?"} kWh / ${checkpoint.p_rated_kw ?? saved.battery?.p_rated_kw ?? "?"} kW`],
         ["Billing mode", checkpoint.billing_mode || saved.billing_mode],
@@ -4308,7 +4320,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         ["Seed", training.seed],
         ["Reference peak", reportValue(saved.p_ref_kw ?? meta.p_ref_kw, (value) => `${formatNumber(value, 1)} kW`)],
         ["Initial running peak", reportValue(saved.d_run_init_kw ?? meta.d_run_init_kw, (value) => `${formatNumber(value, 1)} kW`)],
+        ["Controller", meta.controller === "sadrbc_residual" ? `SADRBC + GrePRO residual (limit ${formatNumber((meta.residual_limit || 0) * 100, 0)}%)` : (meta.controller || "Direct policy")],
+        ["SADRBC forecast", meta.sadrbc_forecast ? `${meta.sadrbc_forecast.mode}; seed ${meta.sadrbc_forecast.seed}; load sigma ${meta.sadrbc_forecast.load_sigma}; PV sigma ${meta.sadrbc_forecast.pv_sigma}; exact future actuals ${meta.sadrbc_forecast.exact_future_actuals_passed_to_sadrbc ? "USED" : "NEVER"}` : "Legacy / unavailable"],
         ["Validation no-BESS", reportValue(validation.no_bess_vnd ?? summary.val_no_bess_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
+        ["Validation SADRBC", reportValue(validation.sadrbc_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
         ["Validation Oracle (native perfect)", reportValue(validation.oracle_vnd ?? summary.val_oracle_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
         ["Test policy bill", reportValue(test.policy_cost_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
         ["Test no-BESS", reportValue(test.no_bess_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
@@ -4402,9 +4417,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         const budget = algo === "ppo"
           ? `${trainSteps.value} PPO steps; gamma ${trainGamma.value}; lambda ${trainLambda.value}`
           : algo === "grepro"
-            ? `${trainGreproIters.value} GrePRO iterations; 3→7→30 day curriculum; gamma ${trainGreproGamma.value}`
+            ? `${trainGreproIters.value} GrePRO iterations; SADRBC residual 5→10→20%; deterministic forecast seed ${trainGreproForecastSeed.value}; 3→7→30 day curriculum; gamma ${trainGreproGamma.value}`
             : `${trainIters.value} GREPO iterations; gamma ${trainGrepoGamma.value}`;
-        const brainLabel = brainMode === "fc" ? "Forecast brain (17 real inputs)" : "Reactive brain (13 inputs)";
+        const inputCount = brainMode === "fc" ? (algo === "grepro" ? 18 : 17) : (algo === "grepro" ? 14 : 13);
+        const brainLabel = `${brainMode === "fc" ? "Forecast" : "Reactive"} brain (${inputCount} inputs)`;
         trainPlan.textContent = `Checking required data... Plan: ${brainLabel}; device ${trainDevice.value}; train ${trainDays} days, validation ${valDays}, test ${testDays}; ${budget}; sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action); E/P ${trainEcap.value}/${trainPrated.value}.`;
         trainOracleStatusTimer = setTimeout(refreshTrainingOracleStatus, 250);
       }
@@ -4472,6 +4488,14 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           scale: 1,
           color: "#4ade80",
           direction: "Higher is better.",
+        },
+        sadrbc: {
+          field: "saving_vs_sadrbc_pct",
+          label: "saving vs causal SADRBC",
+          unit: "%",
+          scale: 1,
+          color: "#22d3ee",
+          direction: "Higher is better; zero matches Uncle SADRBC.",
         },
         gap: {
           field: "oracle_gap_pct",
@@ -4592,6 +4616,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             grepro_beta: Number(trainGreproBeta.value),
             grepro_std: Number(trainGreproStd.value),
             grepro_gamma: Number(trainGreproGamma.value),
+            grepro_forecast_seed: Number(trainGreproForecastSeed.value),
+            grepro_forecast_load_sigma: Number(trainGreproLoadSigma.value),
+            grepro_forecast_pv_sigma: Number(trainGreproPvSigma.value),
             control_dt_minutes: selectedControlDt(),
             tag: trainTag.value.trim(),
           }),

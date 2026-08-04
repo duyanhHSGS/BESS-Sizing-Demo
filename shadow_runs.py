@@ -288,7 +288,19 @@ def _build_rollouts(config: dict[str, Any], month: MonthData, progress: Callable
         prepare_policy_forecast(config["policy"], agent, meta, month, p_ref)
     policy = run_drl_policy(month, cfg, agent, p_ref_kw=p_ref)
     progress("Running shadow SADRBC", 0, len(month.days), "SADRBC v13")
-    sadrbc = run_sadrbc(month, cfg)
+    from sadrbc_forecast import SADRBCForecastSpec
+
+    contract = meta.get("sadrbc_forecast", {}) or {}
+    sadrbc_spec = SADRBCForecastSpec(
+        seed=int(contract.get("seed", 13_0013)),
+        load_sigma=float(contract.get("load_sigma", 0.05)),
+        pv_sigma=float(contract.get("pv_sigma", 0.15)),
+        rho=float(contract.get("rho", 0.90)),
+        replan_minutes=int(contract.get("replan_minutes", 60)),
+    )
+    sadrbc = run_sadrbc(
+        month, cfg, forecast_spec=sadrbc_spec, p_ref_kw=p_ref
+    )
     return month, cfg, policy, sadrbc, algo, control_minutes, weather_status
 
 

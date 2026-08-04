@@ -11,6 +11,15 @@ CURVE_FIELDS = [
     "val_cost_vnd",
     "oracle_gap_pct",
     "saving_vs_nobess_pct",
+    "saving_vs_sadrbc_pct",
+    "throughput_kwh",
+    "mean_abs_p_bess_kw",
+    "soc_span_pct",
+    "blocked_action_pct",
+    "residual_limit",
+    "active_gate",
+    "zero_export_violation_days",
+    "soc_violation_days",
 ]
 
 
