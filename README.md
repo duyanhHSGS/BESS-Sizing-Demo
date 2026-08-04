@@ -44,7 +44,9 @@ GrePRO hybrid controller
 ------------------------
 
 New GrePRO checkpoints use SADRBC v13 as a causal baseline and learn only a
-bounded residual correction (5% to 10% to 20% curriculum). SADRBC receives
+bounded, constant residual correction (5% by default). The training horizon
+still grows from 3 to 7 to 30 days without simultaneously changing GrePRO's
+physical authority. SADRBC receives
 the portable real-weather forecast when forecast mode is selected. Otherwise
 it receives a declared deterministic AR(1) forecast (default seed `130013`,
 5% load error, 15% PV error). Exact future load/PV is never passed directly

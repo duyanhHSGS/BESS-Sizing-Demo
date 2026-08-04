@@ -1436,6 +1436,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label class="train-grepro-field" style="display:none">Std <input type="number" id="train-grepro-std" value="0.20" step="0.05"></label>
           <label class="train-grepro-field" style="display:none">GrePRO Gamma <input type="number" id="train-grepro-gamma"
               min="0.0001" max="1" step="0.0001" value="{{ grepro_gamma }}"></label>
+          <label class="train-grepro-field" style="display:none">Fixed residual limit <input type="number" id="train-grepro-residual-limit" min="0.01" max="1" step="0.01" value="0.05"></label>
           <label class="train-grepro-field" style="display:none">SADRBC noise seed <input type="number" id="train-grepro-forecast-seed" step="1" value="130013"></label>
           <label class="train-grepro-field" style="display:none">Declared load error sigma <input type="number" id="train-grepro-load-sigma" min="0" max="1" step="0.01" value="0.05"></label>
           <label class="train-grepro-field" style="display:none">Declared PV error sigma <input type="number" id="train-grepro-pv-sigma" min="0" max="1" step="0.01" value="0.15"></label>
@@ -4134,6 +4135,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const trainGreproBeta = document.getElementById("train-grepro-beta");
     const trainGreproStd = document.getElementById("train-grepro-std");
     const trainGreproGamma = document.getElementById("train-grepro-gamma");
+    const trainGreproResidualLimit = document.getElementById("train-grepro-residual-limit");
     const trainGreproForecastSeed = document.getElementById("train-grepro-forecast-seed");
     const trainGreproLoadSigma = document.getElementById("train-grepro-load-sigma");
     const trainGreproPvSigma = document.getElementById("train-grepro-pv-sigma");
@@ -4417,7 +4419,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         const budget = algo === "ppo"
           ? `${trainSteps.value} PPO steps; gamma ${trainGamma.value}; lambda ${trainLambda.value}`
           : algo === "grepro"
-            ? `${trainGreproIters.value} GrePRO iterations; SADRBC residual 5→10→20%; deterministic forecast seed ${trainGreproForecastSeed.value}; 3→7→30 day curriculum; gamma ${trainGreproGamma.value}`
+            ? `${trainGreproIters.value} GrePRO iterations; fixed SADRBC residual ${formatNumber(Number(trainGreproResidualLimit.value) * 100, 0)}%; deterministic forecast seed ${trainGreproForecastSeed.value}; 3→7→30 day curriculum; gamma ${trainGreproGamma.value}`
             : `${trainIters.value} GREPO iterations; gamma ${trainGrepoGamma.value}`;
         const inputCount = brainMode === "fc" ? (algo === "grepro" ? 18 : 17) : (algo === "grepro" ? 14 : 13);
         const brainLabel = `${brainMode === "fc" ? "Forecast" : "Reactive"} brain (${inputCount} inputs)`;
@@ -4616,6 +4618,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             grepro_beta: Number(trainGreproBeta.value),
             grepro_std: Number(trainGreproStd.value),
             grepro_gamma: Number(trainGreproGamma.value),
+            grepro_residual_limit: Number(trainGreproResidualLimit.value),
             grepro_forecast_seed: Number(trainGreproForecastSeed.value),
             grepro_forecast_load_sigma: Number(trainGreproLoadSigma.value),
             grepro_forecast_pv_sigma: Number(trainGreproPvSigma.value),

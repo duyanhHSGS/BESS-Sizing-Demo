@@ -108,9 +108,15 @@ def main():
     ap.add_argument("--forecast-seed", type=int, default=DEFAULT_FORECAST_SEED)
     ap.add_argument("--forecast-load-sigma", type=float, default=0.05)
     ap.add_argument("--forecast-pv-sigma", type=float, default=0.15)
+    ap.add_argument(
+        "--residual-limit", type=float, default=0.05,
+        help="Constant fraction of rated BESS power available to GrePRO corrections.",
+    )
     args = ap.parse_args()
     if not np.isfinite(args.gamma) or not 0.0 < args.gamma <= 1.0:
         raise SystemExit("gamma must be finite and in (0, 1]")
+    if not np.isfinite(args.residual_limit) or not 0.0 < args.residual_limit <= 1.0:
+        raise SystemExit("residual-limit must be finite and in (0, 1]")
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     base = load_system_config()
@@ -188,7 +194,7 @@ def main():
         control_dt_minutes=args.control_dt_minutes,
         use_forecast=args.obs_variant == "fc",
         record_trajectory=False,
-        residual_limit=0.05,
+        residual_limit=args.residual_limit,
         forecast_spec=forecast_spec,
     )
     control_probe = make_env()
@@ -209,7 +215,7 @@ def main():
     agent.meta = {
         "p_ref_kw": p_ref,
         "algo": "grepro",
-        "method": "sadrbc-residual-group-relative-progressive-horizon-v2",
+        "method": "sadrbc-residual-group-relative-progressive-horizon-v3",
         "controller": "sadrbc_residual",
         "e_cap_kwh": cfg.E_cap,
         "p_rated_kw": cfg.P_rated_nominal,
@@ -222,7 +228,7 @@ def main():
         "obs_dim": control_probe.obs_dim,
         "native_dt_minutes": cfg.dt * 60.0,
         "control_dt_minutes": args.control_dt_minutes,
-        "residual_limit": 0.20,
+        "residual_limit": args.residual_limit,
         "sadrbc_forecast": forecast_spec.public(
             "real_weather_causal_plus_declared_noisy_tail"
             if forecast_model else "declared_noisy_ar1"
@@ -289,7 +295,7 @@ def main():
             "device_requested": args.device,
             "device": learner_device,
             "horizon_curriculum_days": [3, 7, 30],
-            "residual_limit_curriculum": [0.05, 0.10, 0.20],
+            "residual_limit": args.residual_limit,
             "sadrbc_forecast": forecast_spec.public(
                 "real_weather_causal_plus_declared_noisy_tail"
                 if forecast_model else "declared_noisy_ar1"
@@ -327,6 +333,7 @@ def main():
     print(f"[grepro] config {tag} | group={args.group} | gamma={args.gamma:g} | "
           f"learner={learner_device} (requested {args.device}) | "
           f"native dt {cfg.dt * 60:g}m | control dt {control_probe.control_dt_minutes:g}m | "
+          f"fixed residual {args.residual_limit * 100:g}% | "
           f"SADRBC forecast seed={forecast_spec.seed}, load sigma={forecast_spec.load_sigma:g}, "
           f"PV sigma={forecast_spec.pv_sigma:g} | val no-BESS {val_base/1e6:.1f}M, "
           f"causal SADRBC {val_sadrbc/1e6:.1f}M, oracle {val_oracle/1e6:.1f}M VND", flush=True)
@@ -339,7 +346,7 @@ def main():
     for it in range(args.iters):
         progress = (it + 1) / max(1, args.iters)
         horizon_days = 3 if progress <= 0.20 else (7 if progress <= 0.50 else 30)
-        residual_limit = 0.05 if progress <= 0.20 else (0.10 if progress <= 0.50 else 0.20)
+        residual_limit = args.residual_limit
         max_start = len(train_days) - horizon_days
         start = int(rng.integers(max_start + 1))
         episode_days = train_days[start:start + horizon_days]

@@ -278,6 +278,11 @@ def build_training_command(
         if algo == "grepro":
             cmd.extend(
                 [
+                    "--residual-limit",
+                    str(_bounded_float(
+                        payload, "grepro_residual_limit", 0.05,
+                        minimum=0.0, minimum_inclusive=False, maximum=1.0,
+                    )),
                     "--forecast-seed",
                     str(_int(payload, "grepro_forecast_seed", 13_0013)),
                     "--forecast-load-sigma",
