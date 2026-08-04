@@ -794,6 +794,12 @@
     .benchmark-detective:hover { border-color: #7c3aed; transform: translateY(-1px); }
     .benchmark-sort { cursor: pointer; user-select: none; }
     .benchmark-sort:hover { color: #4f46e5; }
+    .live-hero { background: linear-gradient(135deg, #052e16, #065f46 55%, #0e7490); color: #fff; }
+    .live-hero h2 { color: #fff; }
+    .live-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
+    .live-chart { width: 100%; height: 260px; border-radius: 10px; background: #fff; }
+    .live-status { margin-top: 10px; color: #d1fae5; }
+    .live-status.error { color: #fecaca; }
   </style>
 </head>
 
@@ -804,6 +810,7 @@
       <button class="tab-button" type="button" data-tab-target="get-weather">Get Weather</button>
       <button class="tab-button" type="button" data-tab-target="training-lab">Training Lab</button>
       <button class="tab-button" type="button" data-tab-target="benchmarking">Benchmarking</button>
+      <button class="tab-button" type="button" data-tab-target="live-runs">Live Runs</button>
       <button class="tab-button" type="button" data-tab-target="dispatch-viewer">Dispatch Viewer</button>
     </nav>
 
@@ -1563,6 +1570,45 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <canvas id="benchmarking-versus-chart" class="benchmark-chart"></canvas>
         </section>
       </div>
+    </section>
+
+    <section id="tab-live-runs" class="tab-panel">
+      <section class="card live-hero">
+        <div class="section-head">
+          <div>
+            <h2>Live Runs Control Room</h2>
+            <div>Advance the selected CSV one day at a time while SOC, monthly peak, and controller memory stay alive.</div>
+          </div>
+          <div class="row">
+            <label>Policy <select id="live-policy"></select></label>
+            <button id="btn-live-create" class="primary" type="button">Create live session</button>
+          </div>
+        </div>
+        <div class="row">
+          <label>Session <select id="live-session"></select></label>
+          <button id="btn-live-step" class="primary" type="button">Run 1 day</button>
+          <label>Auto seconds/day <input id="live-interval" type="number" value="3" min="1" step="1"></label>
+          <button id="btn-live-auto" type="button">Auto run</button>
+          <button id="btn-live-stop" type="button">Stop</button>
+          <button id="btn-live-delete" class="danger" type="button">Delete</button>
+        </div>
+        <div id="live-status" class="live-status">Choose a policy brain and create a session.</div>
+      </section>
+
+      <div class="live-grid">
+        <section class="card"><h2>Month-to-date bill (million VND)</h2><canvas id="live-cost-chart" class="live-chart"></canvas></section>
+        <section class="card"><h2>Month-to-date 30-minute peak (kW)</h2><canvas id="live-peak-chart" class="live-chart"></canvas></section>
+      </div>
+
+      <section class="card">
+        <h2>Daily flight recorder</h2>
+        <div class="sizing-table-wrap">
+          <table class="sizing-table">
+            <thead><tr><th>Day</th><th>Date</th><th>Type</th><th>No BESS bill</th><th>SADRBC bill</th><th>Policy bill</th><th>Policy SOC</th><th>Peak</th></tr></thead>
+            <tbody id="live-table-body"></tbody>
+          </table>
+        </div>
+      </section>
     </section>
 
     <section id="tab-dispatch-viewer" class="tab-panel">
@@ -3269,6 +3315,217 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       renderBenchmarkScope();
     }));
 
+    const livePolicy = document.getElementById("live-policy");
+    const liveSession = document.getElementById("live-session");
+    const liveStatus = document.getElementById("live-status");
+    const liveTableBody = document.getElementById("live-table-body");
+    const liveColors = ["#64748b", "#f97316", "#0f766e", "#7c3aed"];
+    let livePollTimer = null;
+    let liveLastPayload = null;
+
+    async function liveApi(path, options = {}) {
+      const response = await fetch(path, options);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      return payload;
+    }
+
+    async function refreshLiveRuns() {
+      const previousPolicy = livePolicy.value;
+      const previousSession = liveSession.value;
+      const [checkpoints, sessionsPayload] = await Promise.all([
+        liveApi("/api/training/checkpoints"),
+        liveApi("/api/live-runs"),
+      ]);
+      const runnable = checkpoints.filter((checkpoint) => !checkpoint.error);
+      livePolicy.innerHTML = runnable.map((checkpoint) =>
+        `<option value="${escapeHtml(checkpoint.name)}">${escapeHtml(checkpoint.name)} · ${escapeHtml(checkpoint.algo)}</option>`
+      ).join("");
+      if (previousPolicy && runnable.some((checkpoint) => checkpoint.name === previousPolicy)) {
+        livePolicy.value = previousPolicy;
+      }
+      const sessions = sessionsPayload.sessions || [];
+      liveSession.innerHTML = sessions.map((session) =>
+        `<option value="${session.id}">${session.id} · ${escapeHtml(session.source || "CSV")} · ${session.days_done}/${session.days_total} days</option>`
+      ).join("");
+      if (previousSession && sessions.some((session) => session.id === previousSession)) {
+        liveSession.value = previousSession;
+      }
+      document.getElementById("btn-live-create").disabled = !runnable.length;
+      if (liveSession.value) await renderLiveRun(liveSession.value);
+      else {
+        liveStatus.textContent = runnable.length
+          ? "No live session yet. Create one to wake the persistent controllers."
+          : "No loadable policy checkpoint is available.";
+        liveTableBody.innerHTML = "";
+        drawLiveChart("live-cost-chart", [], [], "mtd_total_vnd", 1e6);
+        drawLiveChart("live-peak-chart", [], [], "mtd_pmax_kw", 1);
+      }
+    }
+
+    function drawLiveChart(canvasId, days, methods, metric, divisor) {
+      const { ctx: liveCtx, width, height } = prepareBenchmarkCanvas(canvasId);
+      liveCtx.clearRect(0, 0, width, height);
+      liveCtx.fillStyle = "#ffffff";
+      liveCtx.fillRect(0, 0, width, height);
+      const pad = { left: 58, right: 18, top: 24, bottom: 36 };
+      if (!days.length) {
+        liveCtx.fillStyle = "#64748b";
+        liveCtx.font = "14px system-ui";
+        liveCtx.fillText("Run a day to feed the chart.", 20, 36);
+        return;
+      }
+      const allValues = methods.flatMap((method) => days.map((day) => Number(day.methods[method]?.[metric] || 0) / divisor));
+      const maxValue = Math.max(1, ...allValues) * 1.08;
+      const plotW = width - pad.left - pad.right;
+      const plotH = height - pad.top - pad.bottom;
+      liveCtx.strokeStyle = "#cbd5e1";
+      liveCtx.lineWidth = 1;
+      liveCtx.beginPath();
+      liveCtx.moveTo(pad.left, pad.top);
+      liveCtx.lineTo(pad.left, pad.top + plotH);
+      liveCtx.lineTo(pad.left + plotW, pad.top + plotH);
+      liveCtx.stroke();
+      liveCtx.fillStyle = "#475569";
+      liveCtx.font = "11px system-ui";
+      for (let tick = 0; tick <= 4; tick += 1) {
+        const value = maxValue * tick / 4;
+        const y = pad.top + plotH - plotH * tick / 4;
+        liveCtx.fillText(formatNumber(value, divisor === 1 ? 0 : 2), 5, y + 4);
+        liveCtx.strokeStyle = "#eef2f7";
+        liveCtx.beginPath(); liveCtx.moveTo(pad.left, y); liveCtx.lineTo(pad.left + plotW, y); liveCtx.stroke();
+      }
+      methods.forEach((method, methodIndex) => {
+        liveCtx.strokeStyle = liveColors[methodIndex % liveColors.length];
+        liveCtx.lineWidth = 2.5;
+        liveCtx.beginPath();
+        days.forEach((day, index) => {
+          const x = pad.left + (days.length === 1 ? plotW / 2 : plotW * index / (days.length - 1));
+          const value = Number(day.methods[method]?.[metric] || 0) / divisor;
+          const y = pad.top + plotH - plotH * value / maxValue;
+          if (index) liveCtx.lineTo(x, y); else liveCtx.moveTo(x, y);
+        });
+        liveCtx.stroke();
+        liveCtx.fillStyle = liveColors[methodIndex % liveColors.length];
+        liveCtx.fillRect(pad.left + methodIndex * 145, 7, 12, 3);
+        liveCtx.fillText(method === "no_bess" ? "No BESS" : method === "sadrbc_v13" ? "SADRBC v13" : method, pad.left + 17 + methodIndex * 145, 12);
+      });
+      liveCtx.fillStyle = "#475569";
+      liveCtx.fillText(`Day ${days[0].day}`, pad.left, height - 10);
+      liveCtx.fillText(`Day ${days[days.length - 1].day}`, width - pad.right - 45, height - 10);
+    }
+
+    async function renderLiveRun(sessionId) {
+      if (!sessionId) return;
+      try {
+        const payload = await liveApi(`/api/live-runs/${sessionId}`);
+        liveLastPayload = payload;
+        const status = payload.status;
+        const days = payload.days || [];
+        const policy = status.policy;
+        const latest = days[days.length - 1];
+        const policyLatest = latest?.methods?.[policy];
+        liveStatus.classList.toggle("error", Boolean(status.error));
+        liveStatus.innerHTML = `<b>${status.days_done}/${status.days_total} days</b> · ${escapeHtml(status.source || "CSV")} · ` +
+          `${escapeHtml(policy)} · auto ${status.auto_interval_s ? `${status.auto_interval_s}s/day` : "off"}` +
+          (policyLatest ? ` · SOC ${formatNumber(policyLatest.soc_end_pct, 1)}% · peak ${formatNumber(policyLatest.mtd_pmax_kw, 1)} kW` : "") +
+          (status.error ? ` · ERROR: ${escapeHtml(status.error)}` : "");
+        liveTableBody.innerHTML = days.slice(-31).reverse().map((day) => {
+          const noBess = day.methods.no_bess;
+          const sadrbc = day.methods.sadrbc_v13;
+          const policyRow = day.methods[policy];
+          return `<tr><td>${day.day}</td><td>${escapeHtml(day.date || "—")}</td><td>${escapeHtml(day.day_type)}</td>` +
+            `<td>${formatVnd(noBess.mtd_total_vnd)}</td><td>${formatVnd(sadrbc.mtd_total_vnd)}</td>` +
+            `<td>${formatVnd(policyRow.mtd_total_vnd)}</td><td>${formatNumber(policyRow.soc_end_pct, 1)}%</td>` +
+            `<td>${formatNumber(policyRow.mtd_pmax_kw, 1)} kW</td></tr>`;
+        }).join("");
+        drawLiveChart("live-cost-chart", days, status.methods, "mtd_total_vnd", 1e6);
+        drawLiveChart("live-peak-chart", days, status.methods, "mtd_pmax_kw", 1);
+        if (!status.auto_interval_s) stopLivePolling();
+      } catch (error) {
+        liveStatus.classList.add("error");
+        liveStatus.textContent = error.message;
+        stopLivePolling();
+      }
+    }
+
+    function startLivePolling() {
+      stopLivePolling();
+      livePollTimer = setInterval(() => renderLiveRun(liveSession.value), 1000);
+    }
+
+    function stopLivePolling() {
+      if (livePollTimer) clearInterval(livePollTimer);
+      livePollTimer = null;
+    }
+
+    async function createLiveRun() {
+      try {
+        const status = await liveApi("/api/live-runs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ policy: livePolicy.value }),
+        });
+        await refreshLiveRuns();
+        liveSession.value = status.id;
+        await renderLiveRun(status.id);
+      } catch (error) {
+        liveStatus.classList.add("error");
+        liveStatus.textContent = error.message;
+      }
+    }
+
+    async function stepLiveRun() {
+      if (!liveSession.value) return;
+      try {
+        const payload = await liveApi(`/api/live-runs/${liveSession.value}/step`, { method: "POST" });
+        await renderLiveRun(liveSession.value);
+        if (payload.done) liveStatus.innerHTML += " · Dataset complete.";
+      } catch (error) {
+        liveStatus.classList.add("error");
+        liveStatus.textContent = error.message;
+      }
+    }
+
+    async function autoLiveRun() {
+      if (!liveSession.value) return;
+      try {
+        await liveApi(`/api/live-runs/${liveSession.value}/auto`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ interval_s: Number(document.getElementById("live-interval").value) || 3 }),
+        });
+        startLivePolling();
+      } catch (error) {
+        liveStatus.classList.add("error");
+        liveStatus.textContent = error.message;
+      }
+    }
+
+    async function stopLiveRun() {
+      if (!liveSession.value) return;
+      await liveApi(`/api/live-runs/${liveSession.value}/stop`, { method: "POST" }).catch((error) => {
+        liveStatus.textContent = error.message;
+      });
+      stopLivePolling();
+      await renderLiveRun(liveSession.value);
+    }
+
+    async function deleteLiveRun() {
+      const sessionId = liveSession.value;
+      if (!sessionId || !confirm(`Delete live session ${sessionId}?`)) return;
+      await liveApi(`/api/live-runs/${sessionId}`, { method: "DELETE" });
+      stopLivePolling();
+      await refreshLiveRuns();
+    }
+
+    document.getElementById("btn-live-create").addEventListener("click", createLiveRun);
+    document.getElementById("btn-live-step").addEventListener("click", stepLiveRun);
+    document.getElementById("btn-live-auto").addEventListener("click", autoLiveRun);
+    document.getElementById("btn-live-stop").addEventListener("click", stopLiveRun);
+    document.getElementById("btn-live-delete").addEventListener("click", deleteLiveRun);
+    liveSession.addEventListener("change", () => renderLiveRun(liveSession.value));
+
     function bindTabs() {
       document.querySelectorAll("[data-tab-target]").forEach((button) => {
         button.addEventListener("click", () => {
@@ -3285,6 +3542,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             loadWeatherContext();
           } else if (target === "benchmarking") {
             refreshBenchmarkingTab();
+          } else if (target === "live-runs") {
+            hideTooltip();
+            hideDispatchTooltip();
+            refreshLiveRuns();
           } else if (target === "dispatch-viewer") {
             hideTooltip();
             hideDispatchTooltip();

@@ -9,6 +9,7 @@ import benchmark_store
 import benchmarking
 import dispatch_runner
 import dispatch_store
+import live_runs
 import oracle_cache
 from benchmark import (
     build_benchmark,
@@ -266,6 +267,87 @@ def dispatch_run():
         results,
     )
     return jsonify({"run_id": run_id, "policies": list(results), "warnings": warnings})
+
+
+@app.route("/api/live-runs", methods=["GET"])
+def live_run_list():
+    return jsonify({"sessions": live_runs.list_sessions()})
+
+
+@app.route("/api/live-runs", methods=["POST"])
+def live_run_create():
+    payload = request.get_json(silent=True) or {}
+    policy_name = str(payload.get("policy") or "")
+    known = {checkpoint["name"] for checkpoint in list_checkpoints()}
+    if policy_name not in known:
+        return jsonify({"error": "Select a loadable local policy checkpoint."}), 422
+    try:
+        session = live_runs.create_session(policy_name, dict(PARAMETERS))
+    except (dispatch_runner.DispatchRunWarning, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 422
+    return jsonify(session.status()), 201
+
+
+def _live_session_or_404(session_id):
+    session = live_runs.get_session(session_id)
+    if session is None:
+        return None, (jsonify({"error": "Live run session not found."}), 404)
+    return session, None
+
+
+@app.route("/api/live-runs/<session_id>", methods=["GET"])
+def live_run_detail(session_id):
+    session, error = _live_session_or_404(session_id)
+    if error:
+        return error
+    return jsonify({"status": session.status(), "days": list(session.day_log)})
+
+
+@app.route("/api/live-runs/<session_id>/step", methods=["POST"])
+def live_run_step(session_id):
+    session, error = _live_session_or_404(session_id)
+    if error:
+        return error
+    try:
+        entry = session.step_day()
+    except Exception as exc:  # the session retains prior completed days
+        session.error = str(exc)[:500]
+        return jsonify({"error": str(exc), "status": session.status()}), 422
+    return jsonify({
+        "done": entry is None,
+        "entry": entry,
+        "status": session.status(),
+    })
+
+
+@app.route("/api/live-runs/<session_id>/auto", methods=["POST"])
+def live_run_auto(session_id):
+    session, error = _live_session_or_404(session_id)
+    if error:
+        return error
+    payload = request.get_json(silent=True) or {}
+    try:
+        interval_s = max(1.0, float(payload.get("interval_s", 3.0)))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Auto interval must be a number of seconds."}), 422
+    session.start_auto(interval_s)
+    return jsonify(session.status())
+
+
+@app.route("/api/live-runs/<session_id>/stop", methods=["POST"])
+def live_run_stop(session_id):
+    session, error = _live_session_or_404(session_id)
+    if error:
+        return error
+    session.stop_auto()
+    return jsonify(session.status())
+
+
+@app.route("/api/live-runs/<session_id>", methods=["DELETE"])
+def live_run_delete(session_id):
+    if not live_runs.drop_session(session_id):
+        return jsonify({"error": "Live run session not found."}), 404
+    return jsonify({"ok": True})
 
 
 @app.route("/api/benchmarking/context", methods=["GET"])

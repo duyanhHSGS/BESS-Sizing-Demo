@@ -30,3 +30,12 @@ How to run
 6. Start the app:
 
    python main.py
+
+Live Runs
+---------
+
+Open the **Live Runs** tab, choose a local `policy_*.pt` checkpoint, and
+create a session. A session snapshots the currently selected CSV and keeps
+SADRBC, DRL, SOC, and peak state alive while you run one day at a time or use
+Auto run. Sessions are held in server memory and disappear when the Flask
+process restarts.
