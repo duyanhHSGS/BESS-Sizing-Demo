@@ -84,6 +84,11 @@ def _conn() -> sqlite3.Connection:
             date TEXT PRIMARY KEY,
             reason TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS shadow_traces (
+            date TEXT PRIMARY KEY,
+            trace_json TEXT NOT NULL,
+            FOREIGN KEY(date) REFERENCES shadow_days(date) ON DELETE CASCADE
+        );
         """
     )
     return conn
@@ -206,6 +211,7 @@ def reset_history() -> None:
         raise ShadowRunError("Stop the running shadow catch-up before resetting history.")
     try:
         with _conn() as conn:
+            conn.execute("DELETE FROM shadow_traces")
             conn.execute("DELETE FROM shadow_days")
             conn.execute("DELETE FROM shadow_telemetry")
             conn.execute("DELETE FROM shadow_missing")
@@ -321,6 +327,12 @@ def catchup(
                 date.fromisoformat(row[0])
                 for row in conn.execute("SELECT date FROM shadow_days ORDER BY date")
             ]
+            missing_trace = conn.execute(
+                "SELECT MIN(d.date) FROM shadow_days d "
+                "LEFT JOIN shadow_traces t ON t.date=d.date "
+                "WHERE d.status='OK' AND t.date IS NULL"
+            ).fetchone()[0]
+            trace_backfill_start = date.fromisoformat(missing_trace) if missing_trace else None
         connector_failures: dict[str, str] = {}
         connector_stats = None
         if config.get("source_kind", "csv") == "thingsboard":
@@ -338,7 +350,8 @@ def catchup(
             yesterday = date.today() - timedelta(days=1)
             end = min(date.fromisoformat(end_iso), yesterday) if end_iso else yesterday
             start = date.fromisoformat(start_iso) if start_iso else (
-                max(saved_dates) + timedelta(days=1) if saved_dates else end
+                trace_backfill_start
+                or (max(saved_dates) + timedelta(days=1) if saved_dates else end)
             )
             if start > end:
                 return {
@@ -357,7 +370,8 @@ def catchup(
             month = dataset_to_month(selected_data_path(config["parameters"]))
             source_dates = sorted(date.fromisoformat(day.date_iso) for day in month.days)
             start = date.fromisoformat(start_iso) if start_iso else (
-                max(saved_dates) + timedelta(days=1) if saved_dates else source_dates[0]
+                trace_backfill_start
+                or (max(saved_dates) + timedelta(days=1) if saved_dates else source_dates[0])
             )
             end = date.fromisoformat(end_iso) if end_iso else source_dates[-1]
         if start > end:
@@ -390,8 +404,12 @@ def catchup(
                 break
             iso = cursor.isoformat()
             with _conn() as conn:
-                exists = conn.execute("SELECT 1 FROM shadow_days WHERE date = ?", (iso,)).fetchone()
-            if exists:
+                exists = conn.execute(
+                    "SELECT d.status,t.date AS trace_date FROM shadow_days d "
+                    "LEFT JOIN shadow_traces t ON t.date=d.date WHERE d.date=?",
+                    (iso,),
+                ).fetchone()
+            if exists and (exists["status"] != "OK" or exists["trace_date"]):
                 already_done += 1
             elif iso not in by_date:
                 _save_skipped(
@@ -457,6 +475,19 @@ def _save_day(index, day, month, cfg, policy, sadrbc, checkpoint_id: str) -> Non
             "INSERT OR REPLACE INTO shadow_days VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             row,
         )
+        trace = {
+            "load": np.round(np.asarray(day.load, dtype=float), 3).tolist(),
+            "pv": np.round(np.asarray(day.pv, dtype=float), 3).tolist(),
+            "no_bess_grid": np.round(no_bess_grid, 3).tolist(),
+            "sadrbc_grid": np.round(sadrbc_grid, 3).tolist(),
+            "sadrbc_soc": np.round(sadrbc_soc * 100.0, 3).tolist(),
+            "policy_grid": np.round(policy_grid, 3).tolist(),
+            "policy_soc": np.round(policy_soc * 100.0, 3).tolist(),
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO shadow_traces(date,trace_json) VALUES (?,?)",
+            (day.date_iso, json.dumps(trace, separators=(",", ":"))),
+        )
 
 
 def _save_skipped(iso: str, checkpoint_id: str, reason: str) -> None:
@@ -469,6 +500,7 @@ def _save_skipped(iso: str, checkpoint_id: str, reason: str) -> None:
             "INSERT OR REPLACE INTO shadow_missing(date,reason) VALUES (?,?)",
             (iso, reason[:500]),
         )
+        conn.execute("DELETE FROM shadow_traces WHERE date=?", (iso,))
 
 
 def _rebuild_all_mtd() -> None:
@@ -494,8 +526,9 @@ def _rebuild_all_mtd() -> None:
 
 def list_days(month: str | None = None) -> list[dict[str, Any]]:
     query = (
-        "SELECT d.*,m.reason AS skip_reason FROM shadow_days d "
-        "LEFT JOIN shadow_missing m ON m.date=d.date"
+        "SELECT d.*,m.reason AS skip_reason,t.trace_json FROM shadow_days d "
+        "LEFT JOIN shadow_missing m ON m.date=d.date "
+        "LEFT JOIN shadow_traces t ON t.date=d.date"
     )
     args: tuple = ()
     if month:
@@ -503,7 +536,13 @@ def list_days(month: str | None = None) -> list[dict[str, Any]]:
         args = (month + "%",)
     query += " ORDER BY d.date"
     with _conn() as conn:
-        return [dict(row) for row in conn.execute(query, args).fetchall()]
+        rows = []
+        for stored in conn.execute(query, args).fetchall():
+            row = dict(stored)
+            raw_trace = row.pop("trace_json", None)
+            row["trace"] = json.loads(raw_trace) if raw_trace else None
+            rows.append(row)
+        return rows
 
 
 def monthly_report() -> list[dict[str, Any]]:

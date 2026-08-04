@@ -38,7 +38,9 @@ Open the **Live Runs** tab, choose a local `policy_*.pt` checkpoint, and
 create a session. A session snapshots the currently selected CSV and keeps
 SADRBC, DRL, SOC, and peak state alive while you run one day at a time or use
 Auto run. Sessions are held in server memory and disappear when the Flask
-process restarts.
+process restarts. The Live Runs day selector shows native-resolution Load, PV,
+No-BESS grid, SADRBC grid, policy grid, and policy SOC traces in the same daily
+shape as Dispatch Viewer.
 
 GrePRO hybrid controller
 ------------------------
@@ -61,7 +63,8 @@ against measured CSV days without sending battery commands. Save a source,
 checkpoint, and battery body, then run catch-up for a date range. Configuration,
 daily audit rows, and monthly virtual bills persist in `shadow/shadow.sqlite`
 across Flask restarts. Reset the shadow history before changing its scientific
-configuration.
+configuration. Native-resolution daily traces are stored separately in the
+same database and can be selected in the daily Shadow dispatch chart.
 
 At the top of Shadow Running, the distinct **ThingsBoard Connector** panel can
 configure and test the API URL, account, device ID, load/PV telemetry keys,

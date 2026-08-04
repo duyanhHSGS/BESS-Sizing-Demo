@@ -798,6 +798,7 @@
     .live-hero h2 { color: #fff; }
     .live-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
     .live-chart { width: 100%; height: 260px; border-radius: 10px; background: #fff; }
+    .shadow-dispatch-card { grid-column: 1 / -1; }
     .live-status { margin-top: 10px; color: #d1fae5; }
     .live-status.error { color: #fecaca; }
     .shadow-hero { background: linear-gradient(135deg, #111827, #312e81 55%, #581c87); color: #fff; }
@@ -1611,10 +1612,14 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         <div id="live-status" class="live-status">Choose a policy brain and create a session.</div>
       </section>
 
-      <div class="live-grid">
-        <section class="card"><h2>Month-to-date bill (million VND)</h2><canvas id="live-cost-chart" class="live-chart"></canvas></section>
-        <section class="card"><h2>Month-to-date 30-minute peak (kW)</h2><canvas id="live-peak-chart" class="live-chart"></canvas></section>
-      </div>
+      <section class="card">
+        <div class="section-head">
+          <div><h2>Daily dispatch</h2><div>One completed day at native resolution, matching Dispatch Viewer.</div></div>
+          <label>Day <select id="live-chart-day"></select></label>
+        </div>
+        <div class="chart-wrap"><canvas id="live-dispatch-chart"></canvas></div>
+        <div class="info" id="live-chart-info">Run a day to create its dispatch trace.</div>
+      </section>
 
       <section class="card">
         <h2>Daily flight recorder</h2>
@@ -1711,7 +1716,14 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
 
       <div id="shadow-stats" class="shadow-stats"></div>
       <div class="live-grid">
-        <section class="card"><h2>Cumulative energy cost (million VND)</h2><canvas id="shadow-cost-chart" class="live-chart"></canvas></section>
+        <section class="card shadow-dispatch-card">
+          <div class="section-head">
+            <div><h2>Daily shadow dispatch</h2><div>Measured load/PV with virtual SADRBC and policy behavior.</div></div>
+            <label>Day <select id="shadow-chart-day"></select></label>
+          </div>
+          <div class="chart-wrap"><canvas id="shadow-dispatch-chart"></canvas></div>
+          <div class="info" id="shadow-chart-info">Run catch-up to create a daily dispatch trace.</div>
+        </section>
         <section class="card">
           <h2>Monthly virtual bill</h2>
           <div class="sizing-table-wrap"><table class="sizing-table">
@@ -3438,7 +3450,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const liveSession = document.getElementById("live-session");
     const liveStatus = document.getElementById("live-status");
     const liveTableBody = document.getElementById("live-table-body");
-    const liveColors = ["#64748b", "#f97316", "#0f766e", "#7c3aed"];
+    const liveChartDay = document.getElementById("live-chart-day");
+    const liveChartInfo = document.getElementById("live-chart-info");
     let livePollTimer = null;
     let liveLastPayload = null;
 
@@ -3477,61 +3490,100 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           ? "No live session yet. Create one to wake the persistent controllers."
           : "No loadable policy checkpoint is available.";
         liveTableBody.innerHTML = "";
-        drawLiveChart("live-cost-chart", [], [], "mtd_total_vnd", 1e6);
-        drawLiveChart("live-peak-chart", [], [], "mtd_pmax_kw", 1);
+        liveChartDay.innerHTML = "";
+        drawDailyDispatchChart("live-dispatch-chart", null, "Policy");
       }
     }
 
-    function drawLiveChart(canvasId, days, methods, metric, divisor) {
-      const { ctx: liveCtx, width, height } = prepareBenchmarkCanvas(canvasId);
-      liveCtx.clearRect(0, 0, width, height);
-      liveCtx.fillStyle = "#ffffff";
-      liveCtx.fillRect(0, 0, width, height);
-      const pad = { left: 58, right: 18, top: 24, bottom: 36 };
-      if (!days.length) {
-        liveCtx.fillStyle = "#64748b";
-        liveCtx.font = "14px system-ui";
-        liveCtx.fillText("Run a day to feed the chart.", 20, 36);
+    function drawDailyDispatchChart(canvasId, trace, policyLabel) {
+      const canvas = document.getElementById(canvasId);
+      const width = Math.max(320, canvas.clientWidth || 600);
+      const height = Math.max(320, canvas.clientHeight || 430);
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.round(width * ratio);
+      canvas.height = Math.round(height * ratio);
+      const dailyCtx = canvas.getContext("2d");
+      dailyCtx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      dailyCtx.fillStyle = "#111922";
+      dailyCtx.fillRect(0, 0, width, height);
+      if (!trace?.load?.length) {
+        dailyCtx.fillStyle = "#8496a8";
+        dailyCtx.font = "14px Segoe UI, system-ui, sans-serif";
+        dailyCtx.fillText("No daily trace is available yet.", 20, 36);
         return;
       }
-      const allValues = methods.flatMap((method) => days.map((day) => Number(day.methods[method]?.[metric] || 0) / divisor));
-      const maxValue = Math.max(1, ...allValues) * 1.08;
+      const powerSeries = [
+        { label: "Load", color: "#fdba74", values: trace.load },
+        { label: "PV", color: "#4ade80", values: trace.pv },
+        { label: "No BESS grid", color: "#94a3b8", values: trace.no_bess_grid },
+        { label: "SADRBC grid", color: "#f97316", values: trace.sadrbc_grid },
+        { label: `${policyLabel} grid`, color: "#a78bfa", values: trace.policy_grid },
+      ].filter((series) => Array.isArray(series.values) && series.values.length);
+      const soc = Array.isArray(trace.policy_soc) ? trace.policy_soc : [];
+      const pad = { top: 52, right: 54, bottom: 44, left: 58 };
       const plotW = width - pad.left - pad.right;
       const plotH = height - pad.top - pad.bottom;
-      liveCtx.strokeStyle = "#cbd5e1";
-      liveCtx.lineWidth = 1;
-      liveCtx.beginPath();
-      liveCtx.moveTo(pad.left, pad.top);
-      liveCtx.lineTo(pad.left, pad.top + plotH);
-      liveCtx.lineTo(pad.left + plotW, pad.top + plotH);
-      liveCtx.stroke();
-      liveCtx.fillStyle = "#475569";
-      liveCtx.font = "11px system-ui";
+      const maxY = Math.max(1, ...powerSeries.flatMap((series) => series.values.map(Number))) * 1.08;
+      dailyCtx.strokeStyle = "#263241";
+      dailyCtx.fillStyle = "#8496a8";
+      dailyCtx.font = "12px Segoe UI, system-ui, sans-serif";
       for (let tick = 0; tick <= 4; tick += 1) {
-        const value = maxValue * tick / 4;
-        const y = pad.top + plotH - plotH * tick / 4;
-        liveCtx.fillText(formatNumber(value, divisor === 1 ? 0 : 2), 5, y + 4);
-        liveCtx.strokeStyle = "#eef2f7";
-        liveCtx.beginPath(); liveCtx.moveTo(pad.left, y); liveCtx.lineTo(pad.left + plotW, y); liveCtx.stroke();
+        const y = pad.top + plotH * tick / 4;
+        dailyCtx.beginPath(); dailyCtx.moveTo(pad.left, y); dailyCtx.lineTo(width - pad.right, y); dailyCtx.stroke();
+        dailyCtx.fillText(formatNumber(maxY * (1 - tick / 4)), 10, y + 4);
       }
-      methods.forEach((method, methodIndex) => {
-        liveCtx.strokeStyle = liveColors[methodIndex % liveColors.length];
-        liveCtx.lineWidth = 2.5;
-        liveCtx.beginPath();
-        days.forEach((day, index) => {
-          const x = pad.left + (days.length === 1 ? plotW / 2 : plotW * index / (days.length - 1));
-          const value = Number(day.methods[method]?.[metric] || 0) / divisor;
-          const y = pad.top + plotH - plotH * value / maxValue;
-          if (index) liveCtx.lineTo(x, y); else liveCtx.moveTo(x, y);
-        });
-        liveCtx.stroke();
-        liveCtx.fillStyle = liveColors[methodIndex % liveColors.length];
-        liveCtx.fillRect(pad.left + methodIndex * 145, 7, 12, 3);
-        liveCtx.fillText(method === "no_bess" ? "No BESS" : method === "sadrbc_v13" ? "SADRBC v13" : method, pad.left + 17 + methodIndex * 145, 12);
+      [0, 6, 12, 18, 24].forEach((hour) => {
+        const x = pad.left + plotW * hour / 24;
+        dailyCtx.beginPath(); dailyCtx.moveTo(x, pad.top); dailyCtx.lineTo(x, height - pad.bottom); dailyCtx.stroke();
+        dailyCtx.fillText(`${hour}:00`, x - 12, height - 18);
       });
-      liveCtx.fillStyle = "#475569";
-      liveCtx.fillText(`Day ${days[0].day}`, pad.left, height - 10);
-      liveCtx.fillText(`Day ${days[days.length - 1].day}`, width - pad.right - 45, height - 10);
+      dailyCtx.fillText("kW", 12, 18);
+      dailyCtx.fillText("SOC %", width - 50, 18);
+      [0, 50, 100].forEach((value) => {
+        const y = pad.top + plotH * (1 - value / 100);
+        dailyCtx.fillText(String(value), width - 40, y + 4);
+      });
+      powerSeries.forEach((series, seriesIndex) => {
+        dailyCtx.strokeStyle = series.color;
+        dailyCtx.lineWidth = 2;
+        dailyCtx.setLineDash([]);
+        dailyCtx.beginPath();
+        series.values.forEach((value, index) => {
+          const x = pad.left + plotW * index / Math.max(1, series.values.length - 1);
+          const y = pad.top + plotH * (1 - Number(value) / maxY);
+          if (index) dailyCtx.lineTo(x, y); else dailyCtx.moveTo(x, y);
+        });
+        dailyCtx.stroke();
+        const legendX = pad.left + (seriesIndex % 3) * 165;
+        const legendY = 15 + Math.floor(seriesIndex / 3) * 18;
+        dailyCtx.fillStyle = series.color;
+        dailyCtx.fillRect(legendX, legendY - 3, 12, 3);
+        dailyCtx.fillText(series.label, legendX + 17, legendY + 1);
+      });
+      if (soc.length) {
+        dailyCtx.strokeStyle = "#fde047";
+        dailyCtx.lineWidth = 2;
+        dailyCtx.setLineDash([3, 4]);
+        dailyCtx.beginPath();
+        soc.forEach((value, index) => {
+          const x = pad.left + plotW * index / Math.max(1, soc.length - 1);
+          const y = pad.top + plotH * (1 - Number(value) / 100);
+          if (index) dailyCtx.lineTo(x, y); else dailyCtx.moveTo(x, y);
+        });
+        dailyCtx.stroke();
+        dailyCtx.setLineDash([]);
+        dailyCtx.fillStyle = "#fde047";
+        dailyCtx.fillText(`${policyLabel} SOC`, pad.left + 347, 34);
+      }
+    }
+
+    function renderSelectedLiveDay() {
+      const days = liveLastPayload?.days || [];
+      const selected = days.find((day) => String(day.day) === liveChartDay.value) || days[days.length - 1];
+      drawDailyDispatchChart("live-dispatch-chart", selected?.trace, liveLastPayload?.status?.policy || "Policy");
+      liveChartInfo.textContent = selected
+        ? `Day ${selected.day} · ${selected.date} · ${selected.day_type} · ${selected.trace?.load?.length || 0} native samples.`
+        : "Run a day to create its dispatch trace.";
     }
 
     async function renderLiveRun(sessionId) {
@@ -3558,8 +3610,13 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             `<td>${formatVnd(policyRow.mtd_total_vnd)}</td><td>${formatNumber(policyRow.soc_end_pct, 1)}%</td>` +
             `<td>${formatNumber(policyRow.mtd_pmax_kw, 1)} kW</td></tr>`;
         }).join("");
-        drawLiveChart("live-cost-chart", days, status.methods, "mtd_total_vnd", 1e6);
-        drawLiveChart("live-peak-chart", days, status.methods, "mtd_pmax_kw", 1);
+        const previousChartDay = liveChartDay.value;
+        liveChartDay.innerHTML = days.map((day) =>
+          `<option value="${day.day}">Day ${day.day} · ${escapeHtml(day.date || "—")}</option>`
+        ).join("");
+        liveChartDay.value = days.some((day) => String(day.day) === previousChartDay)
+          ? previousChartDay : String(latest?.day || "");
+        renderSelectedLiveDay();
         if (!status.auto_interval_s) stopLivePolling();
       } catch (error) {
         liveStatus.classList.add("error");
@@ -3644,6 +3701,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     document.getElementById("btn-live-stop").addEventListener("click", stopLiveRun);
     document.getElementById("btn-live-delete").addEventListener("click", deleteLiveRun);
     liveSession.addEventListener("change", () => renderLiveRun(liveSession.value));
+    liveChartDay.addEventListener("change", renderSelectedLiveDay);
 
     const shadowSource = document.getElementById("shadow-source");
     const shadowSourceKind = document.getElementById("shadow-source-kind");
@@ -3654,9 +3712,12 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const shadowStats = document.getElementById("shadow-stats");
     const shadowMonthTable = document.getElementById("shadow-month-table");
     const shadowDayTable = document.getElementById("shadow-day-table");
+    const shadowChartDay = document.getElementById("shadow-chart-day");
+    const shadowChartInfo = document.getElementById("shadow-chart-info");
     const shadowSources = {{ data_csv_files | tojson }};
     let shadowJobId = null;
     let shadowPollTimer = null;
+    let shadowLastDays = [];
 
     function updateShadowSourceFields() {
       document.getElementById("shadow-source-csv-wrap").style.display = shadowSourceKind.value === "csv" ? "inline-flex" : "none";
@@ -3903,33 +3964,13 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       await renderShadowData();
     }
 
-    function drawShadowCostChart(days) {
-      const { ctx: shadowCtx, width, height } = prepareBenchmarkCanvas("shadow-cost-chart");
-      shadowCtx.fillStyle = "#fff"; shadowCtx.fillRect(0, 0, width, height);
-      const ok = days.filter((row) => row.status === "OK");
-      if (!ok.length) {
-        shadowCtx.fillStyle = "#64748b"; shadowCtx.fillText("Run catch-up to create the audit trail.", 20, 36); return;
-      }
-      let nb = 0, sa = 0, po = 0;
-      const series = [
-        { label: "No BESS", color: "#64748b", values: ok.map((row) => (nb += row.nobess_energy_vnd) / 1e6) },
-        { label: "SADRBC", color: "#f97316", values: ok.map((row) => (sa += row.sadrbc_energy_vnd) / 1e6) },
-        { label: "Policy", color: "#7c3aed", values: ok.map((row) => (po += row.policy_energy_vnd) / 1e6) },
-      ];
-      const pad = { left: 58, right: 18, top: 26, bottom: 38 };
-      const plotW = width - pad.left - pad.right, plotH = height - pad.top - pad.bottom;
-      const maxValue = Math.max(1, ...series.flatMap((item) => item.values)) * 1.08;
-      shadowCtx.strokeStyle = "#cbd5e1"; shadowCtx.beginPath(); shadowCtx.moveTo(pad.left, pad.top); shadowCtx.lineTo(pad.left, pad.top + plotH); shadowCtx.lineTo(pad.left + plotW, pad.top + plotH); shadowCtx.stroke();
-      series.forEach((item, seriesIndex) => {
-        shadowCtx.strokeStyle = item.color; shadowCtx.lineWidth = 2.4; shadowCtx.beginPath();
-        item.values.forEach((value, index) => {
-          const x = pad.left + (item.values.length === 1 ? plotW / 2 : plotW * index / (item.values.length - 1));
-          const y = pad.top + plotH - plotH * value / maxValue;
-          if (index) shadowCtx.lineTo(x, y); else shadowCtx.moveTo(x, y);
-        });
-        shadowCtx.stroke(); shadowCtx.fillStyle = item.color; shadowCtx.fillText(item.label, pad.left + seriesIndex * 105, 14);
-      });
-      shadowCtx.fillStyle = "#475569"; shadowCtx.fillText(ok[0].date, pad.left, height - 10); shadowCtx.fillText(ok[ok.length - 1].date, width - 90, height - 10);
+    function renderSelectedShadowDay() {
+      const selected = shadowLastDays.find((day) => day.date === shadowChartDay.value)
+        || shadowLastDays[shadowLastDays.length - 1];
+      drawDailyDispatchChart("shadow-dispatch-chart", selected?.trace, "Policy");
+      shadowChartInfo.textContent = selected
+        ? `${selected.date} · ${selected.day_type} · ${selected.trace?.load?.length || 0} native samples.`
+        : "Run catch-up to create a daily dispatch trace.";
     }
 
     async function renderShadowData() {
@@ -3939,6 +3980,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       const days = daysPayload.days || [];
       const months = monthsPayload.months || [];
       const okDays = days.filter((row) => row.status === "OK");
+      shadowLastDays = okDays.filter((row) => row.trace);
       const totals = months.reduce((acc, month) => ({
         nobess: acc.nobess + month.nobess_bill_vnd,
         sadrbc: acc.sadrbc + month.sadrbc_bill_vnd,
@@ -3968,7 +4010,13 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         `<td>${formatVnd(row.sadrbc_energy_vnd)}</td><td>${formatVnd(row.policy_energy_vnd)}</td>` +
         `<td>${formatNumber(row.policy_mtd_peak_kw, 1)} kW</td><td>${row.policy_soc_end_pct == null ? "—" : `${formatNumber(row.policy_soc_end_pct, 1)}%`}</td></tr>`
       ).join("");
-      drawShadowCostChart(days);
+      const previousChartDay = shadowChartDay.value;
+      shadowChartDay.innerHTML = shadowLastDays.map((day) =>
+        `<option value="${escapeHtml(day.date)}">${escapeHtml(day.date)}</option>`
+      ).join("");
+      shadowChartDay.value = shadowLastDays.some((day) => day.date === previousChartDay)
+        ? previousChartDay : (shadowLastDays[shadowLastDays.length - 1]?.date || "");
+      renderSelectedShadowDay();
     }
 
     document.getElementById("btn-shadow-save").addEventListener("click", saveShadowConfig);
@@ -3981,6 +4029,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     document.getElementById("btn-shadow-reset").addEventListener("click", resetShadowHistory);
     shadowSourceKind.addEventListener("change", updateShadowSourceFields);
     document.getElementById("shadow-weather-provider").addEventListener("change", updateShadowWeatherFields);
+    shadowChartDay.addEventListener("change", renderSelectedShadowDay);
 
     function bindTabs() {
       document.querySelectorAll("[data-tab-target]").forEach((button) => {
@@ -4719,6 +4768,12 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       drawBenchmark();
       if (document.getElementById("tab-dispatch-viewer").classList.contains("active")) {
         drawDispatchViewer();
+      }
+      if (document.getElementById("tab-live-runs").classList.contains("active")) {
+        renderSelectedLiveDay();
+      }
+      if (document.getElementById("tab-shadow-running").classList.contains("active")) {
+        renderSelectedShadowDay();
       }
     });
     drawBenchmark();

@@ -176,6 +176,15 @@ class LiveRunSession:
                 "day_index": day.day_index,
                 "date": day.date_iso,
                 "day_type": day.day_type,
+                "trace": {
+                    "load": np.round(np.asarray(day.load, dtype=float), 3).tolist(),
+                    "pv": np.round(np.asarray(day.pv, dtype=float), 3).tolist(),
+                    "no_bess_grid": np.round(no_bess_grid, 3).tolist(),
+                    "sadrbc_grid": np.round(sadrbc_grid, 3).tolist(),
+                    "sadrbc_soc": np.round(np.asarray(sadrbc_soc) * 100.0, 3).tolist(),
+                    "policy_grid": np.round(policy_grid, 3).tolist(),
+                    "policy_soc": np.round(np.asarray(policy_soc) * 100.0, 3).tolist(),
+                },
                 "methods": {
                     "no_bess": self._method_row("no_bess", no_bess_grid, None, self.sadrbc_cfg),
                     "sadrbc_v13": self._method_row(
