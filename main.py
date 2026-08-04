@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+from datetime import date
 
 from flask import Flask, Response, jsonify, render_template, request
 
@@ -11,6 +12,8 @@ import dispatch_runner
 import dispatch_store
 import live_runs
 import oracle_cache
+import shadow_jobs
+import shadow_runs
 from benchmark import (
     build_benchmark,
     detect_dt_hours,
@@ -347,6 +350,74 @@ def live_run_stop(session_id):
 def live_run_delete(session_id):
     if not live_runs.drop_session(session_id):
         return jsonify({"error": "Live run session not found."}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/shadow/config", methods=["GET"])
+def shadow_config():
+    return jsonify(shadow_runs.get_config(dict(PARAMETERS)))
+
+
+@app.route("/api/shadow/config", methods=["POST"])
+def shadow_config_save():
+    try:
+        config = shadow_runs.set_config(request.get_json(silent=True) or {}, dict(PARAMETERS))
+    except shadow_runs.ShadowRunError as exc:
+        return jsonify({"error": str(exc)}), 422
+    return jsonify(config)
+
+
+@app.route("/api/shadow/catchup", methods=["POST"])
+def shadow_catchup():
+    payload = request.get_json(silent=True) or {}
+    start_date = payload.get("start_date") or None
+    end_date = payload.get("end_date") or None
+    try:
+        if start_date:
+            date.fromisoformat(str(start_date))
+        if end_date:
+            date.fromisoformat(str(end_date))
+    except ValueError:
+        return jsonify({"error": "Shadow dates must use YYYY-MM-DD."}), 422
+    job = shadow_jobs.MANAGER.start(
+        lambda progress, cancelled: shadow_runs.catchup(
+            start_date, end_date, progress, cancelled
+        )
+    )
+    return jsonify(job.public()), 202
+
+
+@app.route("/api/shadow/jobs/<job_id>", methods=["GET"])
+def shadow_job(job_id):
+    detail = shadow_jobs.MANAGER.get(job_id)
+    if detail is None:
+        return jsonify({"error": "Shadow job not found."}), 404
+    return jsonify(detail)
+
+
+@app.route("/api/shadow/jobs/<job_id>/cancel", methods=["POST"])
+def shadow_job_cancel(job_id):
+    if not shadow_jobs.MANAGER.cancel(job_id):
+        return jsonify({"error": "Shadow job is not running."}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/shadow/days", methods=["GET"])
+def shadow_days():
+    return jsonify({"days": shadow_runs.list_days(request.args.get("month"))})
+
+
+@app.route("/api/shadow/monthly", methods=["GET"])
+def shadow_monthly():
+    return jsonify({"months": shadow_runs.monthly_report()})
+
+
+@app.route("/api/shadow/reset", methods=["POST"])
+def shadow_reset():
+    try:
+        shadow_runs.reset_history()
+    except shadow_runs.ShadowRunError as exc:
+        return jsonify({"error": str(exc)}), 409
     return jsonify({"ok": True})
 
 

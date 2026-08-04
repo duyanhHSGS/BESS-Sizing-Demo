@@ -800,6 +800,14 @@
     .live-chart { width: 100%; height: 260px; border-radius: 10px; background: #fff; }
     .live-status { margin-top: 10px; color: #d1fae5; }
     .live-status.error { color: #fecaca; }
+    .shadow-hero { background: linear-gradient(135deg, #111827, #312e81 55%, #581c87); color: #fff; }
+    .shadow-hero h2 { color: #fff; }
+    .shadow-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin: 14px 0; }
+    .shadow-stat { padding: 12px; border: 1px solid #d8dee9; border-radius: 12px; background: #fff; }
+    .shadow-stat span { display: block; color: #64748b; font-size: 12px; }
+    .shadow-stat b { display: block; margin-top: 5px; font-size: 18px; }
+    .shadow-good { color: #047857; }
+    .shadow-bad { color: #b42318; }
   </style>
 </head>
 
@@ -811,6 +819,7 @@
       <button class="tab-button" type="button" data-tab-target="training-lab">Training Lab</button>
       <button class="tab-button" type="button" data-tab-target="benchmarking">Benchmarking</button>
       <button class="tab-button" type="button" data-tab-target="live-runs">Live Runs</button>
+      <button class="tab-button" type="button" data-tab-target="shadow-running">Shadow Running</button>
       <button class="tab-button" type="button" data-tab-target="dispatch-viewer">Dispatch Viewer</button>
     </nav>
 
@@ -1608,6 +1617,54 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             <tbody id="live-table-body"></tbody>
           </table>
         </div>
+      </section>
+    </section>
+
+    <section id="tab-shadow-running" class="tab-panel">
+      <section class="card shadow-hero">
+        <div class="section-head">
+          <div>
+            <h2>Shadow Running 🌒</h2>
+            <div>Virtual bills only. The policies observe measured CSV data but no command is sent to a real battery.</div>
+          </div>
+          <div class="row">
+            <button id="btn-shadow-save" class="primary" type="button">Save configuration</button>
+            <button id="btn-shadow-reset" class="danger" type="button">Reset history</button>
+          </div>
+        </div>
+        <div class="row">
+          <label>Measured CSV <select id="shadow-source"></select></label>
+          <label>Policy <select id="shadow-policy"></select></label>
+          <label>Capacity (kWh) <input id="shadow-ecap" type="number" min="1" step="50"></label>
+          <label>Power (kW) <input id="shadow-prated" type="number" min="1" step="25"></label>
+        </div>
+        <div class="row">
+          <label>From date <input id="shadow-start" type="date"></label>
+          <label>To date <input id="shadow-end" type="date"></label>
+          <button id="btn-shadow-run" class="primary" type="button">Run catch-up</button>
+          <button id="btn-shadow-cancel" type="button" disabled>Cancel</button>
+          <span>Blank dates continue from history through the final CSV day.</span>
+        </div>
+        <div id="shadow-progress" class="live-status">Save the shadow configuration, then run catch-up.</div>
+      </section>
+
+      <div id="shadow-stats" class="shadow-stats"></div>
+      <div class="live-grid">
+        <section class="card"><h2>Cumulative energy cost (million VND)</h2><canvas id="shadow-cost-chart" class="live-chart"></canvas></section>
+        <section class="card">
+          <h2>Monthly virtual bill</h2>
+          <div class="sizing-table-wrap"><table class="sizing-table">
+            <thead><tr><th>Month</th><th>OK / skipped</th><th>No BESS</th><th>SADRBC</th><th>Policy</th><th>Policy vs SADRBC</th><th>Safety</th></tr></thead>
+            <tbody id="shadow-month-table"></tbody>
+          </table></div>
+        </section>
+      </div>
+      <section class="card">
+        <h2>Shadow audit log</h2>
+        <div class="sizing-table-wrap"><table class="sizing-table">
+          <thead><tr><th>Date</th><th>Status</th><th>Type</th><th>Load</th><th>No BESS energy</th><th>SADRBC energy</th><th>Policy energy</th><th>Policy peak</th><th>Policy SOC</th></tr></thead>
+          <tbody id="shadow-day-table"></tbody>
+        </table></div>
       </section>
     </section>
 
@@ -3526,6 +3583,196 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     document.getElementById("btn-live-delete").addEventListener("click", deleteLiveRun);
     liveSession.addEventListener("change", () => renderLiveRun(liveSession.value));
 
+    const shadowSource = document.getElementById("shadow-source");
+    const shadowPolicy = document.getElementById("shadow-policy");
+    const shadowEcap = document.getElementById("shadow-ecap");
+    const shadowPrated = document.getElementById("shadow-prated");
+    const shadowProgress = document.getElementById("shadow-progress");
+    const shadowStats = document.getElementById("shadow-stats");
+    const shadowMonthTable = document.getElementById("shadow-month-table");
+    const shadowDayTable = document.getElementById("shadow-day-table");
+    const shadowSources = {{ data_csv_files | tojson }};
+    let shadowJobId = null;
+    let shadowPollTimer = null;
+
+    async function refreshShadowRunning() {
+      try {
+        const [config, checkpoints] = await Promise.all([
+          liveApi("/api/shadow/config"),
+          liveApi("/api/training/checkpoints"),
+        ]);
+        shadowSource.innerHTML = shadowSources.map((source) =>
+          `<option value="${escapeHtml(source)}">${escapeHtml(source)}</option>`
+        ).join("");
+        shadowPolicy.innerHTML = checkpoints.filter((row) => !row.error).map((row) =>
+          `<option value="${escapeHtml(row.name)}">${escapeHtml(row.name)} · ${escapeHtml(row.algo)}</option>`
+        ).join("");
+        shadowSource.value = config.source || shadowSources[0] || "";
+        shadowPolicy.value = config.policy || "";
+        shadowEcap.value = config.e_cap_kwh || "";
+        shadowPrated.value = config.p_rated_kw || "";
+        await renderShadowData();
+      } catch (error) {
+        shadowProgress.classList.add("error");
+        shadowProgress.textContent = error.message;
+      }
+    }
+
+    async function saveShadowConfig() {
+      try {
+        const config = await liveApi("/api/shadow/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            source: shadowSource.value,
+            policy: shadowPolicy.value,
+            e_cap_kwh: Number(shadowEcap.value),
+            p_rated_kw: Number(shadowPrated.value),
+          }),
+        });
+        shadowProgress.classList.remove("error");
+        shadowProgress.textContent = `Saved: ${config.source} · ${config.policy} · ${config.e_cap_kwh} kWh/${config.p_rated_kw} kW.`;
+      } catch (error) {
+        shadowProgress.classList.add("error");
+        shadowProgress.textContent = error.message;
+      }
+    }
+
+    async function startShadowCatchup() {
+      try {
+        const job = await liveApi("/api/shadow/catchup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            start_date: document.getElementById("shadow-start").value || null,
+            end_date: document.getElementById("shadow-end").value || null,
+          }),
+        });
+        shadowJobId = job.id;
+        document.getElementById("btn-shadow-run").disabled = true;
+        document.getElementById("btn-shadow-cancel").disabled = false;
+        shadowProgress.classList.remove("error");
+        shadowProgress.textContent = "Shadow workers are waking up...";
+        pollShadowJob();
+      } catch (error) {
+        shadowProgress.classList.add("error");
+        shadowProgress.textContent = error.message;
+      }
+    }
+
+    async function pollShadowJob() {
+      if (!shadowJobId) return;
+      try {
+        const job = await liveApi(`/api/shadow/jobs/${shadowJobId}`);
+        const percent = job.total ? Math.round(100 * job.completed / job.total) : 0;
+        shadowProgress.textContent = `${job.stage} · ${job.current_date || "preparing"} · ${job.completed}/${job.total || "?"} · ${percent}% · ${job.elapsed_seconds}s`;
+        if (job.status === "complete" || job.status === "cancelled" || job.status === "failed") {
+          if (job.status === "failed") {
+            shadowProgress.classList.add("error");
+            shadowProgress.textContent += ` · ${job.error}`;
+          } else if (job.result) {
+            shadowProgress.textContent += ` · ${job.result.processed_ok} saved, ${job.result.skipped} skipped, ${job.result.already_done} already done.`;
+          }
+          shadowJobId = null;
+          document.getElementById("btn-shadow-run").disabled = false;
+          document.getElementById("btn-shadow-cancel").disabled = true;
+          await renderShadowData();
+          return;
+        }
+        shadowPollTimer = setTimeout(pollShadowJob, 800);
+      } catch (error) {
+        shadowProgress.classList.add("error");
+        shadowProgress.textContent = error.message;
+      }
+    }
+
+    async function cancelShadowJob() {
+      if (!shadowJobId) return;
+      await liveApi(`/api/shadow/jobs/${shadowJobId}/cancel`, { method: "POST" });
+      shadowProgress.textContent = "Cancellation requested; stopping at the next day boundary.";
+    }
+
+    async function resetShadowHistory() {
+      if (!confirm("Delete all persisted Shadow daily history? The saved configuration will remain.")) return;
+      await liveApi("/api/shadow/reset", { method: "POST" });
+      shadowProgress.classList.remove("error");
+      shadowProgress.textContent = "Shadow history reset. Configuration preserved.";
+      await renderShadowData();
+    }
+
+    function drawShadowCostChart(days) {
+      const { ctx: shadowCtx, width, height } = prepareBenchmarkCanvas("shadow-cost-chart");
+      shadowCtx.fillStyle = "#fff"; shadowCtx.fillRect(0, 0, width, height);
+      const ok = days.filter((row) => row.status === "OK");
+      if (!ok.length) {
+        shadowCtx.fillStyle = "#64748b"; shadowCtx.fillText("Run catch-up to create the audit trail.", 20, 36); return;
+      }
+      let nb = 0, sa = 0, po = 0;
+      const series = [
+        { label: "No BESS", color: "#64748b", values: ok.map((row) => (nb += row.nobess_energy_vnd) / 1e6) },
+        { label: "SADRBC", color: "#f97316", values: ok.map((row) => (sa += row.sadrbc_energy_vnd) / 1e6) },
+        { label: "Policy", color: "#7c3aed", values: ok.map((row) => (po += row.policy_energy_vnd) / 1e6) },
+      ];
+      const pad = { left: 58, right: 18, top: 26, bottom: 38 };
+      const plotW = width - pad.left - pad.right, plotH = height - pad.top - pad.bottom;
+      const maxValue = Math.max(1, ...series.flatMap((item) => item.values)) * 1.08;
+      shadowCtx.strokeStyle = "#cbd5e1"; shadowCtx.beginPath(); shadowCtx.moveTo(pad.left, pad.top); shadowCtx.lineTo(pad.left, pad.top + plotH); shadowCtx.lineTo(pad.left + plotW, pad.top + plotH); shadowCtx.stroke();
+      series.forEach((item, seriesIndex) => {
+        shadowCtx.strokeStyle = item.color; shadowCtx.lineWidth = 2.4; shadowCtx.beginPath();
+        item.values.forEach((value, index) => {
+          const x = pad.left + (item.values.length === 1 ? plotW / 2 : plotW * index / (item.values.length - 1));
+          const y = pad.top + plotH - plotH * value / maxValue;
+          if (index) shadowCtx.lineTo(x, y); else shadowCtx.moveTo(x, y);
+        });
+        shadowCtx.stroke(); shadowCtx.fillStyle = item.color; shadowCtx.fillText(item.label, pad.left + seriesIndex * 105, 14);
+      });
+      shadowCtx.fillStyle = "#475569"; shadowCtx.fillText(ok[0].date, pad.left, height - 10); shadowCtx.fillText(ok[ok.length - 1].date, width - 90, height - 10);
+    }
+
+    async function renderShadowData() {
+      const [daysPayload, monthsPayload] = await Promise.all([
+        liveApi("/api/shadow/days"), liveApi("/api/shadow/monthly"),
+      ]);
+      const days = daysPayload.days || [];
+      const months = monthsPayload.months || [];
+      const okDays = days.filter((row) => row.status === "OK");
+      const totals = months.reduce((acc, month) => ({
+        nobess: acc.nobess + month.nobess_bill_vnd,
+        sadrbc: acc.sadrbc + month.sadrbc_bill_vnd,
+        policy: acc.policy + month.policy_bill_vnd,
+        violations: acc.violations + month.policy_violations,
+      }), { nobess: 0, sadrbc: 0, policy: 0, violations: 0 });
+      const cards = [
+        ["Audited days", `${okDays.length}`, `${days.length - okDays.length} skipped`, ""],
+        ["No-BESS virtual bill", formatVnd(totals.nobess), "all months", ""],
+        ["SADRBC virtual bill", formatVnd(totals.sadrbc), `saved ${formatVnd(totals.nobess - totals.sadrbc)}`, ""],
+        ["Policy virtual bill", formatVnd(totals.policy), `saved ${formatVnd(totals.nobess - totals.policy)}`, "shadow-good"],
+        ["Policy vs SADRBC", formatVnd(totals.sadrbc - totals.policy), totals.sadrbc >= totals.policy ? "policy leads" : "SADRBC leads", totals.sadrbc >= totals.policy ? "shadow-good" : "shadow-bad"],
+        ["Safety violations", `${totals.violations}`, "virtual audit", totals.violations ? "shadow-bad" : "shadow-good"],
+      ];
+      shadowStats.innerHTML = months.length ? cards.map(([label, value, note, cls]) =>
+        `<div class="shadow-stat"><span>${label}</span><b class="${cls}">${value}</b><small>${note}</small></div>`
+      ).join("") : `<div class="info">No persisted shadow history yet.</div>`;
+      shadowMonthTable.innerHTML = months.map((month) =>
+        `<tr><td>${month.month}</td><td>${month.n_days_ok} / ${month.n_days_skipped}</td>` +
+        `<td>${formatVnd(month.nobess_bill_vnd)}</td><td>${formatVnd(month.sadrbc_bill_vnd)}</td>` +
+        `<td><b>${formatVnd(month.policy_bill_vnd)}</b></td><td class="${month.policy_vs_sadrbc_vnd >= 0 ? "shadow-good" : "shadow-bad"}">${formatVnd(month.policy_vs_sadrbc_vnd)}</td>` +
+        `<td>${month.policy_violations}</td></tr>`
+      ).join("");
+      shadowDayTable.innerHTML = days.slice(-31).reverse().map((row) =>
+        `<tr><td>${row.date}</td><td>${escapeHtml(row.status)}</td><td>${escapeHtml(row.day_type)}</td>` +
+        `<td>${formatNumber(row.load_kwh, 0)} kWh</td><td>${formatVnd(row.nobess_energy_vnd)}</td>` +
+        `<td>${formatVnd(row.sadrbc_energy_vnd)}</td><td>${formatVnd(row.policy_energy_vnd)}</td>` +
+        `<td>${formatNumber(row.policy_mtd_peak_kw, 1)} kW</td><td>${row.policy_soc_end_pct == null ? "—" : `${formatNumber(row.policy_soc_end_pct, 1)}%`}</td></tr>`
+      ).join("");
+      drawShadowCostChart(days);
+    }
+
+    document.getElementById("btn-shadow-save").addEventListener("click", saveShadowConfig);
+    document.getElementById("btn-shadow-run").addEventListener("click", startShadowCatchup);
+    document.getElementById("btn-shadow-cancel").addEventListener("click", cancelShadowJob);
+    document.getElementById("btn-shadow-reset").addEventListener("click", resetShadowHistory);
+
     function bindTabs() {
       document.querySelectorAll("[data-tab-target]").forEach((button) => {
         button.addEventListener("click", () => {
@@ -3546,6 +3793,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             hideTooltip();
             hideDispatchTooltip();
             refreshLiveRuns();
+          } else if (target === "shadow-running") {
+            hideTooltip();
+            hideDispatchTooltip();
+            refreshShadowRunning();
           } else if (target === "dispatch-viewer") {
             hideTooltip();
             hideDispatchTooltip();

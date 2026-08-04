@@ -39,3 +39,13 @@ create a session. A session snapshots the currently selected CSV and keeps
 SADRBC, DRL, SOC, and peak state alive while you run one day at a time or use
 Auto run. Sessions are held in server memory and disappear when the Flask
 process restarts.
+
+Shadow Running
+--------------
+
+The **Shadow Running** tab evaluates No-BESS, SADRBC v13, and one local policy
+against measured CSV days without sending battery commands. Save a source,
+checkpoint, and battery body, then run catch-up for a date range. Configuration,
+daily audit rows, and monthly virtual bills persist in `shadow/shadow.sqlite`
+across Flask restarts. Reset the shadow history before changing its scientific
+configuration.
