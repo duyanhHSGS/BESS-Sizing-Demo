@@ -49,3 +49,12 @@ checkpoint, and battery body, then run catch-up for a date range. Configuration,
 daily audit rows, and monthly virtual bills persist in `shadow/shadow.sqlite`
 across Flask restarts. Reset the shadow history before changing its scientific
 configuration.
+
+At the top of Shadow Running, the distinct **ThingsBoard Connector** panel can
+configure and test the API URL, account, device ID, load/PV telemetry keys,
+unit scaling, timezone, sampling interval, and maximum repaired gap. Selecting
+ThingsBoard as the Shadow source fetches completed telemetry days directly,
+caches valid raw days in the ignored `shadow/` folder, and reconstructs the
+controller chain from that cache after restarts. Connector secrets remain in
+the local ignored runtime folder and are never returned by the configuration
+API.

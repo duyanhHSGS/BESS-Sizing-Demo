@@ -1621,6 +1621,35 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     </section>
 
     <section id="tab-shadow-running" class="tab-panel">
+      <section class="card">
+        <div class="section-head">
+          <div>
+            <h2>ThingsBoard Connector 🔌</h2>
+            <div>Custom telemetry API connection used only by Shadow Running. The saved password is never returned to this page.</div>
+          </div>
+          <div class="row">
+            <button id="btn-shadow-connector-save" class="primary" type="button">Save connector</button>
+            <button id="btn-shadow-connector-test" type="button">Test connection + keys</button>
+          </div>
+        </div>
+        <div class="row">
+          <label>Base URL <input id="shadow-tb-url" type="url" size="28" placeholder="https://thingsboard.example.com"></label>
+          <label>Username <input id="shadow-tb-username" type="text" autocomplete="username"></label>
+          <label>Password <input id="shadow-tb-password" type="password" autocomplete="current-password" placeholder="unchanged when blank"></label>
+          <label>Device ID <input id="shadow-tb-device" type="text" size="38"></label>
+        </div>
+        <div class="row">
+          <label>Load key(s) <input id="shadow-tb-load-key" type="text" size="28" placeholder="comma-separated; summed"></label>
+          <label>PV key(s) <input id="shadow-tb-pv-key" type="text" size="28" placeholder="comma-separated; summed"></label>
+          <label>Unit scale <input id="shadow-tb-scale" type="number" value="1" min="0.000001" step="any"></label>
+          <label>Timezone <input id="shadow-tb-timezone" type="text" value="Asia/Bangkok"></label>
+          <label>Interval (minutes) <input id="shadow-tb-interval" type="number" value="15" min="1" step="1"></label>
+          <label>Max repaired gap (minutes) <input id="shadow-tb-gap" type="number" value="15" min="0" step="1"></label>
+          <label>PV zero threshold (kW) <input id="shadow-tb-pv-zero" type="number" value="1" min="0" step="any"></label>
+        </div>
+        <div id="shadow-connector-status" class="info">Connector not inspected yet.</div>
+      </section>
+
       <section class="card shadow-hero">
         <div class="section-head">
           <div>
@@ -1633,7 +1662,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           </div>
         </div>
         <div class="row">
-          <label>Measured CSV <select id="shadow-source"></select></label>
+          <label>Data source <select id="shadow-source-kind"><option value="thingsboard">ThingsBoard API</option><option value="csv">Local CSV replay</option></select></label>
+          <label id="shadow-source-csv-wrap">Measured CSV <select id="shadow-source"></select></label>
           <label>Policy <select id="shadow-policy"></select></label>
           <label>Capacity (kWh) <input id="shadow-ecap" type="number" min="1" step="50"></label>
           <label>Power (kW) <input id="shadow-prated" type="number" min="1" step="25"></label>
@@ -3584,6 +3614,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     liveSession.addEventListener("change", () => renderLiveRun(liveSession.value));
 
     const shadowSource = document.getElementById("shadow-source");
+    const shadowSourceKind = document.getElementById("shadow-source-kind");
     const shadowPolicy = document.getElementById("shadow-policy");
     const shadowEcap = document.getElementById("shadow-ecap");
     const shadowPrated = document.getElementById("shadow-prated");
@@ -3595,11 +3626,78 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     let shadowJobId = null;
     let shadowPollTimer = null;
 
+    function updateShadowSourceFields() {
+      document.getElementById("shadow-source-csv-wrap").style.display = shadowSourceKind.value === "csv" ? "inline-flex" : "none";
+    }
+
+    function fillShadowConnector(config) {
+      document.getElementById("shadow-tb-url").value = config.base_url || "";
+      document.getElementById("shadow-tb-username").value = config.username || "";
+      document.getElementById("shadow-tb-password").value = "";
+      document.getElementById("shadow-tb-password").placeholder = config.has_password ? "saved · unchanged when blank" : "required";
+      document.getElementById("shadow-tb-device").value = config.device_id || "";
+      document.getElementById("shadow-tb-load-key").value = config.key_load || "";
+      document.getElementById("shadow-tb-pv-key").value = config.key_pv || "";
+      document.getElementById("shadow-tb-scale").value = config.unit_scale ?? 1;
+      document.getElementById("shadow-tb-timezone").value = config.timezone || "Asia/Bangkok";
+      document.getElementById("shadow-tb-interval").value = config.interval_minutes || 15;
+      document.getElementById("shadow-tb-gap").value = config.max_gap_minutes ?? 15;
+      document.getElementById("shadow-tb-pv-zero").value = config.pv_zero_threshold_kw ?? 1;
+      document.getElementById("shadow-connector-status").textContent = config.base_url
+        ? `Saved locally · ${config.has_password ? "password present" : "password missing"} · ${config.interval_minutes}-minute telemetry.`
+        : "Connector is not configured.";
+    }
+
+    function shadowConnectorPayload() {
+      return {
+        base_url: document.getElementById("shadow-tb-url").value.trim(),
+        username: document.getElementById("shadow-tb-username").value.trim(),
+        password: document.getElementById("shadow-tb-password").value,
+        device_id: document.getElementById("shadow-tb-device").value.trim(),
+        key_load: document.getElementById("shadow-tb-load-key").value.trim(),
+        key_pv: document.getElementById("shadow-tb-pv-key").value.trim(),
+        unit_scale: Number(document.getElementById("shadow-tb-scale").value),
+        timezone: document.getElementById("shadow-tb-timezone").value.trim(),
+        interval_minutes: Number(document.getElementById("shadow-tb-interval").value),
+        max_gap_minutes: Number(document.getElementById("shadow-tb-gap").value),
+        pv_zero_threshold_kw: Number(document.getElementById("shadow-tb-pv-zero").value),
+      };
+    }
+
+    async function saveShadowConnector() {
+      const status = document.getElementById("shadow-connector-status");
+      try {
+        status.textContent = "Saving connector configuration to the local ignored runtime folder...";
+        const config = await liveApi("/api/shadow/connector", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(shadowConnectorPayload()),
+        });
+        fillShadowConnector(config);
+        status.textContent = "Connector saved in the ignored Shadow runtime folder. Test it before catch-up.";
+      } catch (error) {
+        status.textContent = `ERROR: ${error.message}`;
+      }
+    }
+
+    async function testShadowConnector() {
+      const status = document.getElementById("shadow-connector-status");
+      try {
+        status.textContent = "Logging in and inspecting telemetry keys...";
+        const result = await liveApi("/api/shadow/connector/test", { method: "POST" });
+        const missing = result.missing_keys?.length ? ` Missing: ${result.missing_keys.join(", ")}.` : "";
+        const preview = (result.available_keys || []).slice(0, 12).join(", ");
+        status.textContent = `${result.message}${missing} Available keys: ${preview}${result.available_keys?.length > 12 ? "…" : ""}`;
+      } catch (error) {
+        status.textContent = `ERROR: ${error.message}`;
+      }
+    }
+
     async function refreshShadowRunning() {
       try {
-        const [config, checkpoints] = await Promise.all([
+        const [config, checkpoints, connector] = await Promise.all([
           liveApi("/api/shadow/config"),
           liveApi("/api/training/checkpoints"),
+          liveApi("/api/shadow/connector"),
         ]);
         shadowSource.innerHTML = shadowSources.map((source) =>
           `<option value="${escapeHtml(source)}">${escapeHtml(source)}</option>`
@@ -3607,10 +3705,13 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         shadowPolicy.innerHTML = checkpoints.filter((row) => !row.error).map((row) =>
           `<option value="${escapeHtml(row.name)}">${escapeHtml(row.name)} · ${escapeHtml(row.algo)}</option>`
         ).join("");
-        shadowSource.value = config.source || shadowSources[0] || "";
+        shadowSourceKind.value = config.source_kind || "csv";
+        shadowSource.value = config.source_kind === "thingsboard" ? (shadowSources[0] || "") : (config.source || shadowSources[0] || "");
         shadowPolicy.value = config.policy || "";
         shadowEcap.value = config.e_cap_kwh || "";
         shadowPrated.value = config.p_rated_kw || "";
+        fillShadowConnector(connector);
+        updateShadowSourceFields();
         await renderShadowData();
       } catch (error) {
         shadowProgress.classList.add("error");
@@ -3624,7 +3725,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            source: shadowSource.value,
+            source_kind: shadowSourceKind.value,
+            source: shadowSourceKind.value === "thingsboard" ? "thingsboard" : shadowSource.value,
             policy: shadowPolicy.value,
             e_cap_kwh: Number(shadowEcap.value),
             p_rated_kw: Number(shadowPrated.value),
@@ -3760,7 +3862,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         `<td>${month.policy_violations}</td></tr>`
       ).join("");
       shadowDayTable.innerHTML = days.slice(-31).reverse().map((row) =>
-        `<tr><td>${row.date}</td><td>${escapeHtml(row.status)}</td><td>${escapeHtml(row.day_type)}</td>` +
+        `<tr><td>${row.date}</td><td>${escapeHtml(row.status)}${row.skip_reason ? `<div class="benchmark-danger">${escapeHtml(row.skip_reason)}</div>` : ""}</td><td>${escapeHtml(row.day_type)}</td>` +
         `<td>${formatNumber(row.load_kwh, 0)} kWh</td><td>${formatVnd(row.nobess_energy_vnd)}</td>` +
         `<td>${formatVnd(row.sadrbc_energy_vnd)}</td><td>${formatVnd(row.policy_energy_vnd)}</td>` +
         `<td>${formatNumber(row.policy_mtd_peak_kw, 1)} kW</td><td>${row.policy_soc_end_pct == null ? "—" : `${formatNumber(row.policy_soc_end_pct, 1)}%`}</td></tr>`
@@ -3769,9 +3871,12 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     }
 
     document.getElementById("btn-shadow-save").addEventListener("click", saveShadowConfig);
+    document.getElementById("btn-shadow-connector-save").addEventListener("click", saveShadowConnector);
+    document.getElementById("btn-shadow-connector-test").addEventListener("click", testShadowConnector);
     document.getElementById("btn-shadow-run").addEventListener("click", startShadowCatchup);
     document.getElementById("btn-shadow-cancel").addEventListener("click", cancelShadowJob);
     document.getElementById("btn-shadow-reset").addEventListener("click", resetShadowHistory);
+    shadowSourceKind.addEventListener("change", updateShadowSourceFields);
 
     function bindTabs() {
       document.querySelectorAll("[data-tab-target]").forEach((button) => {

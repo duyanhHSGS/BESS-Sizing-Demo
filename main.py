@@ -14,6 +14,7 @@ import live_runs
 import oracle_cache
 import shadow_jobs
 import shadow_runs
+import thingsboard_connector
 from benchmark import (
     build_benchmark,
     detect_dt_hours,
@@ -365,6 +366,28 @@ def shadow_config_save():
     except shadow_runs.ShadowRunError as exc:
         return jsonify({"error": str(exc)}), 422
     return jsonify(config)
+
+
+@app.route("/api/shadow/connector", methods=["GET"])
+def shadow_connector_config():
+    return jsonify(thingsboard_connector.public_config())
+
+
+@app.route("/api/shadow/connector", methods=["POST"])
+def shadow_connector_save():
+    try:
+        config = thingsboard_connector.save_config(request.get_json(silent=True) or {})
+    except thingsboard_connector.ThingsBoardError as exc:
+        return jsonify({"error": str(exc)}), 422
+    return jsonify(config)
+
+
+@app.route("/api/shadow/connector/test", methods=["POST"])
+def shadow_connector_test():
+    try:
+        return jsonify(thingsboard_connector.test_connection())
+    except thingsboard_connector.ThingsBoardError as exc:
+        return jsonify({"error": str(exc)}), 502
 
 
 @app.route("/api/shadow/catchup", methods=["POST"])
