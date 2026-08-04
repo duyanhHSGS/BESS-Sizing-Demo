@@ -22,12 +22,13 @@ CONFIG_PATH = BASE_DIR / "shadow" / "thingsboard.json"
 TOKEN_TTL_SECONDS = 2 * 60 * 60
 MAX_INTERVALS_PER_REQUEST = 650
 DEFAULT_CONFIG = {
-    "base_url": "",
-    "username": "",
-    "password": "",
-    "device_id": "",
-    "key_load": "",
-    "key_pv": "",
+    "name": "tande",
+    "base_url": "https://solar.datainsight.vn",
+    "username": "oee2024@gmail.com",
+    "password": "Oee@2124",
+    "device_id": "ca1a3d20-8933-11f0-bac1-2533bc830589",
+    "key_load": "INVT_T:PLoad",
+    "key_pv": "INVT_T:ActivePowerSum",
     "unit_scale": 1.0,
     "timezone": "Asia/Bangkok",
     "interval_minutes": 15,
@@ -66,6 +67,7 @@ def save_config(payload: dict[str, Any]) -> dict[str, Any]:
     current = _raw_config()
     password = str(payload.get("password") or "")
     config = {
+        "name": str(payload.get("name") or current.get("name") or "tande").strip(),
         "base_url": str(payload.get("base_url") or "").strip().rstrip("/"),
         "username": str(payload.get("username") or "").strip(),
         "password": password if password else str(current.get("password") or ""),
@@ -82,7 +84,7 @@ def save_config(payload: dict[str, Any]) -> dict[str, Any]:
     }
     if not config["base_url"].startswith(("https://", "http://")):
         raise ThingsBoardError("ThingsBoard URL must begin with https:// or http://.")
-    for field in ("username", "password", "device_id", "key_load", "key_pv", "timezone"):
+    for field in ("name", "username", "password", "device_id", "key_load", "key_pv", "timezone"):
         if not config[field]:
             raise ThingsBoardError(f"ThingsBoard {field.replace('_', ' ')} is required.")
     try:

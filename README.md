@@ -58,3 +58,7 @@ caches valid raw days in the ignored `shadow/` folder, and reconstructs the
 controller chain from that cache after restarts. Connector secrets remain in
 the local ignored runtime folder and are never returned by the configuration
 API.
+
+The connector initially uses the Tande ThingsBoard `SPEC` embedded in
+`thingsboard_connector.py`, so the Shadow panel opens prefilled and can be
+tested without re-entering the site fields.

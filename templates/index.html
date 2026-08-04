@@ -1633,6 +1633,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           </div>
         </div>
         <div class="row">
+          <label>Connector name <input id="shadow-tb-name" type="text" value="tande"></label>
           <label>Base URL <input id="shadow-tb-url" type="url" size="28" placeholder="https://thingsboard.example.com"></label>
           <label>Username <input id="shadow-tb-username" type="text" autocomplete="username"></label>
           <label>Password <input id="shadow-tb-password" type="password" autocomplete="current-password" placeholder="unchanged when blank"></label>
@@ -3631,6 +3632,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     }
 
     function fillShadowConnector(config) {
+      document.getElementById("shadow-tb-name").value = config.name || "tande";
       document.getElementById("shadow-tb-url").value = config.base_url || "";
       document.getElementById("shadow-tb-username").value = config.username || "";
       document.getElementById("shadow-tb-password").value = "";
@@ -3650,6 +3652,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
 
     function shadowConnectorPayload() {
       return {
+        name: document.getElementById("shadow-tb-name").value.trim(),
         base_url: document.getElementById("shadow-tb-url").value.trim(),
         username: document.getElementById("shadow-tb-username").value.trim(),
         password: document.getElementById("shadow-tb-password").value,
