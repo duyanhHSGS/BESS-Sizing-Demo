@@ -4,8 +4,9 @@ Design follows the two-layer framework in CoSoLyThuyet_DRL_BESS_Sizing.html
 (Hu et al. 2026). Policies use 13 reactive inputs or 17 inputs with four
 causal forecast features. Schema v2 keeps those compact dimensions and
 reuses the redundant linear time field for next-cheap-window shortage
-pressure; sin/cos already encode the full daily cycle. All variants output
-one continuous action in [-1, 1].
+pressure; sin/cos already encode the full daily cycle. Policies may output
+a continuous action in [-1, 1], which the environment converts to a binary
+command: -1 for charging or +1 for discharging.
 
 HARD-CONSTRAINT SAFETY PROJECTION (never learned, always enforced):
   * zero export : discharge is capped at the net load, so
@@ -355,7 +356,10 @@ class BESSEnv:
         cfg = self.cfg
         eff = max(0.0, load - pv)
         sur = max(0.0, pv - load)
-        p_des = float(np.clip(a, -1.0, 1.0)) * cfg.P_rated_nominal
+        # Hard-binarize the policy output before applying physical limits.
+        # Zero maps to +1, so the command is always exactly -1 or +1.
+        binary_action = 1.0 if float(a) >= 0.0 else -1.0
+        p_des = binary_action * cfg.P_rated_nominal
         if p_des >= 0.0:                               # discharge request
             avail = max(0.0, (self.soc - cfg.SOC_min)
                         * self._available_power_coeff)
