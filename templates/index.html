@@ -4533,7 +4533,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     function updateTrainAlgoFields() {
       const algo = trainAlgo.value;
       document.querySelectorAll(".train-learning-field").forEach((item) => {
-        item.style.display = ["ppo", "grepo", "grepro"].includes(algo) ? "inline-flex" : "none";
+        item.style.display = ["ppo", "ppo2", "grepo", "grepro"].includes(algo) ? "inline-flex" : "none";
       });
       document.querySelectorAll(".train-ppo-field").forEach((item) => {
         item.style.display = algo === "ppo" ? "inline-flex" : "none";
@@ -4550,7 +4550,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       document.querySelectorAll(".train-pro-field").forEach((item) => {
         item.style.display = algo === "pro" ? "inline-flex" : "none";
       });
-      if (["ppo", "grepo", "grepro", "pro"].includes(algo)) {
+      if (["ppo", "ppo2", "grepo", "grepro", "pro"].includes(algo)) {
         trainControlDtCustomWrap.style.display = trainControlDt.value === "custom" ? "inline-flex" : "none";
       }
       updateTrainPlan();
