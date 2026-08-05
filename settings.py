@@ -67,7 +67,7 @@ DEFAULT_PARAMETERS = {
     "charge_efficiency": "0.95",
     "discharge_efficiency": "0.95",
     "dt": "0.25",
-    "battery_wear_cost": "0",
+    "battery_wear_cost": "500",
     "minimum_soc": "0.10",
     "maximum_soc": "0.90",
     "required_final_soc": "0.50",
@@ -83,7 +83,7 @@ DEFAULT_PARAMETERS = {
     "billing_battery_per_kW": "4000000",
     "billing_yearly_maintain_percentage": "0.02",
     "billing_discount_rate": "0.08",
-    "billing_years": "20",
+    "billing_years": "10",
     "billing_real_saving_factor": "0.6",
     "use_sample_battery_options": "no",
 }
