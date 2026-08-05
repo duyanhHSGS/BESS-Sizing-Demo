@@ -128,6 +128,7 @@ def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
             ),
         }
     env = env_class(cfg, p_ref_kw=p_ref_kw, use_forecast=use_fc,
+                    use_tariff_lookahead=int(meta.get("obs_schema_version", 1)) >= 2,
                     d_run_init_kw=meta.get("d_run_init_kw"),
                     gamma=float(meta.get("gamma", PPO_GAMMA)),
                     control_dt_minutes=control_dt_minutes,
