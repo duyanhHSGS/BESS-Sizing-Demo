@@ -1,10 +1,11 @@
 """bess_env.py  CMDP environment for reactive or real-forecast BESS dispatch.
 
 Design follows the two-layer framework in CoSoLyThuyet_DRL_BESS_Sizing.html
-(Hu et al. 2026). Legacy schema-v1 policies use 13 reactive inputs or 17
-inputs with four causal forecast features. Newly trained schema-v2 policies
-append five tariff-window look-ahead features, producing 18/22 inputs. All
-variants output one continuous action in [-1, 1].
+(Hu et al. 2026). Policies use 13 reactive inputs or 17 inputs with four
+causal forecast features. Schema v2 keeps those compact dimensions and
+reuses the redundant linear time field for next-cheap-window shortage
+pressure; sin/cos already encode the full daily cycle. All variants output
+one continuous action in [-1, 1].
 
 HARD-CONSTRAINT SAFETY PROJECTION (never learned, always enforced):
   * zero export : discharge is capped at the net load, so
@@ -61,7 +62,6 @@ from settings import PPO_GAMMA
 
 OBS_DIM = 13
 OBS_DIM_FC = 17             # forecast-informed variant (+4 features)
-TARIFF_LOOKAHEAD_DIM = 5    # next user-configured cheap window awareness
 OBS_SCHEMA_VERSION = 2
 REWARD_SCALE = 1e6          # rewards in millions of VND
 
@@ -115,8 +115,6 @@ class BESSEnv:
         self.use_forecast = bool(use_forecast)
         self.use_tariff_lookahead = bool(use_tariff_lookahead)
         self.base_obs_dim = OBS_DIM_FC if self.use_forecast else OBS_DIM
-        if self.use_tariff_lookahead:
-            self.base_obs_dim += TARIFF_LOOKAHEAD_DIM
         self.extra_obs_dim = int(extra_obs_dim)
         self.obs_dim = self.base_obs_dim + self.extra_obs_dim
         base_tar = tariff_vector(cfg)
@@ -269,7 +267,9 @@ class BESSEnv:
             cache[t, 9] = 0.0
             cache[t, 10] = working
             cache[t, 11] = day_fraction
-            cache[t, 12] = t / self.n_steps
+            # sin/cos above already encode time cyclically.  Schema v2 uses
+            # this formerly redundant linear-time slot for a dynamic signal.
+            cache[t, 12] = 0.0 if self.use_tariff_lookahead else t / self.n_steps
             if self.use_forecast:
                 cache[t, 13:17] = self._fc_features(t)
         self._obs_static = cache
@@ -290,14 +290,7 @@ class BESSEnv:
         base[9] = self.g_prev * self._inv_p_ref
         if self.use_tariff_lookahead:
             lookahead = self._tariff_lookahead(self.t, self.soc)
-            start = OBS_DIM_FC if self.use_forecast else OBS_DIM
-            base[start:start + TARIFF_LOOKAHEAD_DIM] = (
-                lookahead["steps_until"] / max(1, self.n_steps),
-                min(2.0, lookahead["cheap_capacity_ratio"]),
-                lookahead["deficit_ratio"],
-                lookahead["precharge_pressure"],
-                float(lookahead["starts_next_day"]),
-            )
+            base[12] = lookahead["precharge_pressure"]
         self._fill_extra_observation(base, t)
         return base
 

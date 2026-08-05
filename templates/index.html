@@ -1377,7 +1377,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       </div>
       <div class="card">
         <h2>Forecast contract</h2>
-        <div class="info">The site forecaster uses only current/past PV, 1/5/15-minute PV changes, recent load/PV, weather freshness, cloud cover, irradiance, temperature and precipitation. It predicts next-hour and following-two-hour effective load/PV. Training Lab combines those four predictions with five next-cheap-window features in the 22-input tariff-aware policy.</div>
+        <div class="info">The site forecaster uses only current/past PV, 1/5/15-minute PV changes, recent load/PV, weather freshness, cloud cover, irradiance, temperature and precipitation. It predicts next-hour and following-two-hour effective load/PV. The 17-input policy also reuses its redundant linear-time slot for next-cheap-window shortage pressure; cyclic time remains encoded by sine/cosine.</div>
       </div>
     </section>
 
@@ -4612,7 +4612,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       trainButton.disabled = false;
       const nativeDt = selectedNativeDt();
       const controlDt = selectedControlDt();
-      const forecastReady = trainObservation.value === "fc" ? " Real weather and the 22-input forecast + tariff-window contract are ready." : " The 18-input reactive + tariff-window contract is ready.";
+      const forecastReady = trainObservation.value === "fc" ? " Real weather and the compact 17-input forecast + tariff-cycle contract are ready." : " The compact 13-input reactive + tariff-cycle contract is ready.";
       trainPlan.textContent = `Oracle Chad ready: ${payload.solved_days} native-resolution cached days.${forecastReady} Sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action). Training may start without any daily LP.`;
     }
 
