@@ -200,7 +200,7 @@ def main() -> None:
         gamma=gamma,
         control_dt_minutes=args.control_dt_minutes,
         use_forecast=args.obs_variant == "fc",
-        use_tariff_lookahead=False,
+        use_tariff_lookahead=True,
     )
     learner_device = resolve_ppo_device(args.device)
     agent = PPOAgent(

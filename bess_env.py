@@ -295,53 +295,100 @@ class BESSEnv:
         self._fill_extra_observation(base, t)
         return base
 
-    def _next_cheap_window(self, t: int) -> tuple[int, int, bool]:
-        """Return distance, usable length and day-wrap for the next OFF run.
+    def _window_scan(self, t: int) -> dict:
+        """Return tariff breakdown around the next OFF window.
 
-        OFF comes entirely from the user's tariff-window configuration.  This
-        intentionally contains no clock literals: changing the UI window also
-        changes what the agent sees and how its reward is shaped.
+        Returns a dict with:
+          steps_until_off  : steps from t to the next OFF step
+          cheap_steps      : contiguous OFF steps starting there
+          mid_steps_before : non-peak, non-OFF steps before the OFF window
+          peak_steps_before: peak (W1/W2) steps before the OFF window
+          starts_next_day  : the OFF window starts on the next calendar day
         """
-        off = set(int(step) % self.n_steps for step in self.cfg.OFF)
-        if not off:
-            return self.n_steps, 0, False
+        off_set = set(int(step) % self.n_steps for step in self.cfg.OFF)
+        peak_set = (set(int(step) % self.n_steps for step in self.cfg.W1)
+                    | set(int(step) % self.n_steps for step in self.cfg.W2))
+        empty = {"steps_until_off": self.n_steps, "cheap_steps": 0,
+                 "mid_steps_before": 0, "peak_steps_before": 0,
+                 "starts_next_day": False}
+        if not off_set:
+            return empty
         steps_until = 0
-        while steps_until < self.n_steps and (t + steps_until) % self.n_steps not in off:
+        while (steps_until < self.n_steps
+               and (t + steps_until) % self.n_steps not in off_set):
             steps_until += 1
         if steps_until >= self.n_steps:
-            return self.n_steps, 0, False
-        length = 0
-        while length < self.n_steps and (t + steps_until + length) % self.n_steps in off:
-            length += 1
-        return steps_until, length, t + steps_until >= self.n_steps
+            return empty
+        cheap_start = t + steps_until
+        cheap_steps = 0
+        while (cheap_steps < self.n_steps
+               and (cheap_start + cheap_steps) % self.n_steps in off_set):
+            cheap_steps += 1
+        starts_next_day = t + steps_until >= self.n_steps
+        mid_before = 0
+        peak_before = 0
+        for k in range(steps_until):
+            step_idx = (t + k) % self.n_steps
+            if step_idx in peak_set:
+                peak_before += 1
+            else:
+                mid_before += 1
+        return {"steps_until_off": steps_until, "cheap_steps": cheap_steps,
+                "mid_steps_before": mid_before, "peak_steps_before": peak_before,
+                "starts_next_day": starts_next_day}
 
     def _tariff_lookahead(self, t: int, soc: float) -> dict[str, float | bool]:
-        steps_until, cheap_steps, starts_next_day = self._next_cheap_window(t)
+        ws = self._window_scan(t)
+        if ws["cheap_steps"] <= 0:
+            return {
+                "steps_until": float(ws["steps_until_off"]),
+                "cheap_capacity_ratio": 0.0,
+                "deficit_ratio": 0.0,
+                "precharge_pressure": 0.0,
+                "mid_precharge_pressure": 0.0,
+                "starts_next_day": bool(ws["starts_next_day"]),
+                "cheap_steps": 0,
+                "mid_steps_before": 0,
+                "peak_steps_before": 0,
+            }
         max_charge_kw = max(0.0, float(self.cfg.P_rated_nominal))
         room_ac_kwh = max(
             0.0,
             (self.cfg.SOC_max - soc) * self.cfg.E_cap / max(self.cfg.eta_ch, 1e-9),
         )
-        cheap_capacity_kwh = cheap_steps * self.dt * max_charge_kw
-        deficit_kwh = max(0.0, room_ac_kwh - cheap_capacity_kwh)
+        cheap_capacity = ws["cheap_steps"] * self.dt * max_charge_kw
+        mid_capacity = ws["mid_steps_before"] * self.dt * max_charge_kw
+        peak_capacity = ws["peak_steps_before"] * self.dt * max_charge_kw
+        deficit_after_cheap = max(0.0, room_ac_kwh - cheap_capacity)
+        deficit_after_mid = max(0.0, room_ac_kwh - cheap_capacity - mid_capacity)
         full_band_ac_kwh = max(
             1e-9,
             (self.cfg.SOC_max - self.cfg.SOC_min)
             * self.cfg.E_cap
             / max(self.cfg.eta_ch, 1e-9),
         )
-        prewindow_capacity_kwh = steps_until * self.dt * max_charge_kw
-        pressure = (
-            min(1.0, deficit_kwh / max(prewindow_capacity_kwh, 1e-9))
-            if cheap_steps and steps_until > 0
+        # Emergency: peak precharge only when OFF + MID together cannot fill
+        emergency_pressure = (
+            min(1.0, deficit_after_mid / max(peak_capacity, 1e-9))
+            if ws["peak_steps_before"] > 0 and deficit_after_mid > 0.0
+            else 0.0
+        )
+        # Mid precharge: deficit remaining after the OFF window alone
+        mid_pressure = (
+            min(1.0, deficit_after_cheap / max(mid_capacity, 1e-9))
+            if ws["mid_steps_before"] > 0 and deficit_after_cheap > 0.0
             else 0.0
         )
         return {
-            "steps_until": float(steps_until),
-            "cheap_capacity_ratio": cheap_capacity_kwh / max(room_ac_kwh, 1e-9),
-            "deficit_ratio": min(1.0, deficit_kwh / full_band_ac_kwh),
-            "precharge_pressure": pressure,
-            "starts_next_day": bool(starts_next_day),
+            "steps_until": float(ws["steps_until_off"]),
+            "cheap_capacity_ratio": cheap_capacity / max(room_ac_kwh, 1e-9),
+            "deficit_ratio": min(1.0, deficit_after_cheap / full_band_ac_kwh),
+            "precharge_pressure": emergency_pressure,
+            "mid_precharge_pressure": mid_pressure,
+            "starts_next_day": bool(ws["starts_next_day"]),
+            "cheap_steps": ws["cheap_steps"],
+            "mid_steps_before": ws["mid_steps_before"],
+            "peak_steps_before": ws["peak_steps_before"],
         }
 
     def _fill_extra_observation(self, observation: np.ndarray, t: int) -> None:
@@ -417,26 +464,38 @@ class BESSEnv:
         deg_cost = self.deg * (d + cg + cp) * self.dt
 
         # Learned tariff-window behaviour.  Cheap grid energy gets a dense
-        # dopamine signal.  Grid charging outside the user's OFF windows gets
-        # a strong stress signal, except when the approaching OFF run cannot
-        # physically fill the remaining SOC room at rated power.  In that
-        # case urgency smoothly swaps stress for pre-charge dopamine; no
-        # action is hard-blocked and no hour is hard-coded.
+        # dopamine signal.  Grid charging at mid/INTER hours gets precharge
+        # dopamine only when the next OFF window cannot physically fill the
+        # remaining SOC room.  Peak-hour charging is blocked from
+        # precharge dopamine unless OFF + MID together still cannot fill
+        # the battery (true emergency).
         grid_charge_kwh = cg * self.dt
         tariff_spread = max(0.0, cfg.price_peak - cfg.price_off)
         cheap_charge_joy = 0.0
         noncheap_charge_stress = 0.0
         precharge_joy = 0.0
         if self.use_tariff_lookahead:
+            peak_set = (set(int(s) % self.n_steps for s in cfg.W1)
+                        | set(int(s) % self.n_steps for s in cfg.W2))
             if t in cfg.OFF:
                 cheap_charge_joy = grid_charge_kwh * tariff_spread
             elif grid_charge_kwh > 0.0:
-                pressure = float(lookahead["precharge_pressure"])
-                noncheap_charge_stress = grid_charge_kwh * (
-                    tariff_spread * (1.0 - pressure)
-                    + max(0.0, self.tariff[t] - cfg.price_mid)
-                )
-                precharge_joy = grid_charge_kwh * tariff_spread * pressure
+                if t in peak_set:
+                    # Peak: only reward if OFF+MID cannot fill (emergency)
+                    emergency_p = float(lookahead["precharge_pressure"])
+                    noncheap_charge_stress = grid_charge_kwh * (
+                        tariff_spread * (1.0 - emergency_p)
+                        + max(0.0, self.tariff[t] - cfg.price_mid)
+                    )
+                    precharge_joy = grid_charge_kwh * tariff_spread * emergency_p
+                else:
+                    # Mid/INTER: precharge proportional to deficit after OFF
+                    mid_p = float(lookahead["mid_precharge_pressure"])
+                    noncheap_charge_stress = grid_charge_kwh * (
+                        tariff_spread * (1.0 - mid_p)
+                        + max(0.0, self.tariff[t] - cfg.price_mid)
+                    )
+                    precharge_joy = grid_charge_kwh * tariff_spread * mid_p
 
         # --- reward: counterfactual delta vs no-BESS ---------------------
         energy_delta = self.tariff[t] * (cg - d) * self.dt
