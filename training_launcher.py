@@ -9,7 +9,7 @@ from pathlib import Path
 
 import oracle_cache
 from benchmark import detect_dt_hours
-from settings import GREPO_GAMMA, GREPRO_GAMMA, PPO_GAMMA, PPO_LAMBDA, PRO_GAMMA
+from settings import GREPO_GAMMA, GREPRO_GAMMA, PPO_GAMMA, PPO_LAMBDA, PPO2_GAMMA, PPO2_LAM_ENERGY, PPO2_LAM_PEAK, PRO_GAMMA
 from training_datasets import (
     DatasetError,
     detect_resolution_minutes,
@@ -28,7 +28,8 @@ PPO_SCRIPT = BASE_DIR / "train_ppo_dataset.py"
 GREPO_SCRIPT = BASE_DIR / "train_grepo.py"
 GREPRO_SCRIPT = BASE_DIR / "train_grepro.py"
 PRO_SCRIPT = BASE_DIR / "train_pro.py"
-ALGORITHMS = {"ppo", "grepo", "grepro", "grpo", "pro"}
+PPO2_SCRIPT = BASE_DIR / "train_ppo2_dataset.py"
+ALGORITHMS = {"ppo", "ppo2", "grepo", "grepro", "grpo", "pro"}
 
 
 class TrainingLaunchError(ValueError):
@@ -185,6 +186,7 @@ def build_training_command(
     checkpoint = ensure_inside_base(base_dir / "checkpoints" / f"policy_{tag}.pt", base_dir)
     script = {
         "ppo": PPO_SCRIPT,
+        "ppo2": PPO2_SCRIPT,
         "grepo": GREPO_SCRIPT,
         "grepro": GREPRO_SCRIPT,
         "pro": PRO_SCRIPT,
@@ -250,6 +252,41 @@ def build_training_command(
                 str(gamma),
                 "--lambda",
                 str(lambda_value),
+            ]
+        )
+    elif algo == "ppo2":
+        gamma = _bounded_float(
+            payload,
+            "ppo2_gamma",
+            PPO2_GAMMA,
+            minimum=0.0,
+            minimum_inclusive=False,
+            maximum=1.0,
+        )
+        lam_energy = _bounded_float(
+            payload,
+            "ppo2_lam_energy",
+            PPO2_LAM_ENERGY,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        lam_peak = _bounded_float(
+            payload,
+            "ppo2_lam_peak",
+            PPO2_LAM_PEAK,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        cmd.extend(
+            [
+                "--steps",
+                str(_int(payload, "steps", 400_000)),
+                "--gamma",
+                str(gamma),
+                "--lam-energy",
+                str(lam_energy),
+                "--lam-peak",
+                str(lam_peak),
             ]
         )
     elif algo == "pro":

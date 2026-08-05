@@ -1389,6 +1389,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label>Algorithm
             <select id="train-algo">
               <option value="ppo">PPO</option>
+              <option value="ppo2">PPO2 — decomposed critics</option>
               <option value="pro">PRO — PPO + Oracle</option>
               <option value="grepo">GREPO</option>
               <option value="grepro">GrePRO — monthly memory</option>
@@ -1446,6 +1447,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label class="train-pro-field" style="display:none">Oracle coefficient <input type="number" id="train-pro-oracle-coef" min="0" max="10" step="0.01" value="1.0"></label>
           <label class="train-pro-field" style="display:none">Oracle decay / update <input type="number" id="train-pro-oracle-decay" min="0" max="1" step="0.0001" value="0.002"></label>
           <label class="train-pro-field" style="display:none">PRO Gamma <input type="number" id="train-pro-gamma" min="0.0001" max="1" step="0.0001" value="{{ pro_gamma }}"></label>
+          <label class="train-ppo2-field" style="display:none">Steps <input type="number" id="train-ppo2-steps" value="400000" step="50000"></label>
+          <label class="train-ppo2-field" style="display:none">Gamma <input type="number" id="train-ppo2-gamma" min="0.0001" max="1" step="0.0001" value="{{ ppo2_gamma }}"></label>
+          <label class="train-ppo2-field" style="display:none">λ energy <input type="number" id="train-ppo2-lam-energy" min="0" max="1" step="0.001" value="{{ ppo2_lam_energy }}"></label>
+          <label class="train-ppo2-field" style="display:none">λ peak <input type="number" id="train-ppo2-lam-peak" min="0" max="1" step="0.001" value="{{ ppo2_lam_peak }}"></label>
           <label>Checkpoint tag <input id="train-tag" size="22" placeholder="auto"></label>
           <button id="btn-train" class="primary" type="button">Start training</button>
           <button id="btn-train-stop" type="button" disabled>Stop</button>
@@ -4539,6 +4544,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       document.querySelectorAll(".train-grepro-field").forEach((item) => {
         item.style.display = algo === "grepro" ? "inline-flex" : "none";
       });
+      document.querySelectorAll(".train-ppo2-field").forEach((item) => {
+        item.style.display = algo === "ppo2" ? "inline-flex" : "none";
+      });
       document.querySelectorAll(".train-pro-field").forEach((item) => {
         item.style.display = algo === "pro" ? "inline-flex" : "none";
       });
@@ -4582,8 +4590,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       } else {
         const budget = algo === "ppo"
           ? `${trainSteps.value} PPO steps; gamma ${trainGamma.value}; lambda ${trainLambda.value}`
-          : algo === "pro"
-            ? `${trainProIters.value} PRO iterations; oracle_coef ${trainProOracleCoef.value}; decay ${trainProOracleDecay.value}; gamma ${trainProGamma.value}`
+          : algo === "ppo2"
+            ? `${document.getElementById("train-ppo2-steps").value} PPO2 steps; gamma ${document.getElementById("train-ppo2-gamma").value}; λ_energy ${document.getElementById("train-ppo2-lam-energy").value}; λ_peak ${document.getElementById("train-ppo2-lam-peak").value}`
+            : algo === "pro"
+              ? `${trainProIters.value} PRO iterations; oracle_coef ${trainProOracleCoef.value}; decay ${trainProOracleDecay.value}; gamma ${trainProGamma.value}`
             : algo === "grepro"
               ? `${trainGreproIters.value} GrePRO iterations; fixed SADRBC residual ${formatNumber(Number(trainGreproResidualLimit.value) * 100, 0)}%; deterministic forecast seed ${trainGreproForecastSeed.value}; 3→7→30 day curriculum; gamma ${trainGreproGamma.value}`
               : `${trainIters.value} GREPO iterations; gamma ${trainGrepoGamma.value}`;

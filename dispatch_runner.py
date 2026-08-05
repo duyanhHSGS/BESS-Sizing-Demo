@@ -44,6 +44,7 @@ from common import (  # noqa: E402
 from grepo_agent import GREPOAgent  # noqa: E402
 from grepro_agent import GREPROAgent  # noqa: E402
 from ppo_agent import PPOAgent  # noqa: E402
+from ppo2_agent import PPO2InferenceAgent  # noqa: E402
 from pro_agent import PROAgent  # noqa: E402
 from sadrbc import SADRBCConfig  # noqa: E402
 from scenario_gen import DayData, MonthData  # noqa: E402
@@ -154,7 +155,7 @@ def load_policy(checkpoint_name: str, checkpoint_dir: Path = CHECKPOINT_DIR):
     algo = algo.lower()
     if algo == "grpo":
         raise DispatchRunWarning(f"{checkpoint_name}: GRPO is not implemented in this repo yet")
-    if algo not in {"ppo", "grepo", "grepro", "pro"}:
+    if algo not in {"ppo", "ppo2", "grepo", "grepro", "pro"}:
         raise DispatchRunWarning(f"{checkpoint_name}: unsupported checkpoint algorithm {algo}")
     sampling_fields = {
         "native_dt_minutes",
@@ -170,6 +171,9 @@ def load_policy(checkpoint_name: str, checkpoint_dir: Path = CHECKPOINT_DIR):
     if algo == "ppo":
         obs_dim = int(meta.get("obs_dim") or (17 if meta.get("obs_variant") == "fc" else 13))
         agent = PPOAgent(obs_dim=obs_dim)
+    elif algo == "ppo2":
+        obs_dim = int(meta.get("obs_dim") or 13)
+        agent = PPO2InferenceAgent(obs_dim=obs_dim)
     elif algo == "pro":
         obs_dim = int(meta.get("obs_dim") or (17 if meta.get("obs_variant") == "fc" else 13))
         agent = PROAgent(obs_dim=obs_dim)
