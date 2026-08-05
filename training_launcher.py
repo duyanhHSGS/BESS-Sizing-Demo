@@ -9,7 +9,7 @@ from pathlib import Path
 
 import oracle_cache
 from benchmark import detect_dt_hours
-from settings import GREPO_GAMMA, GREPRO_GAMMA, PPO_GAMMA, PPO_LAMBDA
+from settings import GREPO_GAMMA, GREPRO_GAMMA, PPO_GAMMA, PPO_LAMBDA, PRO_GAMMA
 from training_datasets import (
     DatasetError,
     detect_resolution_minutes,
@@ -27,7 +27,8 @@ USER_DATA_DIR = BASE_DIR / "user_data"
 PPO_SCRIPT = BASE_DIR / "train_ppo_dataset.py"
 GREPO_SCRIPT = BASE_DIR / "train_grepo.py"
 GREPRO_SCRIPT = BASE_DIR / "train_grepro.py"
-ALGORITHMS = {"ppo", "grepo", "grepro", "grpo"}
+PRO_SCRIPT = BASE_DIR / "train_pro.py"
+ALGORITHMS = {"ppo", "grepo", "grepro", "grpo", "pro"}
 
 
 class TrainingLaunchError(ValueError):
@@ -186,6 +187,7 @@ def build_training_command(
         "ppo": PPO_SCRIPT,
         "grepo": GREPO_SCRIPT,
         "grepro": GREPRO_SCRIPT,
+        "pro": PRO_SCRIPT,
     }[algo]
 
     cmd = [
@@ -248,6 +250,27 @@ def build_training_command(
                 str(gamma),
                 "--lambda",
                 str(lambda_value),
+            ]
+        )
+    elif algo == "pro":
+        gamma = _bounded_float(
+            payload,
+            "pro_gamma",
+            PRO_GAMMA,
+            minimum=0.0,
+            minimum_inclusive=False,
+            maximum=1.0,
+        )
+        cmd.extend(
+            [
+                "--iters",
+                str(_int(payload, "pro_iters", 400)),
+                "--gamma",
+                str(gamma),
+                "--oracle-coef",
+                str(_float(payload, "pro_oracle_coef", 1.0)),
+                "--oracle-decay",
+                str(_float(payload, "pro_oracle_decay", 0.0)),
             ]
         )
     else:

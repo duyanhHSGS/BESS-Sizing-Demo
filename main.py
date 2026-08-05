@@ -33,6 +33,7 @@ from settings import (
     GREPRO_GAMMA,
     PPO_GAMMA,
     PPO_LAMBDA,
+    PRO_GAMMA,
     SAMPLE_BATTERY_CANDIDATES,
 )
 from training_checkpoints import get_checkpoint_report, list_checkpoints
@@ -615,6 +616,7 @@ def view_context():
         "sample_battery_candidates": SAMPLE_BATTERY_CANDIDATES,
         "ppo_gamma": PPO_GAMMA,
         "ppo_lambda": PPO_LAMBDA,
+        "pro_gamma": PRO_GAMMA,
         "grepo_gamma": GREPO_GAMMA,
         "grepro_gamma": GREPRO_GAMMA,
         "candidate_oracles": candidate_oracles,

@@ -40,7 +40,7 @@ def context(parameters: dict[str, Any]) -> dict[str, Any]:
         expected_dt = meta.get("native_dt_minutes")
         incompatible_dt = expected_dt is not None and abs(float(expected_dt) - actual_dt_minutes) > 1e-9
         reason = checkpoint.get("error")
-        if checkpoint.get("algo", "").lower() not in {"ppo", "grepo", "grepro"}:
+        if checkpoint.get("algo", "").lower() not in {"ppo", "grepo", "grepro", "pro"}:
             reason = reason or f"Unsupported algorithm: {checkpoint.get('algo') or 'unknown'}"
         elif not SAMPLING_FIELDS.issubset(meta):
             reason = reason or "Legacy checkpoint lacks required sampling metadata."
@@ -244,7 +244,7 @@ def _selected_checkpoints(policy_names: list[str]) -> list[dict[str, Any]]:
         row = known[name]
         if row.get("error"):
             raise ValueError(f"{name}: checkpoint is not loadable ({row['error']})")
-        if row.get("algo", "").lower() not in {"ppo", "grepo", "grepro"}:
+        if row.get("algo", "").lower() not in {"ppo", "grepo", "grepro", "pro"}:
             raise ValueError(f"{name}: unsupported algorithm {row.get('algo')}")
         if not SAMPLING_FIELDS.issubset(row.get("meta", {})):
             raise ValueError(f"{name}: legacy checkpoint lacks required sampling metadata")

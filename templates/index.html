@@ -1389,6 +1389,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label>Algorithm
             <select id="train-algo">
               <option value="ppo">PPO</option>
+              <option value="pro">PRO — PPO + Oracle</option>
               <option value="grepo">GREPO</option>
               <option value="grepro">GrePRO — monthly memory</option>
               <option value="grpo">GRPO (not implemented)</option>
@@ -1441,6 +1442,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label class="train-grepro-field" style="display:none">SADRBC noise seed <input type="number" id="train-grepro-forecast-seed" step="1" value="130013"></label>
           <label class="train-grepro-field" style="display:none">Declared load error sigma <input type="number" id="train-grepro-load-sigma" min="0" max="1" step="0.01" value="0.05"></label>
           <label class="train-grepro-field" style="display:none">Declared PV error sigma <input type="number" id="train-grepro-pv-sigma" min="0" max="1" step="0.01" value="0.15"></label>
+          <label class="train-pro-field" style="display:none">Iters <input type="number" id="train-pro-iters" value="400" step="50"></label>
+          <label class="train-pro-field" style="display:none">Oracle coefficient <input type="number" id="train-pro-oracle-coef" min="0" max="10" step="0.01" value="1.0"></label>
+          <label class="train-pro-field" style="display:none">Oracle decay / update <input type="number" id="train-pro-oracle-decay" min="0" max="1" step="0.0001" value="0.002"></label>
+          <label class="train-pro-field" style="display:none">PRO Gamma <input type="number" id="train-pro-gamma" min="0.0001" max="1" step="0.0001" value="{{ pro_gamma }}"></label>
           <label>Checkpoint tag <input id="train-tag" size="22" placeholder="auto"></label>
           <button id="btn-train" class="primary" type="button">Start training</button>
           <button id="btn-train-stop" type="button" disabled>Stop</button>
@@ -4291,6 +4296,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const trainGreproForecastSeed = document.getElementById("train-grepro-forecast-seed");
     const trainGreproLoadSigma = document.getElementById("train-grepro-load-sigma");
     const trainGreproPvSigma = document.getElementById("train-grepro-pv-sigma");
+    const trainProIters = document.getElementById("train-pro-iters");
+    const trainProOracleCoef = document.getElementById("train-pro-oracle-coef");
+    const trainProOracleDecay = document.getElementById("train-pro-oracle-decay");
+    const trainProGamma = document.getElementById("train-pro-gamma");
     const trainTag = document.getElementById("train-tag");
     const trainPlan = document.getElementById("train-plan");
     const trainLog = document.getElementById("train-log");
@@ -4530,7 +4539,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       document.querySelectorAll(".train-grepro-field").forEach((item) => {
         item.style.display = algo === "grepro" ? "inline-flex" : "none";
       });
-      if (["ppo", "grepo", "grepro"].includes(algo)) {
+      document.querySelectorAll(".train-pro-field").forEach((item) => {
+        item.style.display = algo === "pro" ? "inline-flex" : "none";
+      });
+      if (["ppo", "grepo", "grepro", "pro"].includes(algo)) {
         trainControlDtCustomWrap.style.display = trainControlDt.value === "custom" ? "inline-flex" : "none";
       }
       updateTrainPlan();
@@ -4570,9 +4582,11 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       } else {
         const budget = algo === "ppo"
           ? `${trainSteps.value} PPO steps; gamma ${trainGamma.value}; lambda ${trainLambda.value}`
-          : algo === "grepro"
-            ? `${trainGreproIters.value} GrePRO iterations; fixed SADRBC residual ${formatNumber(Number(trainGreproResidualLimit.value) * 100, 0)}%; deterministic forecast seed ${trainGreproForecastSeed.value}; 3→7→30 day curriculum; gamma ${trainGreproGamma.value}`
-            : `${trainIters.value} GREPO iterations; gamma ${trainGrepoGamma.value}`;
+          : algo === "pro"
+            ? `${trainProIters.value} PRO iterations; oracle_coef ${trainProOracleCoef.value}; decay ${trainProOracleDecay.value}; gamma ${trainProGamma.value}`
+            : algo === "grepro"
+              ? `${trainGreproIters.value} GrePRO iterations; fixed SADRBC residual ${formatNumber(Number(trainGreproResidualLimit.value) * 100, 0)}%; deterministic forecast seed ${trainGreproForecastSeed.value}; 3→7→30 day curriculum; gamma ${trainGreproGamma.value}`
+              : `${trainIters.value} GREPO iterations; gamma ${trainGrepoGamma.value}`;
         const inputCount = brainMode === "fc" ? (algo === "grepro" ? 18 : 17) : (algo === "grepro" ? 14 : 13);
         const brainLabel = `${brainMode === "fc" ? "Forecast" : "Reactive"} brain (${inputCount} inputs)`;
         trainPlan.textContent = `Checking required data... Plan: ${brainLabel}; device ${trainDevice.value}; train ${trainDays} days, validation ${valDays}, test ${testDays}; ${budget}; sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action); E/P ${trainEcap.value}/${trainPrated.value}.`;
@@ -4774,6 +4788,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             grepro_forecast_seed: Number(trainGreproForecastSeed.value),
             grepro_forecast_load_sigma: Number(trainGreproLoadSigma.value),
             grepro_forecast_pv_sigma: Number(trainGreproPvSigma.value),
+            pro_iters: Number(trainProIters.value),
+            pro_oracle_coef: Number(trainProOracleCoef.value),
+            pro_oracle_decay: Number(trainProOracleDecay.value),
+            pro_gamma: Number(trainProGamma.value),
             control_dt_minutes: selectedControlDt(),
             tag: trainTag.value.trim(),
           }),

@@ -92,6 +92,7 @@ DEFAULT_PARAMETERS = {
 # and the environment's potential-based SOC reward shaping.
 PPO_GAMMA = 0.995
 PPO_LAMBDA = 0.97
+PRO_GAMMA = 0.995
 GREPO_GAMMA = 0.995
 GREPRO_GAMMA = 0.995
 
