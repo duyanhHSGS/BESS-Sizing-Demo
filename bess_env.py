@@ -1,12 +1,9 @@
 """bess_env.py  CMDP environment for reactive or real-forecast BESS dispatch.
 
 Design follows the two-layer framework in CoSoLyThuyet_DRL_BESS_Sizing.html
-(Hu et al. 2026). Policies use 13 reactive inputs or 17 inputs with four
-causal forecast features. Schema v2 keeps those compact dimensions and
-reuses the redundant linear time field for next-cheap-window shortage
-pressure; sin/cos already encode the full daily cycle. Policies may output
-a continuous action in [-1, 1], which the environment converts to a binary
-command: -1 for charging or +1 for discharging.
+(Hu et al. 2026): the 13-input variant sees real-time measurements only.
+The 17-input variant adds four externally prepared, causal look-ahead
+predictions. Both output one continuous action in [-1, 1].
 
 HARD-CONSTRAINT SAFETY PROJECTION (never learned, always enforced):
   * zero export : discharge is capped at the net load, so
@@ -63,7 +60,6 @@ from settings import PPO_GAMMA
 
 OBS_DIM = 13
 OBS_DIM_FC = 17             # forecast-informed variant (+4 features)
-OBS_SCHEMA_VERSION = 2
 REWARD_SCALE = 1e6          # rewards in millions of VND
 
 
@@ -77,7 +73,6 @@ class BESSEnv:
                  gamma: float = PPO_GAMMA,
                  control_dt_minutes: float | None = None,
                  use_forecast: bool = False,
-                 use_tariff_lookahead: bool = False,
                  n_steps: int = STEPS_PER_DAY,
                  dt_hours: float = DT_HOURS,
                  record_trajectory: bool = True,
@@ -114,7 +109,6 @@ class BESSEnv:
         # Forecast mode accepts only externally prepared causal predictions.
         # Missing predictions are an error; future actuals are never used here.
         self.use_forecast = bool(use_forecast)
-        self.use_tariff_lookahead = bool(use_tariff_lookahead)
         self.base_obs_dim = OBS_DIM_FC if self.use_forecast else OBS_DIM
         self.extra_obs_dim = int(extra_obs_dim)
         self.obs_dim = self.base_obs_dim + self.extra_obs_dim
@@ -245,7 +239,7 @@ class BESSEnv:
     def _cache_static_observations(self):
         """Cache observation fields that cannot change within the day."""
         day = self.month.days[self.day]
-        cache = np.zeros((self.n_steps, self.obs_dim), dtype=np.float32)
+        cache = np.empty((self.n_steps, self.obs_dim), dtype=np.float32)
         inv_ref = self._inv_p_ref
         working = 1.0 if day.day_type == "working" else 0.0
         day_fraction = self.day * self._day_fraction
@@ -268,9 +262,7 @@ class BESSEnv:
             cache[t, 9] = 0.0
             cache[t, 10] = working
             cache[t, 11] = day_fraction
-            # sin/cos above already encode time cyclically.  Schema v2 uses
-            # this formerly redundant linear-time slot for a dynamic signal.
-            cache[t, 12] = 0.0 if self.use_tariff_lookahead else t / self.n_steps
+            cache[t, 12] = t / self.n_steps
             if self.use_forecast:
                 cache[t, 13:17] = self._fc_features(t)
         self._obs_static = cache
@@ -289,60 +281,8 @@ class BESSEnv:
         base[5] = self.soc
         base[8] = self.d_run * self._inv_p_ref
         base[9] = self.g_prev * self._inv_p_ref
-        if self.use_tariff_lookahead:
-            lookahead = self._tariff_lookahead(self.t, self.soc)
-            base[12] = lookahead["precharge_pressure"]
         self._fill_extra_observation(base, t)
         return base
-
-    def _next_cheap_window(self, t: int) -> tuple[int, int, bool]:
-        """Return distance, usable length and day-wrap for the next OFF run.
-
-        OFF comes entirely from the user's tariff-window configuration.  This
-        intentionally contains no clock literals: changing the UI window also
-        changes what the agent sees and how its reward is shaped.
-        """
-        off = set(int(step) % self.n_steps for step in self.cfg.OFF)
-        if not off:
-            return self.n_steps, 0, False
-        steps_until = 0
-        while steps_until < self.n_steps and (t + steps_until) % self.n_steps not in off:
-            steps_until += 1
-        if steps_until >= self.n_steps:
-            return self.n_steps, 0, False
-        length = 0
-        while length < self.n_steps and (t + steps_until + length) % self.n_steps in off:
-            length += 1
-        return steps_until, length, t + steps_until >= self.n_steps
-
-    def _tariff_lookahead(self, t: int, soc: float) -> dict[str, float | bool]:
-        steps_until, cheap_steps, starts_next_day = self._next_cheap_window(t)
-        max_charge_kw = max(0.0, float(self.cfg.P_rated_nominal))
-        room_ac_kwh = max(
-            0.0,
-            (self.cfg.SOC_max - soc) * self.cfg.E_cap / max(self.cfg.eta_ch, 1e-9),
-        )
-        cheap_capacity_kwh = cheap_steps * self.dt * max_charge_kw
-        deficit_kwh = max(0.0, room_ac_kwh - cheap_capacity_kwh)
-        full_band_ac_kwh = max(
-            1e-9,
-            (self.cfg.SOC_max - self.cfg.SOC_min)
-            * self.cfg.E_cap
-            / max(self.cfg.eta_ch, 1e-9),
-        )
-        prewindow_capacity_kwh = steps_until * self.dt * max_charge_kw
-        pressure = (
-            min(1.0, deficit_kwh / max(prewindow_capacity_kwh, 1e-9))
-            if cheap_steps and steps_until > 0
-            else 0.0
-        )
-        return {
-            "steps_until": float(steps_until),
-            "cheap_capacity_ratio": cheap_capacity_kwh / max(room_ac_kwh, 1e-9),
-            "deficit_ratio": min(1.0, deficit_kwh / full_band_ac_kwh),
-            "precharge_pressure": pressure,
-            "starts_next_day": bool(starts_next_day),
-        }
 
     def _fill_extra_observation(self, observation: np.ndarray, t: int) -> None:
         """Subclass hook for code-native controller context fields."""
@@ -356,10 +296,7 @@ class BESSEnv:
         cfg = self.cfg
         eff = max(0.0, load - pv)
         sur = max(0.0, pv - load)
-        # Hard-binarize the policy output before applying physical limits.
-        # Zero maps to +1, so the command is always exactly -1 or +1.
-        binary_action = 1.0 if float(a) >= 0.0 else -1.0
-        p_des = binary_action * cfg.P_rated_nominal
+        p_des = float(np.clip(a, -1.0, 1.0)) * cfg.P_rated_nominal
         if p_des >= 0.0:                               # discharge request
             avail = max(0.0, (self.soc - cfg.SOC_min)
                         * self._available_power_coeff)
@@ -381,7 +318,6 @@ class BESSEnv:
         t = self.t
         load, pv = float(day.load[t]), float(day.pv[t])
         eff = max(0.0, load - pv)
-        lookahead = self._tariff_lookahead(t, self.soc)
 
         d, cg, cp = self.project_action(action, load, pv)
         self._last_p_bess_kw = d - (cg + cp)
@@ -415,28 +351,6 @@ class BESSEnv:
         peak_pen_nb = cfg.T_cap * max(0.0, d_t_nb - self.d_run_nb)
         self.d_run_nb = max(self.d_run_nb, d_t_nb)
         deg_cost = self.deg * (d + cg + cp) * self.dt
-
-        # Learned tariff-window behaviour.  Cheap grid energy gets a dense
-        # dopamine signal.  Grid charging outside the user's OFF windows gets
-        # a strong stress signal, except when the approaching OFF run cannot
-        # physically fill the remaining SOC room at rated power.  In that
-        # case urgency smoothly swaps stress for pre-charge dopamine; no
-        # action is hard-blocked and no hour is hard-coded.
-        grid_charge_kwh = cg * self.dt
-        tariff_spread = max(0.0, cfg.price_peak - cfg.price_off)
-        cheap_charge_joy = 0.0
-        noncheap_charge_stress = 0.0
-        precharge_joy = 0.0
-        if self.use_tariff_lookahead:
-            if t in cfg.OFF:
-                cheap_charge_joy = grid_charge_kwh * tariff_spread
-            elif grid_charge_kwh > 0.0:
-                pressure = float(lookahead["precharge_pressure"])
-                noncheap_charge_stress = grid_charge_kwh * (
-                    tariff_spread * (1.0 - pressure)
-                    + max(0.0, self.tariff[t] - cfg.price_mid)
-                )
-                precharge_joy = grid_charge_kwh * tariff_spread * pressure
 
         # --- reward: counterfactual delta vs no-BESS ---------------------
         energy_delta = self.tariff[t] * (cg - d) * self.dt
@@ -477,9 +391,6 @@ class BESSEnv:
             deg_cost,
             peak_pen,
             peak_pen_nb,
-            cheap_charge_joy,
-            noncheap_charge_stress,
-            precharge_joy,
         )
 
     def step(self, action: float):
@@ -495,9 +406,6 @@ class BESSEnv:
         deg_cost_total = 0.0
         peak_pen_total = 0.0
         peak_pen_nb_total = 0.0
-        cheap_charge_joy_total = 0.0
-        noncheap_charge_stress_total = 0.0
-        precharge_joy_total = 0.0
         obs = None
         done = False
         grid = 0.0
@@ -515,9 +423,6 @@ class BESSEnv:
                 deg_cost,
                 peak_pen,
                 peak_pen_nb,
-                cheap_charge_joy,
-                noncheap_charge_stress,
-                precharge_joy,
             ) = self._step_native(action)
             native_rows += 1
             throughput_kwh += abs(self._last_p_bess_kw) * self.dt
@@ -528,9 +433,6 @@ class BESSEnv:
             deg_cost_total += deg_cost
             peak_pen_total += peak_pen
             peak_pen_nb_total += peak_pen_nb
-            cheap_charge_joy_total += cheap_charge_joy
-            noncheap_charge_stress_total += noncheap_charge_stress
-            precharge_joy_total += precharge_joy
             if done:
                 break
 
@@ -544,9 +446,6 @@ class BESSEnv:
                 + deg_cost_total
             )
             + shaping
-            + cheap_charge_joy_total
-            + precharge_joy_total
-            - noncheap_charge_stress_total
         ) / REWARD_SCALE
         return obs, reward, done, {
             "grid_kw": grid,
@@ -557,9 +456,6 @@ class BESSEnv:
             "peak_pen": peak_pen_total,
             "peak_pen_nb": peak_pen_nb_total,
             "shaping": shaping,
-            "cheap_charge_joy": cheap_charge_joy_total,
-            "noncheap_charge_stress": noncheap_charge_stress_total,
-            "precharge_joy": precharge_joy_total,
             "native_rows": native_rows,
             "d_run": self.d_run,
             "throughput_kwh": throughput_kwh,

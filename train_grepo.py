@@ -22,7 +22,7 @@ import numpy as np
 from common import RESULTS_DIR, load_system_config, make_bess_config, score_month
 from benchmark import _rolling_30_minute_average
 from scenario_gen import MonthData
-from bess_env import BESSEnv, OBS_SCHEMA_VERSION
+from bess_env import BESSEnv
 from grepo_agent import GREPOAgent, resolve_grepo_device
 from baselines import run_no_bess, run_drl_policy
 from oracle_cache import load_cached_training_grids
@@ -174,7 +174,6 @@ def main():
         gamma=args.gamma,
         control_dt_minutes=args.control_dt_minutes,
         use_forecast=args.obs_variant == "fc",
-        use_tariff_lookahead=True,
         record_trajectory=False,
     )
     control_probe = make_env()
@@ -204,7 +203,6 @@ def main():
         "gamma": args.gamma,
         "obs_variant": args.obs_variant,
         "obs_dim": control_probe.obs_dim,
-        "obs_schema_version": OBS_SCHEMA_VERSION,
         "native_dt_minutes": cfg.dt * 60.0,
         "control_dt_minutes": args.control_dt_minutes,
     }

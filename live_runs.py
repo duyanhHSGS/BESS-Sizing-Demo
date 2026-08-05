@@ -89,7 +89,6 @@ class LiveRunSession:
             self.policy_cfg,
             p_ref_kw=p_ref,
             use_forecast=meta.get("obs_variant") == "fc",
-            use_tariff_lookahead=int(meta.get("obs_schema_version", 1)) >= 2,
             d_run_init_kw=meta.get("d_run_init_kw"),
             gamma=float(meta.get("gamma", PPO_GAMMA)),
             control_dt_minutes=control_minutes,

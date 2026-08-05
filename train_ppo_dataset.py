@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from baselines import run_drl_policy, run_no_bess
-from bess_env import BESSEnv, OBS_SCHEMA_VERSION
+from bess_env import BESSEnv
 from benchmark import _rolling_30_minute_average
 from common import RESULTS_DIR, load_system_config, make_bess_config, score_month
 from ppo_agent import PPOAgent, RolloutBuffer, resolve_ppo_device
@@ -200,7 +200,6 @@ def main() -> None:
         gamma=gamma,
         control_dt_minutes=args.control_dt_minutes,
         use_forecast=args.obs_variant == "fc",
-        use_tariff_lookahead=False,
     )
     learner_device = resolve_ppo_device(args.device)
     agent = PPOAgent(
@@ -217,7 +216,6 @@ def main() -> None:
         "p_rated_kw": args.p_rated,
         "obs_variant": args.obs_variant,
         "obs_dim": env.obs_dim,
-        "obs_schema_version": OBS_SCHEMA_VERSION,
         "d_run_init_kw": d_run0,
         "gamma": gamma,
         "lambda": args.lambda_value,

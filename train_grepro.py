@@ -30,7 +30,6 @@ from sadrbc_forecast import (
     SADRBCResidualEnv,
     rollout_activity,
 )
-from bess_env import OBS_SCHEMA_VERSION
 
 VAL_EVERY = 5
 LOG_EVERY_ITERS = 4
@@ -194,7 +193,6 @@ def main():
         gamma=args.gamma,
         control_dt_minutes=args.control_dt_minutes,
         use_forecast=args.obs_variant == "fc",
-        use_tariff_lookahead=True,
         record_trajectory=False,
         residual_limit=args.residual_limit,
         forecast_spec=forecast_spec,
@@ -228,7 +226,6 @@ def main():
         "gamma": args.gamma,
         "obs_variant": args.obs_variant,
         "obs_dim": control_probe.obs_dim,
-        "obs_schema_version": OBS_SCHEMA_VERSION,
         "native_dt_minutes": cfg.dt * 60.0,
         "control_dt_minutes": args.control_dt_minutes,
         "residual_limit": args.residual_limit,
