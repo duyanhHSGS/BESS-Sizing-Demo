@@ -139,7 +139,13 @@ class BESSEnv:
         self._soc_discharge_coeff = self.dt / (cfg.eta_dis * cfg.E_cap)
         self._available_power_coeff = cfg.E_cap * cfg.eta_dis / self.dt
         self._room_power_coeff = cfg.E_cap / (cfg.eta_ch * self.dt)
-        self._phi_coef = cfg.E_cap * cfg.eta_dis * cfg.price_mid
+        # Not multiplied by price here: the shaping potential must use the
+        # *time-varying* tariff at the decision step (see step()), otherwise
+        # the dense per-step shaping reward pays identical credit for storing
+        # energy regardless of what hour it was charged, which swamps the
+        # much sparser energy_delta term that actually discriminates cheap
+        # vs. expensive charging hours.
+        self._phi_coef_base = cfg.E_cap * cfg.eta_dis
 
     def _reset_demand_window(self) -> None:
         self._roll_grid = np.zeros(self.roll_k, dtype=np.float64)
@@ -243,12 +249,11 @@ class BESSEnv:
         inv_ref = self._inv_p_ref
         working = 1.0 if day.day_type == "working" else 0.0
         day_fraction = self.day * self._day_fraction
-        hour_steps = self.n_steps // 24
+        until_frac, since_frac = self._tariff_transition_fractions()
         for t in range(self.n_steps):
             load, pv = day.load[t], day.pv[t]
             eff = max(0.0, load - pv)
             sur = max(0.0, pv - load)
-            t_next = min(t + hour_steps, self.n_steps - 1)
             angle = 2.0 * np.pi * t / self.n_steps
             cache[t, 0] = np.sin(angle)
             cache[t, 1] = np.cos(angle)
@@ -257,15 +262,48 @@ class BESSEnv:
             cache[t, 4] = sur * inv_ref
             cache[t, 5] = 0.0
             cache[t, 6] = self.tariff[t] * self._inv_peak_price
-            cache[t, 7] = self.tariff[t_next] * self._inv_peak_price
+            # Smooth countdown to the next tariff change (1/n_steps per step
+            # remaining), instead of an abrupt one-hour-ahead step: gives the
+            # agent an anticipatory ramp toward price drops/rises rather than
+            # a signal that only differs from field 6 in the single hour
+            # immediately before a transition.
+            cache[t, 7] = until_frac[t]
             cache[t, 8] = 0.0
             cache[t, 9] = 0.0
             cache[t, 10] = working
             cache[t, 11] = day_fraction
-            cache[t, 12] = t / self.n_steps
+            # Time-since-last-tariff-change, the complementary smooth ramp to
+            # field 7. Replaces the old t/n_steps sawtooth, which duplicated
+            # the sin/cos time-of-day encoding (fields 0/1) but discontinuously
+            # jumped 0.99->0.0 exactly at midnight -- the boundary where the
+            # cheap off-peak window begins.
+            cache[t, 12] = since_frac[t]
             if self.use_forecast:
                 cache[t, 13:17] = self._fc_features(t)
         self._obs_static = cache
+
+    def _tariff_transition_fractions(self):
+        """Per-step (steps-until-next-tariff-change, steps-since-last-change),
+        each normalized by n_steps and clipped to [0, 1]."""
+        tariff = self.tariff
+        n = self.n_steps
+        until_steps = np.empty(n, dtype=np.float64)
+        until_steps[n - 1] = 1.0
+        for t in range(n - 2, -1, -1):
+            if tariff[t + 1] != tariff[t]:
+                until_steps[t] = 1.0
+            else:
+                until_steps[t] = until_steps[t + 1] + 1.0
+        since_steps = np.empty(n, dtype=np.float64)
+        since_steps[0] = 0.0
+        for t in range(1, n):
+            if tariff[t] != tariff[t - 1]:
+                since_steps[t] = 0.0
+            else:
+                since_steps[t] = since_steps[t - 1] + 1.0
+        until_frac = np.clip(until_steps / n, 0.0, 1.0)
+        since_frac = np.clip(since_steps / n, 0.0, 1.0)
+        return until_frac, since_frac
 
     def _fc_features(self, t):
         """Real model predictions: next-hour and following-two-hour
@@ -400,6 +438,9 @@ class BESSEnv:
         state updates still run at the dataset's native resolution.
         """
         soc_before = self.soc
+        # Tariff at the moment the decision was made, before self.t advances
+        # (possibly across a day boundary) inside the native-step loop below.
+        tariff_at_decision = self.tariff[self.t]
         energy_cost_total = 0.0
         energy_delta_total = 0.0
         peak_delta_total = 0.0
@@ -436,8 +477,9 @@ class BESSEnv:
             if done:
                 break
 
-        phi_before = (soc_before - self.cfg.SOC_min) * self._phi_coef
-        phi_after = (self.soc - self.cfg.SOC_min) * self._phi_coef
+        phi_coef = self._phi_coef_base * tariff_at_decision
+        phi_before = (soc_before - self.cfg.SOC_min) * phi_coef
+        phi_after = (self.soc - self.cfg.SOC_min) * phi_coef
         shaping = self.gamma * phi_after - phi_before
         reward = (
             -(
