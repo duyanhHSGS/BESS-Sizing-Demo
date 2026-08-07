@@ -1,14 +1,13 @@
 """train_ppo2_dataset.py — Training loop for PPO2 (decomposed critics, PopArt, squashed Gaussian).
 
-Mirrors train_ppo_dataset.py but uses PPO2Agent's two-critic architecture:
-  - Separates env's energy_delta / peak_delta into two reward channels
-  - Stores latent (pre-tanh sample) in buffer for exact log-prob scoring
-  - Per-component GAE λ (lam_energy ~0.97, lam_peak ~0.5)
-  - Linear LR annealing over total steps
-  - KL-based early stopping
-  - Saves checkpoint with algo="ppo2" tag + PopArt normalizer state
-
-The same BESSEnv is reused as-is — no env changes needed.
+Senior-parity PPO2 experiment:
+  - Uses PPO2Env, not the original BESSEnv
+  - 17D causal/block-aware observation
+  - Physical-only action feasibility, fixed 30-minute demand blocks
+  - Decomposed energy/peak rewards with PopArt critics
+  - Latent-preserving tanh-squashed Gaussian PPO
+  - Separate actor/critic learning rates, low initial action std, KL early stop
+  - Forecast-free, one policy action per native data row
 """
 
 from __future__ import annotations
@@ -21,10 +20,10 @@ from pathlib import Path
 
 import numpy as np
 
-from bess.evaluation.baselines import run_drl_policy, run_no_bess
-from bess.core.bess_env import BESSEnv
+from bess.evaluation.baselines import run_no_bess
+from bess.core.ppo2_env import PPO2Env
 from bess.evaluation.benchmark import _rolling_30_minute_average
-from bess.core.common import RESULTS_DIR, score_month
+from bess.core.common import RESULTS_DIR, tariff_vector_day
 from bess.evaluation.oracle.oracle_cache import load_cached_training_grids
 from bess.agents.ppo2_agent import PPO2Agent, RolloutBuffer, resolve_ppo2_device
 from bess.core.scenario_gen import MonthData
@@ -36,10 +35,61 @@ from bess.training.training_common import (
     month_blocks,
 )
 from bess.training.training_reports import write_curve, write_report
-from bess.forecasting.weather_forecast import build_forecast_bundle, fit_attach_forecasts
+from bess.forecasting.weather_forecast import fit_attach_forecasts
 
-ROLLOUT_DAYS = 32
+ROLLOUT_DAYS = 30
 LOG_EVERY_UPDATES = 1
+PPO2_ACTOR_LR = 3e-5
+PPO2_CRITIC_LR = 3e-4
+PPO2_INIT_STD = 0.15
+PPO2_CLIP_PENALTY_PER_KWH = 100.0
+
+
+def _fixed_block_pmax_day(grid: np.ndarray, block_slots: int) -> float:
+    values = np.maximum(0.0, np.asarray(grid, dtype=np.float64))
+    if len(values) % block_slots != 0:
+        raise ValueError("grid day must contain complete fixed demand blocks")
+    if len(values) == 0:
+        return 0.0
+    return float(values.reshape(-1, block_slots).mean(axis=1).max(initial=0.0))
+
+
+def _score_ppo2_month(p_grid_days, cfg, *, days) -> dict:
+    block_slots = round(0.5 / cfg.dt)
+    energy = 0.0
+    peak = 0.0
+    for index, grid in enumerate(p_grid_days):
+        grid = np.maximum(0.0, np.asarray(grid, dtype=np.float64))
+        tariff = tariff_vector_day(cfg, days[index])
+        energy += float(np.sum(grid * tariff) * cfg.dt)
+        peak = max(peak, _fixed_block_pmax_day(grid, block_slots))
+    demand = peak * cfg.T_cap
+    return {
+        "energy_cost_vnd": energy,
+        "demand_cost_vnd": demand,
+        "total_cost_vnd": energy + demand,
+        "pmax_month_kw": peak,
+    }
+
+
+def _run_ppo2_policy(month: MonthData, cfg, agent, *, p_ref_kw: float) -> dict:
+    """Deterministic senior-parity rollout used for PPO2 validation/test."""
+    env = PPO2Env(
+        cfg,
+        p_ref_kw=p_ref_kw,
+        degradation_cost_per_kwh_discharged=50.0,
+        clip_penalty_per_kwh=PPO2_CLIP_PENALTY_PER_KWH,
+    )
+    obs = env.reset(month)
+    done = False
+    while not done:
+        action = agent.predict_action(obs)
+        obs, _reward, done, _info = env.step(action)
+    return {
+        "p_grid_days": env.log_grid,
+        "soc_days": env.log_soc,
+        "p_bess_days": env.log_pbess,
+    }
 
 
 def main() -> None:
@@ -115,13 +165,18 @@ def main() -> None:
     train_months = month_blocks(train_days)
     val_month = MonthData(days=val_days, source="val")
     gamma = args.gamma
-    env = BESSEnv(
+    if abs(args.control_dt_minutes - csv_dt * 60.0) > 1e-9:
+        raise SystemExit(
+            "PPO2 senior-parity mode requires one policy action per native data row; "
+            f"control_dt_minutes must equal {csv_dt * 60.0:g}"
+        )
+    if args.obs_variant != "base":
+        raise SystemExit("PPO2 senior-parity mode is forecast-free and requires --obs-variant base")
+    env = PPO2Env(
         cfg,
         p_ref_kw=p_ref,
-        d_run_init_kw=d_run0,
-        gamma=gamma,
-        control_dt_minutes=args.control_dt_minutes,
-        use_forecast=args.obs_variant == "fc",
+        degradation_cost_per_kwh_discharged=50.0,
+        clip_penalty_per_kwh=PPO2_CLIP_PENALTY_PER_KWH,
     )
     learner_device = resolve_ppo2_device(args.device)
     agent = PPO2Agent(
@@ -129,24 +184,33 @@ def main() -> None:
         gamma=gamma,
         lam_energy=args.lam_energy,
         lam_peak=args.lam_peak,
+        actor_lr=PPO2_ACTOR_LR,
+        critic_lr=PPO2_CRITIC_LR,
+        log_std_init=math.log(PPO2_INIT_STD),
         seed=args.seed,
         device=learner_device,
     )
-    assert abs(env.gamma - agent.gamma) < 1e-12
     agent.meta = {
         "p_ref_kw": p_ref,
         "e_cap_kwh": args.e_cap,
         "p_rated_kw": args.p_rated,
         "obs_variant": args.obs_variant,
         "obs_dim": env.obs_dim,
-        "d_run_init_kw": d_run0,
+        "observation_schema": "senior_causal_block_aware",
+        "action_distribution": "tanh_squashed_gaussian",
+        "action_mapping": "physical_feasible_only",
+        "demand_window": "fixed_30m_block_v1",
         "gamma": gamma,
         "lam_energy": args.lam_energy,
         "lam_peak": args.lam_peak,
         "native_dt_minutes": csv_dt * 60.0,
-        "control_dt_minutes": env.control_dt_minutes,
-        "native_steps_per_action": env.native_steps_per_action,
+        "control_dt_minutes": csv_dt * 60.0,
+        "native_steps_per_action": 1,
         "billing_mode": billing,
+        "actor_learning_rate": PPO2_ACTOR_LR,
+        "critic_learning_rate": PPO2_CRITIC_LR,
+        "initial_action_std": PPO2_INIT_STD,
+        "clip_penalty_per_kwh": PPO2_CLIP_PENALTY_PER_KWH,
         "device_requested": args.device,
         "device": learner_device,
         "train_csv": str(args.csv),
@@ -159,14 +223,16 @@ def main() -> None:
         agent.meta["weather_data"] = str(Path(args.weather_data))
         agent.meta["forecast_embedded"] = True
         # PPO2Agent doesn't carry a forecast_bundle attribute; skip embedding
-    decisions_per_day = len(days[0].load) // env.native_steps_per_action
+    decisions_per_day = len(days[0].load)
     buffer = RolloutBuffer(decisions_per_day * ROLLOUT_DAYS, env.obs_dim)
 
-    val_base = score_month(run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
+    val_base = _score_ppo2_month(
+        run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_days
+    )["total_cost_vnd"]
     oracle_grids = load_cached_training_grids(
         args.oracle_cache, [day.day_index for day in val_days]
     )
-    val_oracle = score_month(oracle_grids, cfg, days=val_days)["total_cost_vnd"]
+    val_oracle = _score_ppo2_month(oracle_grids, cfg, days=val_days)["total_cost_vnd"]
     curve_path = RESULTS_DIR / f"training_curve_{tag}.csv"
     report_path = RESULTS_DIR / f"training_report_{tag}.json"
     report = {
@@ -193,8 +259,8 @@ def main() -> None:
             "lam_peak": args.lam_peak,
             "rollout_days": ROLLOUT_DAYS,
             "native_dt_minutes": csv_dt * 60.0,
-            "control_dt_minutes": env.control_dt_minutes,
-            "native_steps_per_action": env.native_steps_per_action,
+            "control_dt_minutes": csv_dt * 60.0,
+            "native_steps_per_action": 1,
             "device_requested": args.device,
             "device": "cpu",
         },
@@ -210,7 +276,7 @@ def main() -> None:
         f"val {len(val_days)} / test {len(test_days)} | "
         f"gamma {gamma:g} | lam_E {args.lam_energy:g} lam_P {args.lam_peak:g} | "
         f"cpu learner | "
-        f"native dt {csv_dt * 60:g}m | control dt {env.control_dt_minutes:g}m | "
+        f"native dt {csv_dt * 60:g}m | control dt {csv_dt * 60:g}m | "
         f"p_ref {p_ref:.0f} | val no-BESS {val_base/1e6:.0f}M, oracle {val_oracle/1e6:.0f}M",
         flush=True,
     )
@@ -266,7 +332,7 @@ def main() -> None:
     augment_started = time.perf_counter()
     first_month = train_months[0] if args.obs_variant == "fc" else augment_month(train_months[0], rng)
     perf["augment"] += time.perf_counter() - augment_started
-    obs = env.reset(first_month)
+    obs = env.reset(first_month, d_run_shaping_init_kw=d_run0)
     steps = 0
     updates = 0
     started = time.time()
@@ -275,36 +341,41 @@ def main() -> None:
         # PPO2Agent.act() returns (action, logp, latent, v_e, v_p)
         action, logp, latent, v_e, v_p = agent.act(obs)
         next_obs, reward, done, step_info = env.step(action)
-        # Decomposed rewards from the env's info dict
-        rew_e = -float(step_info.get("energy_delta", 0)) / 1e6  # undo REWARD_SCALE
-        rew_p = -float(step_info.get("peak_delta", 0)) / 1e6
-        buffer.add(obs, action, latent, logp, rew_e, rew_p, v_e, v_p, float(done))
+        rew_e = -(
+            float(step_info["rew_energy_delta"])
+            + float(step_info["rew_deg_cost"])
+            + float(step_info["rew_terminal_cost"])
+            + float(step_info["rew_clip_cost"])
+        ) / env.reward_scale_vnd
+        rew_p = -float(step_info["rew_peak_delta"]) / env.reward_scale_vnd
+        if not step_info["action_held"]:
+            buffer.add(obs, action, latent, logp, rew_e, rew_p, v_e, v_p, float(done))
         steps += 1
         perf["decisions"] += 1
-        perf["native_rows"] += int(step_info["native_rows"])
+        perf["native_rows"] += 1
         if done:
             month_index += 1
             augment_started = time.perf_counter()
             source_month = train_months[month_index % len(train_months)]
             next_month = source_month if args.obs_variant == "fc" else augment_month(source_month, rng)
             perf["augment"] += time.perf_counter() - augment_started
-            next_obs = env.reset(next_month)
+            next_obs = env.reset(next_month, d_run_shaping_init_kw=d_run0)
         obs = next_obs
-        # LR annealing proportional to progress
-        agent.anneal_lr(steps / args.steps)
+        # Senior parity: anneal immediately before each PPO update.
         if not buffer.full():
             continue
         perf["rollout"] += time.perf_counter() - rollout_started
         updates += 1
         update_started = time.perf_counter()
         _, _, _, last_v_e, last_v_p = agent.act(obs)
+        agent.anneal_lr(steps / max(1, args.steps))
         agent.update(buffer, 0.0 if done else last_v_e, 0.0 if done else last_v_p)
         perf["update"] += time.perf_counter() - update_started
         validation_started = time.perf_counter()
-        result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
+        result = _run_ppo2_policy(val_month, cfg, agent, p_ref_kw=p_ref)
         perf["validation"] += time.perf_counter() - validation_started
         scoring_started = time.perf_counter()
-        val_cost = score_month(result["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
+        val_cost = _score_ppo2_month(result["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
         perf["scoring"] += time.perf_counter() - scoring_started
         saving = (val_base - val_cost) / val_base * 100
         gap = (val_cost - val_oracle) / val_oracle * 100
@@ -344,8 +415,8 @@ def main() -> None:
         rollout_started = time.perf_counter()
 
     if not curve:
-        result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
-        val_cost = score_month(result["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
+        result = _run_ppo2_policy(val_month, cfg, agent, p_ref_kw=p_ref)
+        val_cost = _score_ppo2_month(result["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
         saving = (val_base - val_cost) / val_base * 100
         gap = (val_cost - val_oracle) / val_oracle * 100
         curve.append({"steps": steps, "val_cost_vnd": val_cost, "oracle_gap_pct": gap, "saving_vs_nobess_pct": saving})
@@ -363,9 +434,11 @@ def main() -> None:
     test_month = MonthData(days=test_days, source="test")
     best_agent = PPO2Agent(env.obs_dim, seed=args.seed, device=learner_device)
     best_agent.load(RESULTS_DIR / f"policy_{tag}.pt")
-    result = run_drl_policy(test_month, cfg, best_agent, p_ref_kw=p_ref)
-    test_cost = score_month(result["p_grid_days"], cfg, days=test_days)["total_cost_vnd"]
-    no_bess_cost = score_month(run_no_bess(test_month, cfg)["p_grid_days"], cfg, days=test_days)["total_cost_vnd"]
+    result = _run_ppo2_policy(test_month, cfg, best_agent, p_ref_kw=p_ref)
+    test_cost = _score_ppo2_month(result["p_grid_days"], cfg, days=test_days)["total_cost_vnd"]
+    no_bess_cost = _score_ppo2_month(
+        run_no_bess(test_month, cfg)["p_grid_days"], cfg, days=test_days
+    )["total_cost_vnd"]
     test_saving = (no_bess_cost - test_cost) / no_bess_cost * 100
     best_agent.meta = {**agent.meta, "test_saving_pct": round(test_saving, 2), "trained": date.today().isoformat()}
     best_agent.save(RESULTS_DIR / f"policy_{tag}.pt")

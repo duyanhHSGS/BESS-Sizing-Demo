@@ -22,7 +22,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from bess.core.settings import PPO_GAMMA
+from bess.core.settings import PPO2_GAMMA
 
 torch.set_num_threads(6)
 
@@ -250,13 +250,13 @@ def compute_gae(
 class PPO2Agent:
     """PPO with reward-decomposed critics, PopArt, and squashed Gaussian policy."""
 
-    def __init__(self, obs_dim: int, lr=1e-4, gamma=PPO_GAMMA,
-                 lam_energy=0.97, lam_peak=0.5,
+    def __init__(self, obs_dim: int, lr=1e-4, gamma=PPO2_GAMMA,
+                 lam_energy=0.97, lam_peak=0.97,
                  clip=0.2, epochs=6, minibatch=256, ent_coef=0.01,
                  vf_coef=0.5, target_kl=0.01, seed=0,
                  actor_lr: float | None = None,
                  critic_lr: float | None = None,
-                 log_std_init: float = -0.5,
+                 log_std_init: float = float(np.log(0.15)),
                  device: str = "auto"):
         torch.manual_seed(seed)
         self._rng = np.random.default_rng(seed)
@@ -411,6 +411,8 @@ class PPO2Agent:
 
         self._sync_collector()
         self.diagnostics = {
+            "adv_share_energy": _adv_share_of_return(ret_e, buf.val_e[:n]),
+            "adv_share_peak": _adv_share_of_return(ret_p, buf.val_p[:n]),
             "adv_raw_std": adv_raw_std,
             "adv_near_zero_pct": float(100.0 * np.mean(np.abs(adv_e + adv_p) < 1e-3)),
             "approx_kl": approx_kl,

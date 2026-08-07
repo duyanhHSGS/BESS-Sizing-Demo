@@ -80,7 +80,7 @@ GREPO_GAMMA = 0.995
 GREPRO_GAMMA = 0.995
 PPO2_GAMMA = 1.0
 PPO2_LAM_ENERGY = 0.97
-PPO2_LAM_PEAK = 0.5
+PPO2_LAM_PEAK = 0.97
 
 # Live UI data: main.py uses these when optional sample sizing is enabled.
 SAMPLE_BATTERY_CANDIDATES = tuple(
