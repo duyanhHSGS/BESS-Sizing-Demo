@@ -112,14 +112,13 @@ class BESSEnv:
         self.base_obs_dim = OBS_DIM_FC if self.use_forecast else OBS_DIM
         self.extra_obs_dim = int(extra_obs_dim)
         self.obs_dim = self.base_obs_dim + self.extra_obs_dim
-        base_tar = tariff_vector(cfg)
-        self._tar_base = base_tar
-        # Ch nht khng cao im (quy tc EVN, bt qua TOU_RULES):
-        # vector ring, hon i ti bin ngy trong reset()/step()
+        normal_day_tariff = tariff_vector(cfg)
+        self._tar_base = normal_day_tariff
+        # Sunday can use a separate tariff with peak pricing removed.
         from bess.core.common import TOU_RULES, cfg_no_peak
         if TOU_RULES.get("sunday_no_peak"):
-            sun = tariff_vector(cfg_no_peak(cfg))
-            self._tar_sun = sun
+            sunday_tariff = tariff_vector(cfg_no_peak(cfg))
+            self._tar_sun = sunday_tariff
         else:
             self._tar_sun = self._tar_base
         self.tariff = self._tar_base
@@ -132,20 +131,16 @@ class BESSEnv:
         self._refresh_cached_coefficients()
 
     def _refresh_cached_coefficients(self) -> None:
-        cfg = self.cfg
+        config = self.cfg
         self._inv_p_ref = 1.0 / self.p_ref
-        self._inv_peak_price = 1.0 / cfg.price_peak
-        self._soc_charge_coeff = self.dt * cfg.eta_ch / cfg.E_cap
-        self._soc_discharge_coeff = self.dt / (cfg.eta_dis * cfg.E_cap)
-        self._available_power_coeff = cfg.E_cap * cfg.eta_dis / self.dt
-        self._room_power_coeff = cfg.E_cap / (cfg.eta_ch * self.dt)
-        # Not multiplied by price here: the shaping potential must use the
-        # *time-varying* tariff at the decision step (see step()), otherwise
-        # the dense per-step shaping reward pays identical credit for storing
-        # energy regardless of what hour it was charged, which swamps the
-        # much sparser energy_delta term that actually discriminates cheap
-        # vs. expensive charging hours.
-        self._phi_coef_base = cfg.E_cap * cfg.eta_dis
+        self._inv_peak_price = 1.0 / config.price_peak
+        self._soc_charge_coeff = self.dt * config.eta_ch / config.E_cap
+        self._soc_discharge_coeff = self.dt / (config.eta_dis * config.E_cap)
+        self._available_power_coeff = config.E_cap * config.eta_dis / self.dt
+        self._room_power_coeff = config.E_cap / (config.eta_ch * self.dt)
+        # Base stored-energy value used by the SOC shaping reward.
+        # The current tariff is multiplied in later inside step().
+        self._phi_coef_base = config.E_cap * config.eta_dis
 
     def _reset_demand_window(self) -> None:
         self._roll_grid = np.zeros(self.roll_k, dtype=np.float64)
@@ -157,40 +152,44 @@ class BESSEnv:
 
     # ------------------------------------------------------------------
     def _configure_control_interval(self) -> None:
-        native_minutes = self.dt * 60.0
-        control_minutes = self.control_dt_minutes
-        ratio = control_minutes / native_minutes
-        rounded_ratio = round(ratio)
+        native_step_minutes = self.dt * 60.0
+        control_step_minutes = self.control_dt_minutes
+        native_steps_per_control_step = control_step_minutes / native_step_minutes
+        rounded_native_steps = round(native_steps_per_control_step)
         if (
-            not np.isfinite(control_minutes)
-            or control_minutes < native_minutes - 1e-9
-            or abs(ratio - rounded_ratio) > 1e-9
-            or abs(30.0 / control_minutes - round(30.0 / control_minutes)) > 1e-9
-            or abs(1440.0 / control_minutes - round(1440.0 / control_minutes)) > 1e-9
+            not np.isfinite(control_step_minutes)
+            or control_step_minutes < native_step_minutes - 1e-9
+            or abs(native_steps_per_control_step - rounded_native_steps) > 1e-9
+            or abs(30.0 / control_step_minutes - round(30.0 / control_step_minutes)) > 1e-9
+            or abs(1440.0 / control_step_minutes - round(1440.0 / control_step_minutes)) > 1e-9
         ):
             raise ValueError(
                 "control_dt_minutes must be a native-or-coarser multiple "
                 "that divides both 30 minutes and 24 hours"
             )
-        self.native_steps_per_action = int(rounded_ratio)
+        self.native_steps_per_action = int(rounded_native_steps)
 
     # ------------------------------------------------------------------
     def reset(self, month: MonthData, soc_init: float | None = None,
               static_observation_cache: np.ndarray | None = None) -> np.ndarray:
         self.month = month
         if month.days:
-            detected_steps = len(month.days[0].load)
-            if detected_steps <= 0:
+            data_steps_per_day = len(month.days[0].load)
+            if data_steps_per_day <= 0:
                 raise ValueError("month contains an empty day")
-            if detected_steps != self.n_steps:
-                self.n_steps = detected_steps
+            if data_steps_per_day != self.n_steps:
+                self.n_steps = data_steps_per_day
                 self.dt = dt_from_steps_per_day(self.n_steps)
                 self.cfg.dt = self.dt
                 self.roll_k = max(1, int(round(0.5 / self.dt)))
                 self._configure_control_interval()
                 self._tar_base = tariff_vector(self.cfg)
                 from bess.core.common import TOU_RULES, cfg_no_peak
-                self._tar_sun = tariff_vector(cfg_no_peak(self.cfg)) if TOU_RULES.get("sunday_no_peak") else self._tar_base
+                self._tar_sun = (
+                    tariff_vector(cfg_no_peak(self.cfg))
+                    if TOU_RULES.get("sunday_no_peak")
+                    else self._tar_base
+                )
                 self._refresh_cached_coefficients()
         self.day = 0
         self.t = 0
@@ -216,8 +215,8 @@ class BESSEnv:
         if static_observation_cache is None:
             self._cache_static_observations()
         else:
-            expected = (self.n_steps, self.obs_dim)
-            if static_observation_cache.shape != expected:
+            expected_cache_shape = (self.n_steps, self.obs_dim)
+            if static_observation_cache.shape != expected_cache_shape:
                 raise ValueError(
                     "static observation cache has incompatible shape"
                 )
@@ -226,280 +225,356 @@ class BESSEnv:
 
     def _set_day_tariff(self):
         from bess.core.common import is_sunday
-        day = self.month.days[self.day]
-        self.tariff = self._tar_sun if is_sunday(day) else self._tar_base
+        current_day = self.month.days[self.day]
+        self.tariff = self._tar_sun if is_sunday(current_day) else self._tar_base
 
     def _make_day_forecast(self):
         if not self.use_forecast:
             return
-        day = self.month.days[self.day]
-        forecast = getattr(day, "forecast", None)
-        expected = (self.n_steps, 4)
-        if forecast is None or np.asarray(forecast).shape != expected:
+        current_day = self.month.days[self.day]
+        forecast_values = getattr(current_day, "forecast", None)
+        expected_forecast_shape = (self.n_steps, 4)
+        if (
+            forecast_values is None
+            or np.asarray(forecast_values).shape != expected_forecast_shape
+        ):
             raise ValueError(
-                f"forecast mode requires real causal predictions shaped {expected}"
+                "forecast mode requires real causal predictions shaped "
+                f"{expected_forecast_shape}"
             )
-        if not np.isfinite(forecast).all():
+        if not np.isfinite(forecast_values).all():
             raise ValueError("forecast predictions contain non-finite values")
 
     def _cache_static_observations(self):
         """Cache observation fields that cannot change within the day."""
-        day = self.month.days[self.day]
-        cache = np.empty((self.n_steps, self.obs_dim), dtype=np.float32)
-        inv_ref = self._inv_p_ref
-        working = 1.0 if day.day_type == "working" else 0.0
-        day_fraction = self.day * self._day_fraction
-        until_frac, since_frac = self._tariff_transition_fractions()
-        for t in range(self.n_steps):
-            load, pv = day.load[t], day.pv[t]
-            eff = max(0.0, load - pv)
-            sur = max(0.0, pv - load)
-            angle = 2.0 * np.pi * t / self.n_steps
-            cache[t, 0] = np.sin(angle)
-            cache[t, 1] = np.cos(angle)
-            cache[t, 2] = eff * inv_ref
-            cache[t, 3] = pv * inv_ref
-            cache[t, 4] = sur * inv_ref
-            cache[t, 5] = 0.0
-            cache[t, 6] = self.tariff[t] * self._inv_peak_price
+        current_day = self.month.days[self.day]
+        observation_cache = np.empty((self.n_steps, self.obs_dim), dtype=np.float32)
+        inverse_reference_power = self._inv_p_ref
+        is_working_day = 1.0 if current_day.day_type == "working" else 0.0
+        month_progress = self.day * self._day_fraction
+        time_until_tariff_change, time_since_tariff_change = self._tariff_transition_fractions()
+        for time_step in range(self.n_steps):
+            load_kw = current_day.load[time_step]
+            pv_kw = current_day.pv[time_step]
+            net_load_kw = max(0.0, load_kw - pv_kw)
+            pv_surplus_kw = max(0.0, pv_kw - load_kw)
+            time_angle = 2.0 * np.pi * time_step / self.n_steps
+            observation_cache[time_step, 0] = np.sin(time_angle)
+            observation_cache[time_step, 1] = np.cos(time_angle)
+            observation_cache[time_step, 2] = net_load_kw * inverse_reference_power
+            observation_cache[time_step, 3] = pv_kw * inverse_reference_power
+            observation_cache[time_step, 4] = pv_surplus_kw * inverse_reference_power
+            observation_cache[time_step, 5] = 0.0
+            observation_cache[time_step, 6] = self.tariff[time_step] * self._inv_peak_price
             # Smooth countdown to the next tariff change (1/n_steps per step
             # remaining), instead of an abrupt one-hour-ahead step: gives the
             # agent an anticipatory ramp toward price drops/rises rather than
             # a signal that only differs from field 6 in the single hour
             # immediately before a transition.
-            cache[t, 7] = until_frac[t]
-            cache[t, 8] = 0.0
-            cache[t, 9] = 0.0
-            cache[t, 10] = working
-            cache[t, 11] = day_fraction
+            observation_cache[time_step, 7] = time_until_tariff_change[time_step]
+            observation_cache[time_step, 8] = 0.0
+            observation_cache[time_step, 9] = 0.0
+            observation_cache[time_step, 10] = is_working_day
+            observation_cache[time_step, 11] = month_progress
             # Time-since-last-tariff-change, the complementary smooth ramp to
             # field 7. Replaces the old t/n_steps sawtooth, which duplicated
             # the sin/cos time-of-day encoding (fields 0/1) but discontinuously
             # jumped 0.99->0.0 exactly at midnight -- the boundary where the
             # cheap off-peak window begins.
-            cache[t, 12] = since_frac[t]
+            observation_cache[time_step, 12] = time_since_tariff_change[time_step]
             if self.use_forecast:
-                cache[t, 13:17] = self._fc_features(t)
-        self._obs_static = cache
+                observation_cache[time_step, 13:17] = self._fc_features(time_step)
+        self._obs_static = observation_cache
 
     def _tariff_transition_fractions(self):
         """Per-step (steps-until-next-tariff-change, steps-since-last-change),
         each normalized by n_steps and clipped to [0, 1]."""
-        tariff = self.tariff
-        n = self.n_steps
-        until_steps = np.empty(n, dtype=np.float64)
-        until_steps[n - 1] = 1.0
-        for t in range(n - 2, -1, -1):
-            if tariff[t + 1] != tariff[t]:
-                until_steps[t] = 1.0
+        tariff_by_step = self.tariff
+        steps_per_day = self.n_steps
+        steps_until_change = np.empty(steps_per_day, dtype=np.float64)
+        steps_until_change[steps_per_day - 1] = 1.0
+        for time_step in range(steps_per_day - 2, -1, -1):
+            if tariff_by_step[time_step + 1] != tariff_by_step[time_step]:
+                steps_until_change[time_step] = 1.0
             else:
-                until_steps[t] = until_steps[t + 1] + 1.0
-        since_steps = np.empty(n, dtype=np.float64)
-        since_steps[0] = 0.0
-        for t in range(1, n):
-            if tariff[t] != tariff[t - 1]:
-                since_steps[t] = 0.0
+                steps_until_change[time_step] = steps_until_change[time_step + 1] + 1.0
+        steps_since_change = np.empty(steps_per_day, dtype=np.float64)
+        steps_since_change[0] = 0.0
+        for time_step in range(1, steps_per_day):
+            if tariff_by_step[time_step] != tariff_by_step[time_step - 1]:
+                steps_since_change[time_step] = 0.0
             else:
-                since_steps[t] = since_steps[t - 1] + 1.0
-        until_frac = np.clip(until_steps / n, 0.0, 1.0)
-        since_frac = np.clip(since_steps / n, 0.0, 1.0)
-        return until_frac, since_frac
+                steps_since_change[time_step] = steps_since_change[time_step - 1] + 1.0
+        time_until_change = np.clip(steps_until_change / steps_per_day, 0.0, 1.0)
+        time_since_change = np.clip(steps_since_change / steps_per_day, 0.0, 1.0)
+        return time_until_change, time_since_change
 
-    def _fc_features(self, t):
+    def _fc_features(self, time_step):
         """Real model predictions: next-hour and following-two-hour
         effective load/PV means, already normalized by p_ref."""
-        return self.month.days[self.day].forecast[t]
+        return self.month.days[self.day].forecast[time_step]
 
     # ------------------------------------------------------------------
     def _obs(self) -> np.ndarray:
-        t = self.t
+        time_step = self.t
         # A fresh array is required because callers retain the current
         # observation until after step() has produced the next one.
-        base = self._obs_static[t].copy()
-        base[5] = self.soc
-        base[8] = self.d_run * self._inv_p_ref
-        base[9] = self.g_prev * self._inv_p_ref
-        self._fill_extra_observation(base, t)
-        return base
+        observation = self._obs_static[time_step].copy()
+        observation[5] = self.soc
+        observation[8] = self.d_run * self._inv_p_ref
+        observation[9] = self.g_prev * self._inv_p_ref
+        self._fill_extra_observation(observation, time_step)
+        return observation
 
-    def _fill_extra_observation(self, observation: np.ndarray, t: int) -> None:
+    def _fill_extra_observation(self, observation: np.ndarray, time_step: int) -> None:
         """Subclass hook for code-native controller context fields."""
 
     # ------------------------------------------------------------------
     def project_action(self, a: float, load: float, pv: float):
-        """Safety projection. Returns (d, cg, cp) all >= 0, AC kW.
-        d = discharge to load, cg = charge from grid, cp = charge from
-        free PV surplus. Guarantees grid = eff + cg - d >= 0 and SOC in
-        [SOC_min, SOC_max] after the step."""
-        cfg = self.cfg
-        eff = max(0.0, load - pv)
-        sur = max(0.0, pv - load)
-        p_des = float(np.clip(a, -1.0, 1.0)) * cfg.P_rated_nominal
-        if p_des >= 0.0:                               # discharge request
-            avail = max(0.0, (self.soc - cfg.SOC_min)
-                        * self._available_power_coeff)
-            d = min(p_des, cfg.P_rated_nominal, eff, avail)
-            return d, 0.0, 0.0
-        room = max(0.0, (cfg.SOC_max - self.soc)
-                   * self._room_power_coeff)
-        ch = min(-p_des, cfg.P_rated_nominal, room)
-        cp = min(ch, sur)                              # free PV first
-        # peak-safe: grid-charging may never set a new monthly peak itself
-        cg_cap = max(0.0, self.d_run - eff)
-        cg = min(ch - cp, cg_cap)
-        return 0.0, cg, cp
+        """Turn the PPO request into safe battery power values.
+
+        Returns ``(discharge_kw, grid_charge_kw, pv_charge_kw)``.
+        All three values are non-negative AC kW.
+        """
+        config = self.cfg
+        net_load_kw = max(0.0, load - pv)
+        pv_surplus_kw = max(0.0, pv - load)
+        requested_battery_kw = (
+            float(np.clip(a, -1.0, 1.0)) * config.P_rated_nominal
+        )
+
+        if requested_battery_kw >= 0.0:  # positive action = discharge
+            available_discharge_kw = max(
+                0.0,
+                (self.soc - config.SOC_min) * self._available_power_coeff,
+            )
+            discharge_kw = min(
+                requested_battery_kw,
+                config.P_rated_nominal,
+                net_load_kw,
+                available_discharge_kw,
+            )
+            return discharge_kw, 0.0, 0.0
+
+        available_charge_room_kw = max(
+            0.0,
+            (config.SOC_max - self.soc) * self._room_power_coeff,
+        )
+        requested_charge_kw = min(
+            -requested_battery_kw,
+            config.P_rated_nominal,
+            available_charge_room_kw,
+        )
+        pv_charge_kw = min(requested_charge_kw, pv_surplus_kw)  # free PV first
+
+        # Peak-safe rule: grid charging may not create a new monthly peak.
+        grid_charge_limit_kw = max(0.0, self.d_run - net_load_kw)
+        grid_charge_kw = min(
+            requested_charge_kw - pv_charge_kw,
+            grid_charge_limit_kw,
+        )
+        return 0.0, grid_charge_kw, pv_charge_kw
 
     # ------------------------------------------------------------------
     def _step_native(self, action: float):
-        cfg = self.cfg
-        day = self.month.days[self.day]
-        t = self.t
-        load, pv = float(day.load[t]), float(day.pv[t])
-        eff = max(0.0, load - pv)
+        """Run one native data step, such as one minute or 15 minutes."""
+        config = self.cfg
+        current_day = self.month.days[self.day]
+        time_step = self.t
+        load_kw = float(current_day.load[time_step])
+        pv_kw = float(current_day.pv[time_step])
+        net_load_kw = max(0.0, load_kw - pv_kw)
 
-        d, cg, cp = self.project_action(action, load, pv)
-        self._last_p_bess_kw = d - (cg + cp)
-        grid = eff + cg - d                            # >= 0 by construction
-        self.soc = self.soc + (cg + cp) * self._soc_charge_coeff \
-                   - d * self._soc_discharge_coeff
-        # numerical guard only  projection already bounds SOC
-        self.soc = min(cfg.SOC_max, max(cfg.SOC_min, self.soc))
+        discharge_kw, grid_charge_kw, pv_charge_kw = self.project_action(
+            action,
+            load_kw,
+            pv_kw,
+        )
+        battery_power_kw = discharge_kw - (grid_charge_kw + pv_charge_kw)
+        self._last_p_bess_kw = battery_power_kw
+        grid_import_kw = net_load_kw + grid_charge_kw - discharge_kw
 
-        # --- costs (actual, for logging/scoring) ------------------------
-        energy_cost = self.tariff[t] * grid * self.dt
-        pos = self._roll_pos
+        total_charge_kw = grid_charge_kw + pv_charge_kw
+        self.soc = (
+            self.soc
+            + total_charge_kw * self._soc_charge_coeff
+            - discharge_kw * self._soc_discharge_coeff
+        )
+        # Numerical guard only; project_action already keeps SOC in bounds.
+        self.soc = min(config.SOC_max, max(config.SOC_min, self.soc))
+
+        # --- actual electricity cost -----------------------------------
+        electricity_cost = self.tariff[time_step] * grid_import_kw * self.dt
+
+        # --- rolling 30-minute demand meter ----------------------------
+        rolling_index = self._roll_pos
         if self._roll_count == self.roll_k:
-            self._roll_grid_sum -= self._roll_grid[pos]
-            self._roll_nb_sum -= self._roll_nb[pos]
+            self._roll_grid_sum -= self._roll_grid[rolling_index]
+            self._roll_nb_sum -= self._roll_nb[rolling_index]
         else:
             self._roll_count += 1
-        self._roll_grid[pos] = grid
-        self._roll_nb[pos] = eff
-        self._roll_grid_sum += grid
-        self._roll_nb_sum += eff
-        self._roll_pos = (pos + 1) % self.roll_k
+
+        self._roll_grid[rolling_index] = grid_import_kw
+        self._roll_nb[rolling_index] = net_load_kw
+        self._roll_grid_sum += grid_import_kw
+        self._roll_nb_sum += net_load_kw
+        self._roll_pos = (rolling_index + 1) % self.roll_k
+
         if self._roll_count < self.roll_k:
-            d_t = 0.0                    # cha  ca s 30' u ngy
-            d_t_nb = 0.0
+            rolling_demand_kw = 0.0
+            no_bess_rolling_demand_kw = 0.0
         else:
-            d_t = self._roll_grid_sum / self.roll_k
-            d_t_nb = self._roll_nb_sum / self.roll_k
-        peak_pen = cfg.T_cap * max(0.0, d_t - self.d_run)
-        self.d_run = max(self.d_run, d_t)
-        peak_pen_nb = cfg.T_cap * max(0.0, d_t_nb - self.d_run_nb)
-        self.d_run_nb = max(self.d_run_nb, d_t_nb)
-        deg_cost = self.deg * (d + cg + cp) * self.dt
+            rolling_demand_kw = self._roll_grid_sum / self.roll_k
+            no_bess_rolling_demand_kw = self._roll_nb_sum / self.roll_k
 
-        # --- reward: counterfactual delta vs no-BESS ---------------------
-        energy_delta = self.tariff[t] * (cg - d) * self.dt
-        peak_delta = peak_pen - peak_pen_nb
-        # --- logs ------------------------------------------------------
+        demand_peak_penalty = config.T_cap * max(
+            0.0,
+            rolling_demand_kw - self.d_run,
+        )
+        self.d_run = max(self.d_run, rolling_demand_kw)
+
+        no_bess_peak_penalty = config.T_cap * max(
+            0.0,
+            no_bess_rolling_demand_kw - self.d_run_nb,
+        )
+        self.d_run_nb = max(self.d_run_nb, no_bess_rolling_demand_kw)
+
+        battery_wear_cost = (
+            self.deg
+            * (discharge_kw + grid_charge_kw + pv_charge_kw)
+            * self.dt
+        )
+
+        # --- reward pieces: BESS world minus no-BESS world -------------
+        battery_energy_cost_delta = (
+            self.tariff[time_step] * (grid_charge_kw - discharge_kw) * self.dt
+        )
+        demand_peak_cost_delta = demand_peak_penalty - no_bess_peak_penalty
+
+        # --- logs -------------------------------------------------------
         if self.record_trajectory:
-            self.log_grid[self.day][t] = grid
-            self.log_pbess[self.day][t] = d - (cg + cp)
-            self.log_soc[self.day][t + 1] = self.soc
-        self.g_prev = grid
-        self.g_prev_nb = eff
+            self.log_grid[self.day][time_step] = grid_import_kw
+            self.log_pbess[self.day][time_step] = battery_power_kw
+            self.log_soc[self.day][time_step + 1] = self.soc
+        self.g_prev = grid_import_kw
+        self.g_prev_nb = net_load_kw
 
-        # --- advance ---------------------------------------------------
+        # --- move time forward -----------------------------------------
         self.t += 1
-        done = False
+        episode_done = False
         if self.t >= self.n_steps:
             self.t = 0
             self.day += 1
-            self.g_prev = 0.0        # billing windows do not straddle days
+            self.g_prev = 0.0  # billing windows do not straddle days
             self.g_prev_nb = 0.0
             self._reset_demand_window()
             if self.day >= len(self.month.days):
-                done = True
+                episode_done = True
             else:
                 if self.record_trajectory:
                     self.log_soc[self.day][0] = self.soc
                 self._set_day_tariff()
                 self._make_day_forecast()
                 self._cache_static_observations()
-        obs = None if done else self._obs()
+
+        next_observation = None if episode_done else self._obs()
         return (
-            obs,
-            done,
-            grid,
-            energy_cost,
-            energy_delta,
-            peak_delta,
-            deg_cost,
-            peak_pen,
-            peak_pen_nb,
+            next_observation,
+            episode_done,
+            grid_import_kw,
+            electricity_cost,
+            battery_energy_cost_delta,
+            demand_peak_cost_delta,
+            battery_wear_cost,
+            demand_peak_penalty,
+            no_bess_peak_penalty,
         )
 
     def step(self, action: float):
-        """Apply one policy decision over one control interval.
+        """Apply one PPO decision over one control interval.
 
-        The requested action is held, but projection and all physical/billing
-        state updates still run at the dataset's native resolution.
+        The same requested action is held for every native data row inside the
+        control interval, while battery physics and billing still update on
+        every native row.
         """
-        soc_before = self.soc
-        # Tariff at the moment the decision was made, before self.t advances
-        # (possibly across a day boundary) inside the native-step loop below.
-        tariff_at_decision = self.tariff[self.t]
-        energy_cost_total = 0.0
-        energy_delta_total = 0.0
-        peak_delta_total = 0.0
-        deg_cost_total = 0.0
-        peak_pen_total = 0.0
-        peak_pen_nb_total = 0.0
-        obs = None
-        done = False
-        grid = 0.0
-        native_rows = 0
-        throughput_kwh = 0.0
-        abs_p_bess_sum = 0.0
+        soc_before_action = self.soc
+        # Save the tariff seen when PPO made this decision. The native-step loop
+        # below may move time forward or even cross midnight.
+        decision_tariff = self.tariff[self.t]
+
+        total_electricity_cost = 0.0
+        total_battery_energy_cost_delta = 0.0
+        total_demand_peak_cost_delta = 0.0
+        total_battery_wear_cost = 0.0
+        total_demand_peak_penalty = 0.0
+        total_no_bess_peak_penalty = 0.0
+        next_observation = None
+        episode_done = False
+        grid_import_kw = 0.0
+        native_steps_run = 0
+        battery_throughput_kwh = 0.0
+        total_absolute_battery_power_kw = 0.0
+
         for _ in range(self.native_steps_per_action):
             (
-                obs,
-                done,
-                grid,
-                energy_cost,
-                energy_delta,
-                peak_delta,
-                deg_cost,
-                peak_pen,
-                peak_pen_nb,
+                next_observation,
+                episode_done,
+                grid_import_kw,
+                electricity_cost,
+                battery_energy_cost_delta,
+                demand_peak_cost_delta,
+                battery_wear_cost,
+                demand_peak_penalty,
+                no_bess_peak_penalty,
             ) = self._step_native(action)
-            native_rows += 1
-            throughput_kwh += abs(self._last_p_bess_kw) * self.dt
-            abs_p_bess_sum += abs(self._last_p_bess_kw)
-            energy_cost_total += energy_cost
-            energy_delta_total += energy_delta
-            peak_delta_total += peak_delta
-            deg_cost_total += deg_cost
-            peak_pen_total += peak_pen
-            peak_pen_nb_total += peak_pen_nb
-            if done:
+
+            native_steps_run += 1
+            battery_throughput_kwh += abs(self._last_p_bess_kw) * self.dt
+            total_absolute_battery_power_kw += abs(self._last_p_bess_kw)
+            total_electricity_cost += electricity_cost
+            total_battery_energy_cost_delta += battery_energy_cost_delta
+            total_demand_peak_cost_delta += demand_peak_cost_delta
+            total_battery_wear_cost += battery_wear_cost
+            total_demand_peak_penalty += demand_peak_penalty
+            total_no_bess_peak_penalty += no_bess_peak_penalty
+
+            if episode_done:
                 break
 
-        phi_coef = self._phi_coef_base * tariff_at_decision
-        phi_before = (soc_before - self.cfg.SOC_min) * phi_coef
-        phi_after = (self.soc - self.cfg.SOC_min) * phi_coef
-        shaping = self.gamma * phi_after - phi_before
+        stored_energy_value_per_soc = self._phi_coef_base * decision_tariff
+        stored_energy_value_before = (
+            soc_before_action - self.cfg.SOC_min
+        ) * stored_energy_value_per_soc
+        stored_energy_value_after = (
+            self.soc - self.cfg.SOC_min
+        ) * stored_energy_value_per_soc
+        soc_shaping_reward = (
+            self.gamma * stored_energy_value_after - stored_energy_value_before
+        )
+
         reward = (
             -(
-                energy_delta_total
-                + peak_delta_total
-                + deg_cost_total
+                total_battery_energy_cost_delta
+                + total_demand_peak_cost_delta
+                + total_battery_wear_cost
             )
-            + shaping
+            + soc_shaping_reward
         ) / REWARD_SCALE
-        return obs, reward, done, {
-            "grid_kw": grid,
-            "energy_cost": energy_cost_total,
-            "energy_delta": energy_delta_total,
-            "peak_delta": peak_delta_total,
-            "deg_cost": deg_cost_total,
-            "peak_pen": peak_pen_total,
-            "peak_pen_nb": peak_pen_nb_total,
-            "shaping": shaping,
-            "native_rows": native_rows,
+
+        return next_observation, reward, episode_done, {
+            # Keep these public info keys unchanged so other code does not break.
+            "grid_kw": grid_import_kw,
+            "energy_cost": total_electricity_cost,
+            "energy_delta": total_battery_energy_cost_delta,
+            "peak_delta": total_demand_peak_cost_delta,
+            "deg_cost": total_battery_wear_cost,
+            "peak_pen": total_demand_peak_penalty,
+            "peak_pen_nb": total_no_bess_peak_penalty,
+            "shaping": soc_shaping_reward,
+            "native_rows": native_steps_run,
             "d_run": self.d_run,
-            "throughput_kwh": throughput_kwh,
-            "mean_abs_p_bess_kw": abs_p_bess_sum / max(1, native_rows),
+            "throughput_kwh": battery_throughput_kwh,
+            "mean_abs_p_bess_kw": (
+                total_absolute_battery_power_kw / max(1, native_steps_run)
+            ),
         }
