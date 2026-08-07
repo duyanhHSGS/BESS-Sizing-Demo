@@ -154,6 +154,7 @@ def write_training_config(parameters: dict, output_dir: Path = USER_DATA_DIR) ->
         "minimum_soc": float(parameters.get("minimum_soc", 0.10)),
         "maximum_soc": float(parameters.get("maximum_soc", 0.90)),
         "required_final_soc": float(parameters.get("required_final_soc", 0.50)),
+        "battery_wear_cost": float(parameters.get("battery_wear_cost", 0.0)),
     }
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return path
@@ -184,6 +185,14 @@ def build_training_command(
     if device not in {"auto", "cpu", "cuda"}:
         raise TrainingLaunchError("Training device must be auto, cpu, or cuda")
     control_dt_minutes = _control_dt_minutes(payload, csv_path)
+    if algo == "ppo2" and control_dt_minutes != 15:
+        raise TrainingLaunchError(
+            "PPO2 is the exact senior-reference experiment and requires 15-minute data/control"
+        )
+    if algo == "ppo2" and obs_variant != "base":
+        raise TrainingLaunchError("PPO2 senior-reference mode is forecast-free (obs_variant=base)")
+    if algo == "ppo2" and device == "cuda":
+        raise TrainingLaunchError("PPO2 senior-reference mode is CPU-only")
     tag = _training_tag(
         payload, dataset_id, e_cap, p_rated, algo, control_dt_minutes, obs_variant
     )
@@ -211,8 +220,6 @@ def build_training_command(
         str(test_days),
         "--training-config",
         str(config_path),
-        "--oracle-cache",
-        str(oracle_cache_path),
         "--control-dt-minutes",
         str(control_dt_minutes),
         "--obs-variant",
@@ -220,6 +227,8 @@ def build_training_command(
         "--device",
         device,
     ]
+    if algo != "ppo2":
+        cmd.extend(["--oracle-cache", str(oracle_cache_path)])
     if obs_variant == "fc":
         status = weather_status(dataset_id)
         if not status.get("ready"):
@@ -279,7 +288,7 @@ def build_training_command(
         cmd.extend(
             [
                 "--steps",
-                str(_int(payload, "steps", 400_000)),
+                str(_int(payload, "steps", 1_500_000)),
                 "--gamma",
                 str(gamma),
                 "--lam-energy",
@@ -397,7 +406,10 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
     algo = str(payload.get("algo", "ppo")).lower()
     required_train_days = 30 if algo == "grepro" else 1
     n_days = require_min_days(source, val_days + test_days + required_train_days)
-    oracle_path, _ = oracle_cache.require_cached_oracle(oracle_parameters)
+    if algo == "ppo2":
+        oracle_path = Path("")  # PPO2 builds the senior fixed-block month LP internally.
+    else:
+        oracle_path, _ = oracle_cache.require_cached_oracle(oracle_parameters)
 
     USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)

@@ -6,11 +6,12 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-import torch
 
 from bess.agents.ppo2_agent import PPO2Agent, RolloutBuffer, resolve_ppo2_device
 from bess.core.scenario_gen import DayData, MonthData
+from bess.paths import PROJECT_ROOT
 from bess.training.training_common import augment_month, build_training_bess_config
+from bess.training.training_launcher import build_training_command, write_training_config
 
 
 class SharedTrainingHelpersTests(unittest.TestCase):
@@ -67,9 +68,56 @@ class SharedTrainingHelpersTests(unittest.TestCase):
         self.assertEqual(cfg.T_cap, 0.0)
 
 
+class PPO2LauncherTests(unittest.TestCase):
+    def test_reference_command_uses_internal_oracle_and_senior_step_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            csv_path = base / "site.csv"
+            config_path = base / "training_config.json"
+            oracle_path = base / "old_oracle.json"
+            rows = ["date_iso,day_index,step,day_type,P_load_kW,P_pv_kW"]
+            rows.extend(
+                f"2026-01-01,1,{step},working,100,0" for step in range(96)
+            )
+            csv_path.write_text("\n".join(rows), encoding="utf-8")
+            config_path.write_text("{}", encoding="utf-8")
+            payload = {
+                "algo": "ppo2",
+                "dataset_id": "test",
+                "e_cap_kwh": 1000.0,
+                "p_rated_kw": 500.0,
+                "obs_variant": "base",
+                "device": "cpu",
+            }
+            spec = build_training_command(
+                payload,
+                csv_path,
+                config_path,
+                oracle_path,
+                python_executable="python",
+                base_dir=base,
+            )
+        command = spec["cmd"]
+        self.assertNotIn("--oracle-cache", command)
+        steps_index = command.index("--steps")
+        self.assertEqual(command[steps_index + 1], "1500000")
+        self.assertEqual(command[command.index("--control-dt-minutes") + 1], "15")
+
+    def test_training_config_carries_battery_wear_cost(self):
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT) as directory:
+            path = write_training_config(
+                {"battery_wear_cost": "500"}, Path(directory)
+            )
+            data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data["battery_wear_cost"], 500.0)
+
+
 class PPO2DeviceTests(unittest.TestCase):
-    def test_cpu_device_path_updates_and_syncs_collector(self):
+    def test_reference_cpu_device_path_updates_single_network(self):
         self.assertEqual(resolve_ppo2_device("cpu"), "cpu")
+        self.assertEqual(resolve_ppo2_device("auto"), "cpu")
+        with self.assertRaisesRegex(RuntimeError, "CPU-only"):
+            resolve_ppo2_device("cuda")
         agent = PPO2Agent(
             obs_dim=4,
             seed=3,
@@ -97,10 +145,8 @@ class PPO2DeviceTests(unittest.TestCase):
         agent.update(buffer, 0.0, 0.0)
 
         self.assertEqual(agent.device.type, "cpu")
-        for learner, collector in zip(
-            agent.net.parameters(), agent.collector_net.parameters(), strict=True
-        ):
-            torch.testing.assert_close(learner.detach().cpu(), collector.detach())
+        self.assertFalse(hasattr(agent, "collector_net"))
+        self.assertTrue(np.isfinite(agent.diagnostics["approx_kl"]))
         probe = np.zeros(4, dtype=np.float32)
         self.assertTrue(np.isfinite(agent.predict_action(probe)))
 

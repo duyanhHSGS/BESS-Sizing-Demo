@@ -164,7 +164,7 @@ def load_policy(checkpoint_name: str, checkpoint_dir: Path = CHECKPOINT_DIR):
         obs_dim = int(meta.get("obs_dim") or (17 if meta.get("obs_variant") == "fc" else 13))
         agent = PPOAgent(obs_dim=obs_dim)
     elif algo == "ppo2":
-        obs_dim = int(meta.get("obs_dim") or 13)
+        obs_dim = int(meta.get("obs_dim") or 17)
         agent = PPO2InferenceAgent(obs_dim=obs_dim)
     elif algo == "pro":
         obs_dim = int(meta.get("obs_dim") or (17 if meta.get("obs_variant") == "fc" else 13))
@@ -289,13 +289,28 @@ def run_policy_dispatch(
     from bess.forecasting.sadrbc_forecast import rollout_activity
 
     days = policy_result_to_days(month, rollout, cfg, parameters)
+    if algo == "ppo2" and meta.get("reference_env") == "ppo2_senior_15m_v1":
+        from bess.evaluation.oracle.ppo2_oracle import score_month as score_ppo2_month
+
+        kpi = score_ppo2_month(
+            rollout["p_grid_days"],
+            cfg,
+            days=month.days,
+            p_bess_days=rollout["p_bess_days"],
+            soc_days=rollout["soc_days"],
+            degradation_cost_per_kwh_discharged=float(
+                meta.get("degradation_cost_per_kwh_discharged", 0.0)
+            ),
+        )
+    else:
+        kpi = score_month(rollout["p_grid_days"], cfg, month.days)
     return {
         "policy": checkpoint_name,
         "algo": algo,
         "meta": meta,
         "warnings": warnings,
         "days": days,
-        "kpi": score_month(rollout["p_grid_days"], cfg, month.days),
+        "kpi": kpi,
         "activity": {
             **rollout_activity(rollout, cfg.dt),
             "blocked_action_pct": rollout.get("blocked_action_pct", 0.0),

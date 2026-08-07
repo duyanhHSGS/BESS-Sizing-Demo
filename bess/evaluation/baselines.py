@@ -78,35 +78,58 @@ def validate_dispatch_sampling(meta: dict, native_dt_minutes: float) -> float:
 
 # ---------------------------------------------------------------------------
 def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
-                   measure_latency: bool = False) -> dict:
-    """Deterministic rollout of a trained policy. The env variant
-    (forecast-informed or not) follows the checkpoint's meta."""
+                   measure_latency: bool = False,
+                   deterministic: bool = True) -> dict:
+    """Roll a trained policy through the environment declared by its checkpoint."""
     import time
     from bess.core.bess_env import BESSEnv
     from bess.forecasting.sadrbc_forecast import SADRBCForecastSpec, SADRBCResidualEnv
+
     meta = getattr(agent, "meta", {}) or {}
-    use_fc = meta.get("obs_variant") == "fc"
     native_dt_minutes = cfg.dt * 60.0
-    control_dt_minutes = validate_dispatch_sampling(meta, native_dt_minutes)
-    env_class = SADRBCResidualEnv if meta.get("controller") == "sadrbc_residual" else BESSEnv
-    env_kwargs = {}
-    if env_class is SADRBCResidualEnv:
-        forecast = meta.get("sadrbc_forecast", {}) or {}
-        env_kwargs = {
-            "residual_limit": float(meta.get("residual_limit", 0.20)),
-            "forecast_spec": SADRBCForecastSpec(
-                seed=int(forecast.get("seed", 13_0013)),
-                load_sigma=float(forecast.get("load_sigma", 0.05)),
-                pv_sigma=float(forecast.get("pv_sigma", 0.15)),
-                rho=float(forecast.get("rho", 0.90)),
-                replan_minutes=int(forecast.get("replan_minutes", 60)),
+    validate_dispatch_sampling(meta, native_dt_minutes)
+
+    if meta.get("reference_env") == "ppo2_senior_15m_v1":
+        from bess.core.ppo2_env import PPO2Env
+
+        env = PPO2Env(
+            cfg,
+            p_ref_kw=p_ref_kw,
+            degradation_cost_per_kwh_discharged=float(
+                meta.get("degradation_cost_per_kwh_discharged", 0.0)
             ),
-        }
-    env = env_class(cfg, p_ref_kw=p_ref_kw, use_forecast=use_fc,
-                    d_run_init_kw=meta.get("d_run_init_kw"),
-                    gamma=float(meta.get("gamma", PPO_GAMMA)),
-                    control_dt_minutes=control_dt_minutes,
-                    **env_kwargs)
+        )
+    else:
+        use_fc = meta.get("obs_variant") == "fc"
+        control_dt_minutes = validate_dispatch_sampling(meta, native_dt_minutes)
+        env_class = (
+            SADRBCResidualEnv
+            if meta.get("controller") == "sadrbc_residual"
+            else BESSEnv
+        )
+        env_kwargs = {}
+        if env_class is SADRBCResidualEnv:
+            forecast = meta.get("sadrbc_forecast", {}) or {}
+            env_kwargs = {
+                "residual_limit": float(meta.get("residual_limit", 0.20)),
+                "forecast_spec": SADRBCForecastSpec(
+                    seed=int(forecast.get("seed", 13_0013)),
+                    load_sigma=float(forecast.get("load_sigma", 0.05)),
+                    pv_sigma=float(forecast.get("pv_sigma", 0.15)),
+                    rho=float(forecast.get("rho", 0.90)),
+                    replan_minutes=int(forecast.get("replan_minutes", 60)),
+                ),
+            }
+        env = env_class(
+            cfg,
+            p_ref_kw=p_ref_kw,
+            use_forecast=use_fc,
+            d_run_init_kw=meta.get("d_run_init_kw"),
+            gamma=float(meta.get("gamma", PPO_GAMMA)),
+            control_dt_minutes=control_dt_minutes,
+            **env_kwargs,
+        )
+
     obs = env.reset(month)
     done = False
     lat = []
@@ -114,10 +137,14 @@ def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
     decisions = 0
     while not done:
         t0 = time.perf_counter()
-        if hasattr(agent, "predict_action"):
+        if meta.get("reference_env") == "ppo2_senior_15m_v1":
+            raw_action = agent.act(obs, deterministic=deterministic)
+            a = raw_action[0] if isinstance(raw_action, tuple) else raw_action
+        elif deterministic and hasattr(agent, "predict_action"):
             a = agent.predict_action(obs)
         else:
-            a, _, _ = agent.act(obs, deterministic=True)
+            raw_action = agent.act(obs, deterministic=deterministic)
+            a = raw_action[0] if isinstance(raw_action, tuple) else raw_action
         if measure_latency:
             lat.append((time.perf_counter() - t0) * 1e3)
         obs, _, done, info = env.step(a)

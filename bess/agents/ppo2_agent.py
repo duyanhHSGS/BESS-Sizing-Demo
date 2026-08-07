@@ -22,9 +22,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from bess.core.settings import PPO2_GAMMA
-
-torch.set_num_threads(6)
+# The senior trainer uses two Torch CPU threads. In this multi-agent repo that
+# setting is applied by the PPO2 training entrypoint instead of at import time,
+# so merely importing PPO2 cannot perturb PPO/GREPO numerical execution.
 
 # ---------------------------------------------------------------------------
 # Squashed Gaussian helpers (vendored from bess-drl engine/squashed_gaussian.py)
@@ -39,14 +39,8 @@ def resolve_ppo2_device(device: str = "auto") -> str:
     if requested not in {"auto", "cpu", "cuda"}:
         raise ValueError("PPO2 device must be 'auto', 'cpu', or 'cuda'")
     if requested == "cuda":
-        if not torch.cuda.is_available():
-            raise RuntimeError(
-                "PPO2 device='cuda' requested, but PyTorch reports that CUDA is unavailable"
-            )
-        return "cuda"
-    if requested == "cpu":
-        return "cpu"
-    return "cuda" if torch.cuda.is_available() else "cpu"
+        raise RuntimeError("PPO2 senior-reference mode is CPU-only, matching the senior trainer")
+    return "cpu"
 
 
 def _squashed_log_prob_from_latent(
@@ -244,24 +238,32 @@ def compute_gae(
     return adv
 
 
+def _adv_share_of_return(returns: np.ndarray, values: np.ndarray) -> float:
+    """Return Var(advantage) / Var(return), matching the senior PPO diagnostic."""
+    variance = float(np.var(returns))
+    if variance < 1e-12:
+        return 0.0
+    return float(np.var(returns - values) / variance)
+
+
 # ---------------------------------------------------------------------------
 # PPO2Agent (training)
 # ---------------------------------------------------------------------------
 class PPO2Agent:
     """PPO with reward-decomposed critics, PopArt, and squashed Gaussian policy."""
 
-    def __init__(self, obs_dim: int, lr=1e-4, gamma=PPO2_GAMMA,
-                 lam_energy=0.97, lam_peak=0.97,
+    def __init__(self, obs_dim: int, lr=1e-4, gamma=1.0,
+                 lam_energy=0.97, lam_peak=0.5,
                  clip=0.2, epochs=6, minibatch=256, ent_coef=0.01,
                  vf_coef=0.5, target_kl=0.01, seed=0,
                  actor_lr: float | None = None,
                  critic_lr: float | None = None,
-                 log_std_init: float = float(np.log(0.15)),
+                 log_std_init: float = -0.5,
                  device: str = "auto"):
         torch.manual_seed(seed)
         self._rng = np.random.default_rng(seed)
         self.device = torch.device(resolve_ppo2_device(device))
-        self.net = ActorCritic(obs_dim, log_std_init=log_std_init).to(self.device)
+        self.net = ActorCritic(obs_dim, log_std_init=log_std_init)
         self.actor_lr = lr if actor_lr is None else float(actor_lr)
         self.critic_lr = lr if critic_lr is None else float(critic_lr)
         self.lr = lr
@@ -283,20 +285,8 @@ class PPO2Agent:
         self.target_kl = target_kl
         self.norm_energy = PopArtNormalizer(self.net.critic_energy)
         self.norm_peak = PopArtNormalizer(self.net.critic_peak)
-        with torch.random.fork_rng(devices=[]):
-            self.collector_net = ActorCritic(obs_dim, log_std_init=log_std_init).cpu()
-        self._sync_collector()
         self.meta = {}
         self.diagnostics = {}
-
-    @torch.inference_mode()
-    def _sync_collector(self) -> None:
-        state = {
-            key: value.detach().cpu()
-            for key, value in self.net.state_dict().items()
-        }
-        self.collector_net.load_state_dict(state)
-        self.collector_net.eval()
 
     def anneal_lr(self, progress: float) -> None:
         """Linearly decay each group's learning rate; progress runs 0 -> 1."""
@@ -311,9 +301,9 @@ class PPO2Agent:
         Values are DENORMALISED so GAE runs on the same scale as rewards.
         """
         o = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
-        dist = self.collector_net.dist(o)
+        dist = self.net.dist(o)
         a, logp, latent = _sample_squashed(dist, deterministic=deterministic)
-        v_e, v_p = self.collector_net.normalized_values(o)
+        v_e, v_p = self.net.normalized_values(o)
         return (
             float(a.item()),
             float(logp.item()),
@@ -326,7 +316,7 @@ class PPO2Agent:
     def predict_action(self, obs: np.ndarray) -> float:
         """Deterministic actor-only inference for evaluation rollouts."""
         o = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
-        dist = self.collector_net.dist(o)
+        dist = self.net.dist(o)
         a, _, _ = _sample_squashed(dist, deterministic=True)
         return float(a.item())
 
@@ -409,7 +399,6 @@ class PPO2Agent:
                 stop_epoch = epoch + 1
                 break
 
-        self._sync_collector()
         self.diagnostics = {
             "adv_share_energy": _adv_share_of_return(ret_e, buf.val_e[:n]),
             "adv_share_peak": _adv_share_of_return(ret_p, buf.val_p[:n]),
@@ -453,55 +442,41 @@ class PPO2Agent:
         self.norm_peak.load_state(normalizers["peak"])
         self.meta = ck["meta"]
         self.net.eval()
-        self._sync_collector()
 
 
 # ---------------------------------------------------------------------------
-# PPO2InferenceAgent — lightweight actor-only for dispatch/benchmarking
+# PPO2InferenceAgent — senior-style actor-only deployment wrapper
 # ---------------------------------------------------------------------------
-class PPO2InferenceAgent:
-    """Loads a trained PPO2 checkpoint and runs deterministic inference.
-
-    Deliberately holds NO critic tensors — loads only actor.* / log_std keys.
-    Compatible with the same act() signature as PPOAgent from ppo_agent.py:
-    act(obs, deterministic=False) -> (action, log_prob, value).
-    """
+class PPO2InferenceActor(nn.Module):
+    """Inference policy with no critics, matching the senior deployment layout."""
 
     def __init__(self, obs_dim: int, hidden_size: int = 128):
         super().__init__()
+        self.actor = _mlp(obs_dim, 1, hidden_size)
+        self.log_std = nn.Parameter(torch.full((1,), -0.5))
+
+    def dist(self, obs: torch.Tensor) -> torch.distributions.Normal:
+        return torch.distributions.Normal(self.actor(obs), self.log_std.exp())
+
+
+class PPO2InferenceAgent:
+    """Actor-only loader for the exact senior-reference PPO2 checkpoint."""
+
+    def __init__(self, obs_dim: int, hidden_size: int = 128):
         self._obs_dim = obs_dim
-        self.net = ActorCritic(obs_dim, hidden_size)
+        self.net = PPO2InferenceActor(obs_dim, hidden_size)
         self.meta: dict = {}
 
     @torch.no_grad()
-    def act(self, obs: np.ndarray, deterministic: bool = False) -> tuple[float, float, float]:
-        """Return (action, log_prob, value_sum) for dispatch compatibility.
-
-        The single value is the sum of denormalised energy + peak critics,
-        reconstructed from the saved normaliser state in self.meta.
-        """
+    def act(self, obs: np.ndarray, deterministic: bool = True) -> float:
         o = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
-        dist = self.net.dist(o)
-        a, logp, _ = _sample_squashed(dist, deterministic=deterministic)
-        # Denormalise using saved normaliser state for dispatch compatibility
-        n_e = self.meta.get("norm_energy_mean", 0.0)
-        n_e_std = self.meta.get("norm_energy_std", 1.0)
-        n_p = self.meta.get("norm_peak_mean", 0.0)
-        n_p_std = self.meta.get("norm_peak_std", 1.0)
-        v_e_raw, v_p_raw = self.net.normalized_values(o)
-        v_total = float(
-            (v_e_raw.item() * n_e_std + n_e)
-            + (v_p_raw.item() * n_p_std + n_p)
-        )
-        return (float(a.item()), float(logp.item()), v_total)
+        distribution = self.net.dist(o)
+        action, _, _ = _sample_squashed(distribution, deterministic=deterministic)
+        return float(action.item())
 
     @torch.no_grad()
     def predict_action(self, obs: np.ndarray) -> float:
-        """Deterministic actor-only inference — single float output."""
-        o = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
-        dist = self.net.dist(o)
-        a, _, _ = _sample_squashed(dist, deterministic=True)
-        return float(a.item())
+        return self.act(obs, deterministic=True)
 
     def load(self, path: str) -> dict:
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
@@ -518,18 +493,11 @@ class PPO2InferenceAgent:
             raise ValueError(
                 "Checkpoint is missing policy tensors: " + ", ".join(sorted(missing))
             )
-        # Drop critic tensors — only actor and log_std are needed for inference
         self.net.load_state_dict(
             {key: value for key, value in state_dict.items() if key in expected}
         )
         if "meta" not in checkpoint:
             raise ValueError("Checkpoint carries no meta; retraining is required")
         self.meta = checkpoint["meta"]
-        # Store normaliser state so act() can denormalise values
-        if "value_normalizers" in checkpoint:
-            self.meta["norm_energy_mean"] = checkpoint["value_normalizers"]["energy"]["mean"]
-            self.meta["norm_energy_std"] = checkpoint["value_normalizers"]["energy"]["std"]
-            self.meta["norm_peak_mean"] = checkpoint["value_normalizers"]["peak"]["mean"]
-            self.meta["norm_peak_std"] = checkpoint["value_normalizers"]["peak"]["std"]
         self.net.eval()
         return self.meta
