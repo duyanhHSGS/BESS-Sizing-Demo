@@ -54,9 +54,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from bess.core.common import DT_HOURS, STEPS_PER_DAY, dt_from_steps_per_day, steps_per_day_from_dt, tariff_vector
+from bess.core.common import tariff_vector, validate_control_interval_minutes
 from bess.core.scenario_gen import MonthData
 from bess.core.settings import PPO_GAMMA
+from bess.core.timebase import demand_window_steps, dt_from_steps_per_day, steps_per_day_from_dt
 
 OBS_DIM = 13
 OBS_DIM_FC = 17             # forecast-informed variant (+4 features)
@@ -73,28 +74,32 @@ class BESSEnv:
                  gamma: float = PPO_GAMMA,
                  control_dt_minutes: float | None = None,
                  use_forecast: bool = False,
-                 n_steps: int = STEPS_PER_DAY,
-                 dt_hours: float = DT_HOURS,
+                 n_steps: int | None = None,
+                 dt_hours: float | None = None,
                  record_trajectory: bool = True,
                  extra_obs_dim: int = 0):
-        # Resolution is derived from configured dt or the supplied day length.
-        # (ch  bi bo GREPO). Ngy d liu phi c ng n_steps mu.
-        if dt_hours == DT_HOURS and getattr(cfg, "dt", DT_HOURS) != DT_HOURS:
-            dt_hours = float(cfg.dt)
-            n_steps = steps_per_day_from_dt(dt_hours)
-        self.n_steps = int(n_steps)
-        self.dt = float(dt_hours)
+        # dt is the source of truth. It may be 15 min, 1 min, 0.5 min, etc.
+        # Step counts are derived from dt instead of hard-coded to 96/day.
+        configured_dt = float(getattr(cfg, "dt", 0.0))
+        self.dt = float(dt_hours) if dt_hours is not None else configured_dt
+        if self.dt <= 0.0:
+            raise ValueError("BESS config must provide a positive dt_hours")
+        derived_steps_per_day = steps_per_day_from_dt(self.dt)
+        if n_steps is not None and int(n_steps) != derived_steps_per_day:
+            raise ValueError(
+                f"n_steps={n_steps} disagrees with dt_hours={self.dt:g}; "
+                f"expected {derived_steps_per_day} steps/day"
+            )
+        self.n_steps = derived_steps_per_day
         self.control_dt_minutes = (
             float(control_dt_minutes)
             if control_dt_minutes is not None
             else self.dt * 60.0
         )
         self.native_steps_per_action = 1
-        cfg.dt = self.dt
-        assert abs(self.n_steps * self.dt - 24.0) < 1e-9,             "n_steps  dt phi = 24h"
+        cfg.set_dt(self.dt)
         self._configure_control_interval()
-        # ca s billing 30 pht = bao nhiu mu   phn gii ny
-        self.roll_k = max(2, int(round(0.5 / self.dt)))
+        self.roll_k = demand_window_steps(self.dt)
         self.cfg = cfg
         self.p_ref = float(p_ref_kw)
         self.deg = float(degradation_vnd_per_kwh)
@@ -153,21 +158,11 @@ class BESSEnv:
     # ------------------------------------------------------------------
     def _configure_control_interval(self) -> None:
         native_step_minutes = self.dt * 60.0
-        control_step_minutes = self.control_dt_minutes
-        native_steps_per_control_step = control_step_minutes / native_step_minutes
-        rounded_native_steps = round(native_steps_per_control_step)
-        if (
-            not np.isfinite(control_step_minutes)
-            or control_step_minutes < native_step_minutes - 1e-9
-            or abs(native_steps_per_control_step - rounded_native_steps) > 1e-9
-            or abs(30.0 / control_step_minutes - round(30.0 / control_step_minutes)) > 1e-9
-            or abs(1440.0 / control_step_minutes - round(1440.0 / control_step_minutes)) > 1e-9
-        ):
-            raise ValueError(
-                "control_dt_minutes must be a native-or-coarser multiple "
-                "that divides both 30 minutes and 24 hours"
-            )
-        self.native_steps_per_action = int(rounded_native_steps)
+        control_step_minutes = validate_control_interval_minutes(
+            native_step_minutes,
+            self.control_dt_minutes,
+        )
+        self.native_steps_per_action = int(round(control_step_minutes / native_step_minutes))
 
     # ------------------------------------------------------------------
     def reset(self, month: MonthData, soc_init: float | None = None,
@@ -180,8 +175,8 @@ class BESSEnv:
             if data_steps_per_day != self.n_steps:
                 self.n_steps = data_steps_per_day
                 self.dt = dt_from_steps_per_day(self.n_steps)
-                self.cfg.dt = self.dt
-                self.roll_k = max(1, int(round(0.5 / self.dt)))
+                self.cfg.set_dt(self.dt)
+                self.roll_k = demand_window_steps(self.dt)
                 self._configure_control_interval()
                 self._tar_base = tariff_vector(self.cfg)
                 from bess.core.common import TOU_RULES, cfg_no_peak

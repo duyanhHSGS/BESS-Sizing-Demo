@@ -25,8 +25,6 @@ from bess.evaluation.benchmark import (
 )
 from bess.evaluation.oracle.oracle_lp import build_oracle_lp
 from bess.core.settings import (
-    BILLING_MODE_FIELD,
-    BILLING_SUNDAY_FIELD,
     DEFAULT_PARAMETERS,
     FORM_FIELDS,
     GREPO_GAMMA,
@@ -588,11 +586,11 @@ def _parameters_from_form():
     }
     values["selected_data_csv"] = selected_data_filename(values)
     values["dt"] = str(detect_dt_hours(selected_data_path(values)))
-    values[BILLING_MODE_FIELD] = request.form.get(
-        BILLING_MODE_FIELD,
-        DEFAULT_PARAMETERS[BILLING_MODE_FIELD],
+    values["billing_mode"] = request.form.get(
+        "billing_mode",
+        DEFAULT_PARAMETERS["billing_mode"],
     )
-    values[BILLING_SUNDAY_FIELD] = BILLING_SUNDAY_FIELD in request.form
+    values["billing_sunday"] = "billing_sunday" in request.form
     return values
 
 

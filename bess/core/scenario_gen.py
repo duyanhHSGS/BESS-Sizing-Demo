@@ -17,7 +17,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from bess.core.common import DATA_DIR, DT_HOURS, STEPS_PER_DAY, steps_per_day_from_dt
+from bess.core.common import DATA_DIR
+from bess.core.settings import DEFAULT_DT_HOURS
+from bess.core.timebase import steps_per_day_from_dt
 
 SUNRISE_H, SUNSET_H = 6.0, 18.0
 
@@ -137,7 +139,7 @@ def _pv_profile(rng: np.random.Generator, weather: str,
 def generate_sim_month(seed: int, n_days: int = 30, load_scale: float = 1.0,
                         pv_scale: float = 1.0,
                         holiday_prob: float = 0.03,
-                        dt_hours: float = DT_HOURS) -> MonthData:
+                        dt_hours: float = DEFAULT_DT_HOURS) -> MonthData:
     """One synthetic month. Weekly pattern starts on Monday; weather is
     sampled i.i.d. from WEATHER_MIX (matches the real month's mix)."""
     rng = np.random.default_rng(seed)

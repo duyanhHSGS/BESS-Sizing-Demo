@@ -6,7 +6,8 @@ from pathlib import Path
 
 import numpy as np
 
-from bess.core.common import TOU_RULES, build_tariff_windows, load_system_config, make_bess_config
+from bess.agents.sadrbc import SADRBCConfig
+from bess.core.common import TOU_RULES, load_system_config
 from bess.core.scenario_gen import DayData, MonthData
 
 
@@ -122,26 +123,31 @@ def build_training_bess_config(
 ):
     """Build one canonical BESS/tariff config for every training algorithm."""
     base = load_system_config()
-    cfg = make_bess_config(base, e_cap_kwh, p_rated_kw, base.P_target_user)
-    cfg.dt = float(dt_hours)
-
     tariff = json.loads(Path(training_config_path).read_text(encoding="utf-8"))
-    cfg.price_peak = float(tariff.get("price_peak", cfg.price_peak))
-    cfg.price_mid = float(tariff.get("price_mid", cfg.price_mid))
-    cfg.price_off = float(tariff.get("price_off", cfg.price_off))
-    cfg.T_cap = float(tariff.get("t_cap", cfg.T_cap))
-    cfg.eta_ch = float(tariff.get("charge_efficiency", cfg.eta_ch))
-    cfg.eta_dis = float(tariff.get("discharge_efficiency", cfg.eta_dis))
-    cfg.SOC_min = float(tariff.get("minimum_soc", cfg.SOC_min))
-    cfg.SOC_max = float(tariff.get("maximum_soc", cfg.SOC_max))
-    cfg.SOC_eod = float(tariff.get("required_final_soc", cfg.SOC_eod))
-
-    for key, value in build_tariff_windows(
-        tariff.get("peak_windows", ""),
-        tariff.get("off_windows", ""),
-        cfg.dt,
-    ).items():
-        setattr(cfg, key, value)
+    cfg = SADRBCConfig({
+        "E_cap_kWh": e_cap_kwh,
+        "P_rated_kW": p_rated_kw,
+        "eta_ch": float(tariff.get("charge_efficiency", base.eta_ch)),
+        "eta_dis": float(tariff.get("discharge_efficiency", base.eta_dis)),
+        "soc_min": float(tariff.get("minimum_soc", base.SOC_min)),
+        "soc_max": float(tariff.get("maximum_soc", base.SOC_max)),
+        "soc_safety_buffer": base.SOC_safety,
+        "soc_eod": float(tariff.get("required_final_soc", base.SOC_eod)),
+        "soc_min_emergency": base.SOC_min_emergency,
+        "dt_hours": float(dt_hours),
+        "price_peak": float(tariff.get("price_peak", base.price_peak)),
+        "price_mid": float(tariff.get("price_mid", base.price_mid)),
+        "price_off": float(tariff.get("price_off", base.price_off)),
+        "T_cap": float(tariff.get("t_cap", base.T_cap)),
+        "FIT_PRICE": base.FIT_PRICE,
+        "ENABLE_EXPORT": base.ENABLE_EXPORT,
+        "P_target_user_kW": base.P_target_user,
+        "V_NOMINAL": base.V_NOMINAL,
+        "V_BLACKOUT_TH": base.V_BLACKOUT_TH,
+        "T_DERATE": list(base.T_DERATE),
+        "peak_windows": str(tariff.get("peak_windows", base.peak_windows)),
+        "off_windows": str(tariff.get("off_windows", base.off_windows)),
+    })
 
     billing = str(tariff.get("billing_mode", default_billing))
     TOU_RULES["sunday_no_peak"] = bool(tariff.get("sunday_no_peak", False))

@@ -1,67 +1,11 @@
-"""System-wide simulation parameters  merged from config/system_config.json."""
+"""Canonical project defaults.
 
-# BESS and tariff defaults (used by every optimizer via load_system_config)
-SYSTEM_CONFIG = {
-    "BESS": {
-        "E_cap_kWh": 750.0,
-        "P_rated_kW": 350.0,
-        "eta_ch": 0.95,
-        "eta_dis": 0.95,
-        "soc_min": 0.10,
-        "soc_max": 0.93,
-        "soc_safety_buffer": 0.05,
-        "soc_eod": None,
-        "soc_min_emergency": 0.05,
-    },
-    "PV": {
-        "P_installed_kWp": 500.0,
-        "tilt_deg": 15,
-        "orientation": "south",
-    },
-    "Tariff": {
-        "price_peak_VND_per_kWh": 2759.0,
-        "price_mid_VND_per_kWh": 1485.0,
-        "price_off_VND_per_kWh": 982.0,
-        "T_cap_VND_per_kW_per_month": 235414.0,
-        "FIT_PRICE_VND_per_kWh": 1200.0,
-        "ENABLE_EXPORT": False,
-    },
-    "TimeWindows_15min": {
-        "dt_hours": 0.25,
-        "W1_steps": [38, 39, 40, 41, 42, 43, 44, 45],
-        "W2_steps": [68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79],
-        "INTER_steps_range": [46, 68],
-        "OFF_steps_morning_range": [0, 16],
-        "OFF_steps_evening_range": [88, 96],
-        "W1_START": 38,
-        "W2_START": 68,
-        "OFF_PEAK_END_STEP": 16,
-    },
-    "Operation": {
-        "P_target_user_kW": 350.0,
-    },
-    "Safety": {
-        "V_NOMINAL": 1.0,
-        "V_BLACKOUT_TH": 0.85,
-        "T_DERATE": [[35, 1.0], [42, 0.7], [45, 0.5], [999, 0.0]],
-    },
-    "LoadProfile": {
-        "shift_pattern": "1-ca",
-        "weekday_peak_kW": 500.0,
-        "weekend_kW": 100.0,
-        "holiday_kW": 80.0,
-    },
-    "Simulation": {
-        "horizon_days": 30,
-        "month": "2025-03",
-        "T_battery_C": 30.0,
-        "V_grid_pu": 1.0,
-        "blackout_steps": None,
-    },
-}
+Keep literal defaults here once. Other modules derive runtime config from these
+values instead of carrying their own battery/tariff/timestep copies.
+"""
 
 DEFAULT_PARAMETERS = {
-    "selected_data_csv": "offline_data_Youngone.csv",
+    "selected_data_csv": "offline_tande-15.csv",
     "battery_capacity_kWh": "1250",
     "battery_power_limit_kW": "450",
     "charge_efficiency": "0.9",
@@ -88,8 +32,47 @@ DEFAULT_PARAMETERS = {
     "use_sample_battery_options": "no",
 }
 
-# PPO training defaults. One gamma value is shared by PPO return discounting
-# and the environment's potential-based SOC reward shaping.
+DEFAULT_DT_HOURS = float(DEFAULT_PARAMETERS["dt"])
+
+# Runtime system defaults are derived from DEFAULT_PARAMETERS so the web UI,
+# dispatch, training, and fallback controller cannot silently disagree.
+SYSTEM_CONFIG = {
+    "BESS": {
+        "E_cap_kWh": float(DEFAULT_PARAMETERS["battery_capacity_kWh"]),
+        "P_rated_kW": float(DEFAULT_PARAMETERS["battery_power_limit_kW"]),
+        "eta_ch": float(DEFAULT_PARAMETERS["charge_efficiency"]),
+        "eta_dis": float(DEFAULT_PARAMETERS["discharge_efficiency"]),
+        "soc_min": float(DEFAULT_PARAMETERS["minimum_soc"]),
+        "soc_max": float(DEFAULT_PARAMETERS["maximum_soc"]),
+        "soc_safety_buffer": 0.05,
+        "soc_eod": float(DEFAULT_PARAMETERS["required_final_soc"]),
+        "soc_min_emergency": 0.05,
+    },
+    "Tariff": {
+        "price_peak_VND_per_kWh": float(DEFAULT_PARAMETERS["billing_expensive"]),
+        "price_mid_VND_per_kWh": float(DEFAULT_PARAMETERS["billing_normal"]),
+        "price_off_VND_per_kWh": float(DEFAULT_PARAMETERS["billing_cheap"]),
+        "T_cap_VND_per_kW_per_month": float(DEFAULT_PARAMETERS["billing_peak_penalty"]),
+        "peak_windows": DEFAULT_PARAMETERS["billing_windows_expensive"],
+        "off_windows": DEFAULT_PARAMETERS["billing_windows_cheap"],
+        "sunday_no_peak": bool(DEFAULT_PARAMETERS["billing_sunday"]),
+        "FIT_PRICE_VND_per_kWh": 1200.0,
+        "ENABLE_EXPORT": False,
+    },
+    "Time": {
+        "dt_hours": DEFAULT_DT_HOURS,
+    },
+    "Operation": {
+        "P_target_user_kW": 350.0,
+    },
+    "Safety": {
+        "V_NOMINAL": 1.0,
+        "V_BLACKOUT_TH": 0.85,
+        "T_DERATE": [[35, 1.0], [42, 0.7], [45, 0.5], [999, 0.0]],
+    },
+}
+
+# PPO training defaults. PPO_GAMMA is also used by potential-based SOC shaping.
 PPO_GAMMA = 0.995
 PPO_LAMBDA = 0.97
 PRO_GAMMA = 0.995
@@ -99,6 +82,7 @@ PPO2_GAMMA = 1.0
 PPO2_LAM_ENERGY = 0.97
 PPO2_LAM_PEAK = 0.5
 
+# Live UI data: main.py uses these when optional sample sizing is enabled.
 SAMPLE_BATTERY_CANDIDATES = tuple(
     {
         "id": f"{int(capacity)}kwh-{ratio_label}",
@@ -111,30 +95,11 @@ SAMPLE_BATTERY_CANDIDATES = tuple(
     for ratio, ratio_label in ((0.35, "0.35C"), (0.50, "0.50C"), (0.70, "0.70C"))
 )
 
-FORM_FIELDS = (
-    "selected_data_csv",
-    "battery_capacity_kWh",
-    "battery_power_limit_kW",
-    "charge_efficiency",
-    "discharge_efficiency",
-    "battery_wear_cost",
-    "minimum_soc",
-    "maximum_soc",
-    "required_final_soc",
-    "billing_expensive",
-    "billing_normal",
-    "billing_cheap",
-    "billing_peak_penalty",
-    "billing_windows_expensive",
-    "billing_windows_cheap",
-    "billing_battery_per_kWh",
-    "billing_battery_per_kW",
-    "billing_yearly_maintain_percentage",
-    "billing_discount_rate",
-    "billing_years",
-    "billing_real_saving_factor",
-    "use_sample_battery_options",
+# Form fields are derived from the canonical parameter keys rather than copied
+# into a second hand-maintained list. dt is detected from the selected dataset;
+# billing_mode and billing_sunday are handled separately by main.py.
+FORM_FIELDS = tuple(
+    key
+    for key in DEFAULT_PARAMETERS
+    if key not in {"dt", "billing_mode", "billing_sunday"}
 )
-
-BILLING_MODE_FIELD = "billing_mode"
-BILLING_SUNDAY_FIELD = "billing_sunday"

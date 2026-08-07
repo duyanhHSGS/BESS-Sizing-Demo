@@ -11,67 +11,56 @@ from datetime import datetime
 import math
 
 # =====================================================================
-# Default configuration (used when no config dict is supplied)
+# Default configuration: derived from the one canonical settings source.
 # =====================================================================
-def _default_window(start_hour, end_hour, dt_hours=0.25):
-    steps_per_day = round(24.0 / dt_hours)
-    start = round(start_hour / dt_hours)
-    end = round(end_hour / dt_hours)
-    if end <= start:
-        end += steps_per_day
-    return [step % steps_per_day for step in range(start, end)]
+from bess.core.settings import SYSTEM_CONFIG
+from bess.core.timebase import build_tariff_windows, demand_window_steps
 
 
-DEFAULT_CONFIG = {
-    # BESS
-    'E_cap_kWh':         500.0,
-    'P_rated_kW':        250.0,
-    'eta_ch':            0.95,
-    'eta_dis':           0.95,
-    # SOC bounds (user-configurable)
-    'soc_min':           0.10,
-    'soc_max':           0.93,   # = SOC_chg, max charge target
-    'soc_safety_buffer': 0.05,
-    'soc_eod':           None,   # default: soc_min + soc_safety_buffer
-    'soc_min_emergency': 0.05,
-    # Time indexing
-    'dt_hours':          0.25,
-    # Tariff (TT16/2014 default)
-    'price_peak':        2759.0,
-    'price_mid':         1485.0,
-    'price_off':         982.0,
-    'T_cap':             235414.0,
-    # Operation
-    'P_target_user_kW':  350.0,
-    'ENABLE_EXPORT':     False,
-    'FIT_PRICE':         1200.0,
-    # Window indices derived from clock time at the configured fallback dt.
-    'W1':       _default_window(9.5, 11.5),
-    'W2':       _default_window(17.0, 20.0),
-    'INTER':    _default_window(11.5, 17.0),
-    'OFF':      _default_window(0.0, 4.0) + _default_window(22.0, 24.0),
-    'W1_START': round(9.5 / 0.25),
-    'W2_START': round(17.0 / 0.25),
-    'OFF_PEAK_END_STEP': round(4.0 / 0.25),
-    # v13 C4: evening off-peak charge (22-24h)  feature flag.
-    # Default False: keeps v12 behaviour (charge only in 00-04h block).
-    # Set True only if BESS undersized for morning-only recharge or
-    # next-day forecast indicates tight headroom.
-    'ENABLE_EVENING_CHARGE': False,
-    # Safety / derate
-    'V_NOMINAL':     1.0,
-    'V_BLACKOUT_TH': 0.85,
-    'T_DERATE': [(35, 1.00), (42, 0.70), (45, 0.50), (999, 0.0)],
-}
+def _system_default_config():
+    battery = SYSTEM_CONFIG["BESS"]
+    tariff = SYSTEM_CONFIG["Tariff"]
+    time_config = SYSTEM_CONFIG["Time"]
+    operation = SYSTEM_CONFIG["Operation"]
+    safety = SYSTEM_CONFIG["Safety"]
+    dt_hours = float(time_config["dt_hours"])
+    return {
+        "E_cap_kWh": battery["E_cap_kWh"],
+        "P_rated_kW": battery["P_rated_kW"],
+        "eta_ch": battery["eta_ch"],
+        "eta_dis": battery["eta_dis"],
+        "soc_min": battery["soc_min"],
+        "soc_max": battery["soc_max"],
+        "soc_safety_buffer": battery["soc_safety_buffer"],
+        "soc_eod": battery["soc_eod"],
+        "soc_min_emergency": battery["soc_min_emergency"],
+        "dt_hours": dt_hours,
+        "price_peak": tariff["price_peak_VND_per_kWh"],
+        "price_mid": tariff["price_mid_VND_per_kWh"],
+        "price_off": tariff["price_off_VND_per_kWh"],
+        "T_cap": tariff["T_cap_VND_per_kW_per_month"],
+        "P_target_user_kW": operation["P_target_user_kW"],
+        "ENABLE_EXPORT": tariff["ENABLE_EXPORT"],
+        "FIT_PRICE": tariff["FIT_PRICE_VND_per_kWh"],
+        "ENABLE_EVENING_CHARGE": False,
+        "V_NOMINAL": safety["V_NOMINAL"],
+        "V_BLACKOUT_TH": safety["V_BLACKOUT_TH"],
+        "T_DERATE": list(safety["T_DERATE"]),
+        "peak_windows": tariff["peak_windows"],
+        "off_windows": tariff["off_windows"],
+    }
+
+
+DEFAULT_CONFIG = _system_default_config()
 
 
 def _resolve_config(cfg=None):
-    """Merge user config over DEFAULT_CONFIG, computing soc_eod if None."""
+    """Merge caller config over canonical defaults, computing soc_eod if None."""
     out = dict(DEFAULT_CONFIG)
     if cfg:
         out.update(cfg)
-    if out.get('soc_eod') is None:
-        out['soc_eod'] = out['soc_min'] + out['soc_safety_buffer']
+    if out.get("soc_eod") is None:
+        out["soc_eod"] = out["soc_min"] + out["soc_safety_buffer"]
     return out
 
 
@@ -94,21 +83,15 @@ class SADRBCConfig:
         self.SOC_eod     = float(cfg['soc_eod'])
         self.SOC_min_emergency = float(cfg['soc_min_emergency'])
         self.SOC_SAFETY_BUFFER = self.SOC_safety
-        # Time
-        self.dt = float(cfg['dt_hours'])
+        # Clock windows are the source of truth. Step indices are derived by set_dt().
+        self.peak_windows = str(cfg.get('peak_windows', ''))
+        self.off_windows = str(cfg.get('off_windows', ''))
+        self.set_dt(float(cfg['dt_hours']))
         # Tariff
         self.price_peak = float(cfg['price_peak'])
         self.price_mid  = float(cfg['price_mid'])
         self.price_off  = float(cfg['price_off'])
         self.T_cap      = float(cfg['T_cap'])
-        # Windows
-        self.W1    = list(cfg['W1'])
-        self.W2    = list(cfg['W2'])
-        self.INTER = list(cfg['INTER'])
-        self.OFF   = list(cfg['OFF'])
-        self.W1_START = int(cfg['W1_START'])
-        self.W2_START = int(cfg['W2_START'])
-        self.OFF_PEAK_END_STEP = int(cfg['OFF_PEAK_END_STEP'])
         # Operation
         self.ENABLE_EVENING_CHARGE = bool(cfg.get('ENABLE_EVENING_CHARGE', False))
         self.P_target_user = float(cfg['P_target_user_kW'])
@@ -122,42 +105,21 @@ class SADRBCConfig:
         self.spread_peak_off = self.price_peak - self.price_off / self.eta_RT
         self.ARB_ENABLED     = self.spread_peak_off > 0
 
+    def set_dt(self, dt_hours: float) -> None:
+        """Set native timestep and rebuild all tariff step indices from clock time."""
+        self.dt = float(dt_hours)
+        windows = build_tariff_windows(self.peak_windows, self.off_windows, self.dt)
+        self.W1 = windows["W1"]
+        self.W2 = windows["W2"]
+        self.INTER = windows["INTER"]
+        self.OFF = windows["OFF"]
+        self.W1_START = windows["W1_START"]
+        self.W2_START = windows["W2_START"]
+        self.OFF_PEAK_END_STEP = windows["OFF_PEAK_END_STEP"]
 
-# Module-level default instance (preserves legacy behaviour for any caller
-# that imports module constants directly).
+
+# One private fallback config for helper functions that allow cfg=None.
 _DEFAULTS = SADRBCConfig()
-E_cap   = _DEFAULTS.E_cap
-P_rated_nominal = _DEFAULTS.P_rated_nominal
-eta_ch  = _DEFAULTS.eta_ch
-eta_dis = _DEFAULTS.eta_dis
-eta_RT  = _DEFAULTS.eta_RT
-SOC_min     = _DEFAULTS.SOC_min
-SOC_max     = _DEFAULTS.SOC_max
-SOC_chg     = _DEFAULTS.SOC_chg
-SOC_safety  = _DEFAULTS.SOC_safety
-SOC_eod     = _DEFAULTS.SOC_eod
-SOC_min_emergency = _DEFAULTS.SOC_min_emergency
-SOC_SAFETY_BUFFER = _DEFAULTS.SOC_SAFETY_BUFFER
-dt = _DEFAULTS.dt
-price_peak = _DEFAULTS.price_peak
-price_mid  = _DEFAULTS.price_mid
-price_off  = _DEFAULTS.price_off
-T_cap      = _DEFAULTS.T_cap
-W1    = _DEFAULTS.W1
-W2    = _DEFAULTS.W2
-INTER = _DEFAULTS.INTER
-OFF   = _DEFAULTS.OFF
-W1_START = _DEFAULTS.W1_START
-W2_START = _DEFAULTS.W2_START
-OFF_PEAK_END_STEP = _DEFAULTS.OFF_PEAK_END_STEP
-P_target_user = _DEFAULTS.P_target_user
-FIT_PRICE     = _DEFAULTS.FIT_PRICE
-ENABLE_EXPORT = _DEFAULTS.ENABLE_EXPORT
-V_NOMINAL = _DEFAULTS.V_NOMINAL
-V_BLACKOUT_TH = _DEFAULTS.V_BLACKOUT_TH
-T_DERATE = _DEFAULTS.T_DERATE
-spread_peak_off = _DEFAULTS.spread_peak_off
-ARB_ENABLED     = _DEFAULTS.ARB_ENABLED
 
 
 # =====================================================================
@@ -166,7 +128,7 @@ ARB_ENABLED     = _DEFAULTS.ARB_ENABLED
 def compute_PMax_30min_rolling(p_grid, dt_h=None):
     if dt_h is None:
         dt_h = _DEFAULTS.dt
-    win = max(1, int(round(0.5 / dt_h)))
+    win = demand_window_steps(dt_h)
     if len(p_grid) < win:
         return max(p_grid) if p_grid else 0.0
     rolling_max = 0.0

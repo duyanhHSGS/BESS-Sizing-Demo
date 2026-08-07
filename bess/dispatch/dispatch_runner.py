@@ -36,13 +36,11 @@ BASE_DIR = PROJECT_ROOT
 
 from bess.core.common import (  # noqa: E402
     TOU_RULES,
-    build_tariff_windows,
-    dt_from_steps_per_day,
     ensure_inside_directory,
     load_system_config,
     score_month,
-    steps_per_day_from_dt,
 )
+from bess.core.timebase import dt_from_steps_per_day, steps_per_day_from_dt
 from bess.agents.grepo_agent import GREPOAgent  # noqa: E402
 from bess.agents.grepro_agent import GREPROAgent  # noqa: E402
 from bess.agents.ppo_agent import PPOAgent  # noqa: E402
@@ -106,11 +104,6 @@ def build_dispatch_config(parameters: dict[str, Any], e_cap_kwh: float, p_rated_
     base = load_system_config()
     dt_hours = _to_float(parameters.get("dt"), base.dt)
     dt_hours = dt_from_steps_per_day(steps_per_day_from_dt(dt_hours))
-    windows = build_tariff_windows(
-        str(parameters.get("billing_windows_expensive", "")),
-        str(parameters.get("billing_windows_cheap", "")),
-        dt_hours,
-    )
     TOU_RULES["sunday_no_peak"] = bool(parameters.get("billing_sunday"))
     return SADRBCConfig(
         {
@@ -136,7 +129,8 @@ def build_dispatch_config(parameters: dict[str, Any], e_cap_kwh: float, p_rated_
             "V_NOMINAL": base.V_NOMINAL,
             "V_BLACKOUT_TH": base.V_BLACKOUT_TH,
             "T_DERATE": list(base.T_DERATE),
-            **windows,
+            "peak_windows": str(parameters.get("billing_windows_expensive", base.peak_windows)),
+            "off_windows": str(parameters.get("billing_windows_cheap", base.off_windows)),
         }
     )
 
@@ -274,14 +268,15 @@ def run_policy_dispatch(
         e_cap = _to_float(parameters.get("battery_capacity_kWh"), 0.0)
         p_rated = _to_float(parameters.get("battery_power_limit_kW"), 0.0)
         warnings.append(f"{checkpoint_name}: missing E/P metadata, using current UI sizing")
+    requested_native_dt = _to_float(parameters.get("dt"), 0.0) * 60.0
+    try:
+        control_dt = validate_dispatch_sampling(meta, requested_native_dt)
+    except ValueError as exc:
+        raise DispatchRunWarning(f"{checkpoint_name}: {exc}") from exc
     cfg = build_dispatch_config(parameters, float(e_cap), float(p_rated))
     month = month or dataset_to_month(selected_data_path(parameters))
     expected_native_dt = float(meta["native_dt_minutes"])
     actual_native_dt = cfg.dt * 60.0
-    try:
-        control_dt = validate_dispatch_sampling(meta, actual_native_dt)
-    except ValueError as exc:
-        raise DispatchRunWarning(f"{checkpoint_name}: {exc}") from exc
     if abs(expected_native_dt - actual_native_dt) > 1e-9:
         warnings.append(
             f"{checkpoint_name}: policy trained on {expected_native_dt:g}-minute "

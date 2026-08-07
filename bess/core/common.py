@@ -15,7 +15,8 @@ from pathlib import Path
 
 from bess.paths import PROJECT_ROOT
 
-from bess.core.settings import SYSTEM_CONFIG
+from bess.core.settings import DEFAULT_PARAMETERS, SYSTEM_CONFIG
+from bess.core.timebase import demand_window_steps, steps_per_day_from_dt
 
 import numpy as np
 
@@ -25,28 +26,6 @@ DATA_DIR = ROOT / "data"
 RESULTS_DIR = ROOT / "checkpoints"
 
 from bess.agents.sadrbc import SADRBCConfig, tariff_for_step  # noqa: E402
-
-STEPS_PER_DAY = 96
-DT_HOURS = 0.25
-DEMAND_WINDOW_HOURS = 0.5
-def steps_per_day_from_dt(dt_hours: float) -> int:
-    dt = float(dt_hours)
-    if dt <= 0.0:
-        raise ValueError(f"dt_hours must be positive, got {dt_hours!r}")
-    steps = int(round(24.0 / dt))
-    # CSV-detected values are rounded for the UI (for example 1 minute is
-    # shown as 0.016667), so allow a small accumulated rounding error.
-    tolerance_hours = max(1e-6, steps * 1e-6)
-    if steps <= 0 or abs(steps * dt - 24.0) > tolerance_hours:
-        raise ValueError(f"dt_hours={dt_hours!r} does not divide a 24-hour day")
-    return steps
-
-
-def dt_from_steps_per_day(steps_per_day: int) -> float:
-    steps = int(steps_per_day)
-    if steps <= 0:
-        raise ValueError(f"steps_per_day must be positive, got {steps_per_day!r}")
-    return 24.0 / steps
 
 
 def ensure_inside_directory(path: Path, base_dir: Path, *, label: str = "project") -> Path:
@@ -91,52 +70,48 @@ def validate_control_interval_minutes(
     return control
 
 
-# ---------------------------------------------------------------------------
-# 2026 Vietnam market CAPEX (same source as sizing/sizing_matrix_2026.py)
-# ---------------------------------------------------------------------------
-CAPEX_BESS_PER_KWH = 5_000_000.0   # VND/kWh  LFP container class
-CAPEX_BESS_PER_KW = 4_000_000.0    # VND/kW   PCS / installation
-OPEX_PCT_PER_YEAR = 0.02           # of CAPEX, maintenance + insurance
-DISCOUNT_RATE = 0.08
-PROJECT_YEARS = 10
-
-# Tham s ti chnh GHI  C t UI (Tool C /api/config/tariff).
-# realization: t l hin thc ha  tit kim THC THI (DRL/v13 qua plant
-# tht) so vi c lng Oracle perfect-foresight dng trong sizing.
-# o thc nghim: Crystal ~0.86, Tande ~0.54, Namduoc ~0.75  mc nh
-# thn trng 0.6; nn cp nht theo benchmark tng site.
+# Financial defaults come from the same canonical UI/default parameter source.
 FIN = {
-    "capex_per_kwh": CAPEX_BESS_PER_KWH,
-    "capex_per_kw": CAPEX_BESS_PER_KW,
-    "opex_pct": OPEX_PCT_PER_YEAR,
-    "discount": DISCOUNT_RATE,
-    "years": PROJECT_YEARS,
-    "realization": 0.6,
+    "capex_per_kwh": float(DEFAULT_PARAMETERS["billing_battery_per_kWh"]),
+    "capex_per_kw": float(DEFAULT_PARAMETERS["billing_battery_per_kW"]),
+    "opex_pct": float(DEFAULT_PARAMETERS["billing_yearly_maintain_percentage"]),
+    "discount": float(DEFAULT_PARAMETERS["billing_discount_rate"]),
+    "years": int(DEFAULT_PARAMETERS["billing_years"]),
+    "realization": float(DEFAULT_PARAMETERS["billing_real_saving_factor"]),
 }
 
 
 def load_system_config() -> SADRBCConfig:
-    """Map settings.SYSTEM_CONFIG onto a SADRBCConfig (no file I/O)."""
-    b = SYSTEM_CONFIG["BESS"]
-    tr = SYSTEM_CONFIG["Tariff"]
-    op = SYSTEM_CONFIG["Operation"]
+    """Build the fallback controller config from canonical project defaults."""
+    battery = SYSTEM_CONFIG["BESS"]
+    tariff = SYSTEM_CONFIG["Tariff"]
+    time_config = SYSTEM_CONFIG["Time"]
+    operation = SYSTEM_CONFIG["Operation"]
+    safety = SYSTEM_CONFIG["Safety"]
+    dt_hours = float(time_config["dt_hours"])
     cfg = {
-        "E_cap_kWh": b["E_cap_kWh"],
-        "P_rated_kW": b["P_rated_kW"],
-        "eta_ch": b["eta_ch"],
-        "eta_dis": b["eta_dis"],
-        "soc_min": b["soc_min"],
-        "soc_max": b["soc_max"],
-        "soc_safety_buffer": b["soc_safety_buffer"],
-        "soc_eod": b.get("soc_eod"),
-        "soc_min_emergency": b["soc_min_emergency"],
-        "price_peak": tr["price_peak_VND_per_kWh"],
-        "price_mid": tr["price_mid_VND_per_kWh"],
-        "price_off": tr["price_off_VND_per_kWh"],
-        "T_cap": tr["T_cap_VND_per_kW_per_month"],
-        "FIT_PRICE": tr["FIT_PRICE_VND_per_kWh"],
-        "ENABLE_EXPORT": tr["ENABLE_EXPORT"],
-        "P_target_user_kW": op["P_target_user_kW"],
+        "E_cap_kWh": battery["E_cap_kWh"],
+        "P_rated_kW": battery["P_rated_kW"],
+        "eta_ch": battery["eta_ch"],
+        "eta_dis": battery["eta_dis"],
+        "soc_min": battery["soc_min"],
+        "soc_max": battery["soc_max"],
+        "soc_safety_buffer": battery["soc_safety_buffer"],
+        "soc_eod": battery["soc_eod"],
+        "soc_min_emergency": battery["soc_min_emergency"],
+        "dt_hours": dt_hours,
+        "price_peak": tariff["price_peak_VND_per_kWh"],
+        "price_mid": tariff["price_mid_VND_per_kWh"],
+        "price_off": tariff["price_off_VND_per_kWh"],
+        "T_cap": tariff["T_cap_VND_per_kW_per_month"],
+        "FIT_PRICE": tariff["FIT_PRICE_VND_per_kWh"],
+        "ENABLE_EXPORT": tariff["ENABLE_EXPORT"],
+        "P_target_user_kW": operation["P_target_user_kW"],
+        "V_NOMINAL": safety["V_NOMINAL"],
+        "V_BLACKOUT_TH": safety["V_BLACKOUT_TH"],
+        "T_DERATE": list(safety["T_DERATE"]),
+        "peak_windows": tariff["peak_windows"],
+        "off_windows": tariff["off_windows"],
     }
     return SADRBCConfig(cfg)
 
@@ -164,48 +139,14 @@ def make_bess_config(base: SADRBCConfig, e_cap_kwh: float,
         "FIT_PRICE": base.FIT_PRICE,
         "ENABLE_EXPORT": base.ENABLE_EXPORT,
         "P_target_user_kW": p_target_kw,
-        "W1": list(base.W1), "W2": list(base.W2),
-        "INTER": list(base.INTER), "OFF": list(base.OFF),
-        "W1_START": base.W1_START, "W2_START": base.W2_START,
-        "OFF_PEAK_END_STEP": base.OFF_PEAK_END_STEP,
+        "V_NOMINAL": base.V_NOMINAL,
+        "V_BLACKOUT_TH": base.V_BLACKOUT_TH,
+        "T_DERATE": list(base.T_DERATE),
+        "peak_windows": base.peak_windows,
+        "off_windows": base.off_windows,
     })
 
 
-def build_tariff_windows(peak_ranges: str, off_ranges: str, dt_hours: float = DT_HOURS) -> dict:
-    """i chui khung gi "HH:MM-HH:MM,..." thnh step-lists 15 cho
-    SADRBCConfig. Ti a 2 khung cao im (sngW1, chiu/tiW2);
-    1 khung  W1 rng. VD kch bn mi:
-        peak "17:30-22:30", off "00:00-06:00"."""
-    steps_per_day = steps_per_day_from_dt(dt_hours)
-
-    def to_steps(rng: str) -> list[int]:
-        a, b = rng.strip().split("-")
-        h1, m1 = map(int, a.split(":"))
-        h2, m2 = map(int, b.split(":"))
-        s1 = round((h1 + m1 / 60.0) / dt_hours)
-        s2 = round((h2 + m2 / 60.0) / dt_hours)
-        if s2 <= s1:
-            s2 += steps_per_day
-        return [s % steps_per_day for s in range(s1, s2)]
-
-    peaks = [to_steps(r) for r in peak_ranges.split(",") if r.strip()]
-    offs: list[int] = []
-    for r in off_ranges.split(","):
-        if r.strip():
-            offs += to_steps(r)
-    peaks.sort(key=lambda w: w[0])
-    if len(peaks) == 1:
-        w1, w2 = [], peaks[0]
-    else:
-        w1, w2 = peaks[0], peaks[-1]
-    all_peak = set(w1) | set(w2)
-    inter = [t for t in range(steps_per_day) if t not in all_peak and t not in set(offs)]
-    # bc kt thc khi OFF bui sng (v13 sc m ti mc ny)
-    morning = sorted(t for t in offs if t < steps_per_day // 2)
-    off_end = (morning[-1] + 1) if morning else round(4.0 / dt_hours)
-    return {"W1": w1, "W2": w2, "OFF": sorted(set(offs)), "INTER": inter,
-            "W1_START": (w1[0] if w1 else w2[0]), "W2_START": w2[0],
-            "OFF_PEAK_END_STEP": off_end}
 
 
 def tariff_vector(cfg: SADRBCConfig) -> np.ndarray:
@@ -216,7 +157,7 @@ def tariff_vector(cfg: SADRBCConfig) -> np.ndarray:
 
 # Quy tc TOU theo lch (EVN: Ch nht KHNG c gi cao im  gi 
 # tnh gi bnh thng). Bt/tt t cu hnh biu gi Tool C.
-TOU_RULES = {"sunday_no_peak": False}
+TOU_RULES = {"sunday_no_peak": bool(SYSTEM_CONFIG["Tariff"]["sunday_no_peak"])}
 
 
 def is_sunday(day) -> bool:
@@ -249,10 +190,11 @@ def tariff_vector_day(cfg: SADRBCConfig, day) -> np.ndarray:
     return tariff_vector(cfg)
 
 
-def rolling_pmax_day(p_grid_day: np.ndarray, dt_hours: float = DT_HOURS) -> float:
-    """Max 30-min rolling average of one day's grid import (kW)."""
+def rolling_pmax_day(p_grid_day: np.ndarray, dt_hours: float) -> float:
+    """Max 30-minute rolling average for the supplied native timestep."""
     from bess.evaluation.benchmark import _rolling_30_minute_average
 
+    demand_window_steps(dt_hours)  # reject a timestep that cannot tile 30 minutes
     g = np.maximum(0.0, np.asarray(p_grid_day, dtype=np.float64))
     rolling = _rolling_30_minute_average(g, dt_hours)
     return float(max(rolling, default=0.0))
