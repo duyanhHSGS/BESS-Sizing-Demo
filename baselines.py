@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from common import validate_control_interval_minutes
 from scenario_gen import MonthData
 from settings import PPO_GAMMA
 
@@ -71,34 +72,8 @@ def run_sadrbc(month: MonthData, cfg, *, forecast_spec=None,
 # ---------------------------------------------------------------------------
 def validate_dispatch_sampling(meta: dict, native_dt_minutes: float) -> float:
     """Return a compatible policy control interval for native dispatch data."""
-    control_dt_minutes = float(
-        meta.get("control_dt_minutes", native_dt_minutes)
-    )
-    if not np.isfinite(native_dt_minutes) or native_dt_minutes <= 0.0:
-        raise ValueError("Dispatch data resolution must be a positive number of minutes")
-    if not np.isfinite(control_dt_minutes) or control_dt_minutes <= 0.0:
-        raise ValueError("Policy control interval must be a positive number of minutes")
-
-    ratio = control_dt_minutes / native_dt_minutes
-    if control_dt_minutes < native_dt_minutes - 1e-9:
-        raise ValueError(
-            f"Policy control interval is {control_dt_minutes:g} minutes, "
-            f"but Dispatch data is coarser at {native_dt_minutes:g} minutes"
-        )
-    if abs(ratio - round(ratio)) > 1e-9:
-        raise ValueError(
-            f"Policy control interval of {control_dt_minutes:g} minutes is not "
-            f"an exact multiple of the {native_dt_minutes:g}-minute Dispatch data"
-        )
-    if (
-        abs(30.0 / control_dt_minutes - round(30.0 / control_dt_minutes)) > 1e-9
-        or abs(1440.0 / control_dt_minutes - round(1440.0 / control_dt_minutes)) > 1e-9
-    ):
-        raise ValueError(
-            f"Policy control interval of {control_dt_minutes:g} minutes must "
-            "divide both 30 minutes and 24 hours"
-        )
-    return control_dt_minutes
+    control_dt_minutes = float(meta.get("control_dt_minutes", native_dt_minutes))
+    return validate_control_interval_minutes(native_dt_minutes, control_dt_minutes)
 
 
 # ---------------------------------------------------------------------------

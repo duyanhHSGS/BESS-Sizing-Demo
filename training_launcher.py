@@ -9,6 +9,7 @@ from pathlib import Path
 
 import oracle_cache
 from benchmark import detect_dt_hours
+from common import ensure_inside_directory, validate_control_interval_minutes
 from settings import GREPO_GAMMA, GREPRO_GAMMA, PPO_GAMMA, PPO_LAMBDA, PPO2_GAMMA, PPO2_LAM_ENERGY, PPO2_LAM_PEAK, PRO_GAMMA
 from training_datasets import (
     DatasetError,
@@ -46,11 +47,10 @@ def sanitize_tag(raw: str) -> str:
 
 
 def ensure_inside_base(path: Path, base_dir: Path = BASE_DIR) -> Path:
-    resolved = path.resolve()
-    base = base_dir.resolve()
-    if resolved != base and base not in resolved.parents:
-        raise TrainingLaunchError(f"path escapes Sizing_Demo: {resolved}")
-    return resolved
+    try:
+        return ensure_inside_directory(path, base_dir, label="Sizing_Demo")
+    except ValueError as exc:
+        raise TrainingLaunchError(str(exc)) from exc
 
 
 def _float(payload: dict, key: str, default: float | None = None) -> float:
@@ -99,18 +99,13 @@ def _split_days(payload: dict) -> tuple[int, int]:
 def _control_dt_minutes(payload: dict, csv_path: Path) -> int:
     native_minutes = float(detect_resolution_minutes(csv_path))
     requested = _float(payload, "control_dt_minutes", native_minutes)
-    ratio = requested / native_minutes
-    if (
-        not math.isfinite(requested)
-        or requested < native_minutes - 1e-9
-        or abs(ratio - round(ratio)) > 1e-9
-        or abs(30.0 / requested - round(30.0 / requested)) > 1e-9
-        or abs(1440.0 / requested - round(1440.0 / requested)) > 1e-9
-    ):
+    try:
+        validate_control_interval_minutes(native_minutes, requested)
+    except ValueError as exc:
         raise TrainingLaunchError(
             "control_dt_minutes must be a native-or-coarser multiple "
             "that divides both 30 minutes and 24 hours"
-        )
+        ) from exc
     return int(round(requested))
 
 

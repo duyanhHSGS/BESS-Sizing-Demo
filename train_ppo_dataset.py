@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import csv as _csv
 import math
 import time
 from datetime import date, datetime, timezone
@@ -12,10 +11,16 @@ import numpy as np
 from baselines import run_drl_policy, run_no_bess
 from bess_env import BESSEnv
 from benchmark import _rolling_30_minute_average
-from common import RESULTS_DIR, load_system_config, make_bess_config, score_month
+from common import RESULTS_DIR, score_month
 from ppo_agent import PPOAgent, RolloutBuffer, resolve_ppo_device
-from scenario_gen import DayData, MonthData
+from scenario_gen import MonthData
 from oracle_cache import load_cached_training_grids
+from training_common import (
+    augment_month,
+    build_training_bess_config,
+    load_training_days,
+    month_blocks,
+)
 from training_reports import write_curve, write_report
 from settings import PPO_GAMMA, PPO_LAMBDA
 from weather_forecast import build_forecast_bundle, fit_attach_forecasts
@@ -23,86 +28,6 @@ from weather_forecast import build_forecast_bundle, fit_attach_forecasts
 
 ROLLOUT_DAYS = 32
 LOG_EVERY_UPDATES = 1
-
-
-def load_csv_days(path: Path) -> list[DayData]:
-    by_day: dict[str, dict] = {}
-    with path.open(encoding="utf-8") as f:
-        for row in _csv.DictReader(f):
-            day = by_day.setdefault(
-                row["date_iso"],
-                {
-                    "load": [],
-                    "pv": [],
-                    "day_type": row["day_type"],
-                    "day_index": int(row["day_index"]),
-                },
-            )
-            step = int(row["step"])
-            while len(day["load"]) <= step:
-                day["load"].append(0.0)
-                day["pv"].append(0.0)
-            day["load"][step] = float(row["P_load_kW"])
-            day["pv"][step] = float(row["P_pv_kW"])
-    days = []
-    for iso in sorted(by_day):
-        data = by_day[iso]
-        days.append(
-            DayData(
-                load=np.asarray(data["load"], dtype=np.float64),
-                pv=np.asarray(data["pv"], dtype=np.float64),
-                day_type=data["day_type"],
-                weather="csv",
-                day_index=data["day_index"],
-                date_iso=iso,
-            )
-        )
-    return days
-
-
-def month_blocks(days: list[DayData]) -> list[MonthData]:
-    blocks: dict[str, MonthData] = {}
-    for day in days:
-        key = str(day.date_iso)[:7]
-        blocks.setdefault(key, MonthData(source=f"csv:{key}")).days.append(day)
-    months = [month for _, month in sorted(blocks.items()) if len(month.days) >= 15]
-    if months or not days:
-        return months
-    return [MonthData(days=days, source="csv:train_short")]
-
-
-def augment_month(
-    month: MonthData,
-    rng: np.random.Generator,
-    sigma_load: float = 0.04,
-    sigma_pv: float = 0.08,
-    rho: float = 0.9,
-) -> MonthData:
-    out = MonthData(source=month.source + ":aug")
-    for day in month.days:
-
-        def _ar1(n: int, sigma: float) -> np.ndarray:
-            err = np.zeros(n)
-            white = sigma * np.sqrt(1 - rho ** 2)
-            innovations = white * rng.standard_normal(max(0, n - 1))
-            for step in range(1, n):
-                err[step] = rho * err[step - 1] + innovations[step - 1]
-            return err
-
-        n_steps = len(day.load)
-        load = np.maximum(0.0, day.load * (1 + _ar1(n_steps, sigma_load)))
-        pv = np.maximum(0.0, day.pv * (1 + _ar1(n_steps, sigma_pv)))
-        out.days.append(
-            DayData(
-                load=load,
-                pv=pv,
-                day_type=day.day_type,
-                weather=day.weather,
-                day_index=day.day_index,
-                date_iso=day.date_iso,
-            )
-        )
-    return out
 
 
 def main() -> None:
@@ -131,7 +56,7 @@ def main() -> None:
     if not math.isfinite(args.lambda_value) or not 0.0 <= args.lambda_value <= 1.0:
         raise SystemExit("lambda must be finite and in [0, 1]")
 
-    days = load_csv_days(Path(args.csv))
+    days = load_training_days(args.csv, weather="csv")
     if args.val_days < 1 or args.test_days < 1:
         raise SystemExit("Validation days and test days must both be at least 1")
     split_days = args.val_days + args.test_days
@@ -160,31 +85,13 @@ def main() -> None:
             Path(args.forecast_artifact), p_ref,
         )
 
-    base = load_system_config()
-    cfg = make_bess_config(base, args.e_cap, args.p_rated, base.P_target_user)
-    cfg.dt = csv_dt
-    billing = args.billing
-    import json
-    from common import TOU_RULES, build_tariff_windows
-
-    tariff = json.loads(Path(args.training_config).read_text(encoding="utf-8"))
-    cfg.price_peak = float(tariff.get("price_peak", cfg.price_peak))
-    cfg.price_mid = float(tariff.get("price_mid", cfg.price_mid))
-    cfg.price_off = float(tariff.get("price_off", cfg.price_off))
-    cfg.T_cap = float(tariff.get("t_cap", cfg.T_cap))
-    cfg.eta_ch = float(tariff.get("charge_efficiency", cfg.eta_ch))
-    cfg.eta_dis = float(tariff.get("discharge_efficiency", cfg.eta_dis))
-    cfg.SOC_min = float(tariff.get("minimum_soc", cfg.SOC_min))
-    cfg.SOC_max = float(tariff.get("maximum_soc", cfg.SOC_max))
-    cfg.SOC_eod = float(tariff.get("required_final_soc", cfg.SOC_eod))
-    for key, value in build_tariff_windows(
-        tariff["peak_windows"], tariff["off_windows"], cfg.dt
-    ).items():
-        setattr(cfg, key, value)
-    billing = tariff.get("billing_mode", billing)
-    TOU_RULES["sunday_no_peak"] = bool(tariff.get("sunday_no_peak", False))
-    if billing == "tou":
-        cfg.T_cap = 0.0
+    cfg, billing = build_training_bess_config(
+        args.e_cap,
+        args.p_rated,
+        csv_dt,
+        args.training_config,
+        default_billing=args.billing,
+    )
 
     tag = args.tag or f"ds_{args.e_cap:.0f}kwh_{args.p_rated:.0f}kw"
     if billing == "tou" and not tag.endswith("_tou"):

@@ -27,16 +27,16 @@ from weather_forecast import (
     attach_forecast_artifact,
     attach_forecast_bundle,
 )
-from baselines import run_sadrbc
+from baselines import run_drl_policy, run_sadrbc, validate_dispatch_sampling
 
 
 BASE_DIR = Path(__file__).resolve().parent
 
-from baselines import run_drl_policy, validate_dispatch_sampling  # noqa: E402
 from common import (  # noqa: E402
     TOU_RULES,
     build_tariff_windows,
     dt_from_steps_per_day,
+    ensure_inside_directory,
     load_system_config,
     score_month,
     steps_per_day_from_dt,
@@ -55,11 +55,7 @@ class DispatchRunWarning(RuntimeError):
 
 
 def ensure_inside_sizing_demo(path: Path) -> Path:
-    resolved = path.resolve()
-    base = BASE_DIR.resolve()
-    if resolved != base and base not in resolved.parents:
-        raise ValueError(f"path escapes Sizing_Demo: {path}")
-    return resolved
+    return ensure_inside_directory(path, BASE_DIR, label="Sizing_Demo")
 
 
 def dataset_to_month(csv_path: Path = DATA_PATH) -> MonthData:

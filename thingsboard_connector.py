@@ -58,8 +58,9 @@ def _raw_config() -> dict[str, Any]:
 
 def public_config() -> dict[str, Any]:
     config = _raw_config()
+    has_password = bool(config.get("password"))
     config.pop("password", None)
-    config["has_password"] = bool(_raw_config().get("password"))
+    config["has_password"] = has_password
     return config
 
 

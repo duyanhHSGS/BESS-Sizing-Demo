@@ -47,6 +47,48 @@ def dt_from_steps_per_day(steps_per_day: int) -> float:
     return 24.0 / steps
 
 
+def ensure_inside_directory(path: Path, base_dir: Path, *, label: str = "project") -> Path:
+    """Resolve a path and reject attempts to escape the requested base directory."""
+    resolved = Path(path).resolve()
+    base = Path(base_dir).resolve()
+    if resolved != base and base not in resolved.parents:
+        raise ValueError(f"path escapes {label}: {resolved}")
+    return resolved
+
+
+def validate_control_interval_minutes(
+    native_dt_minutes: float,
+    control_dt_minutes: float,
+) -> float:
+    """Validate one control interval against native data and billing windows."""
+    native = float(native_dt_minutes)
+    control = float(control_dt_minutes)
+    if not np.isfinite(native) or native <= 0.0:
+        raise ValueError("Dispatch data resolution must be a positive number of minutes")
+    if not np.isfinite(control) or control <= 0.0:
+        raise ValueError("Policy control interval must be a positive number of minutes")
+    if control < native - 1e-9:
+        raise ValueError(
+            f"Policy control interval is {control:g} minutes, "
+            f"but Dispatch data is coarser at {native:g} minutes"
+        )
+    ratio = control / native
+    if abs(ratio - round(ratio)) > 1e-9:
+        raise ValueError(
+            f"Policy control interval of {control:g} minutes is not "
+            f"an exact multiple of the {native:g}-minute Dispatch data"
+        )
+    if (
+        abs(30.0 / control - round(30.0 / control)) > 1e-9
+        or abs(1440.0 / control - round(1440.0 / control)) > 1e-9
+    ):
+        raise ValueError(
+            f"Policy control interval of {control:g} minutes must "
+            "divide both 30 minutes and 24 hours"
+        )
+    return control
+
+
 # ---------------------------------------------------------------------------
 # 2026 Vietnam market CAPEX (same source as sizing/sizing_matrix_2026.py)
 # ---------------------------------------------------------------------------

@@ -34,6 +34,21 @@ LOG_STD_MIN, LOG_STD_MAX = -3.0, 0.0
 TANH_GAIN = 5.0 / 3.0   # nn.init.calculate_gain("tanh")
 
 
+def resolve_ppo2_device(device: str = "auto") -> str:
+    requested = str(device).lower()
+    if requested not in {"auto", "cpu", "cuda"}:
+        raise ValueError("PPO2 device must be 'auto', 'cpu', or 'cuda'")
+    if requested == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "PPO2 device='cuda' requested, but PyTorch reports that CUDA is unavailable"
+            )
+        return "cuda"
+    if requested == "cpu":
+        return "cpu"
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def _squashed_log_prob_from_latent(
     distribution: torch.distributions.Normal,
     latent: torch.Tensor,
@@ -241,10 +256,12 @@ class PPO2Agent:
                  vf_coef=0.5, target_kl=0.01, seed=0,
                  actor_lr: float | None = None,
                  critic_lr: float | None = None,
-                 log_std_init: float = -0.5):
+                 log_std_init: float = -0.5,
+                 device: str = "auto"):
         torch.manual_seed(seed)
         self._rng = np.random.default_rng(seed)
-        self.net = ActorCritic(obs_dim, log_std_init=log_std_init)
+        self.device = torch.device(resolve_ppo2_device(device))
+        self.net = ActorCritic(obs_dim, log_std_init=log_std_init).to(self.device)
         self.actor_lr = lr if actor_lr is None else float(actor_lr)
         self.critic_lr = lr if critic_lr is None else float(critic_lr)
         self.lr = lr
@@ -266,8 +283,20 @@ class PPO2Agent:
         self.target_kl = target_kl
         self.norm_energy = PopArtNormalizer(self.net.critic_energy)
         self.norm_peak = PopArtNormalizer(self.net.critic_peak)
+        with torch.random.fork_rng(devices=[]):
+            self.collector_net = ActorCritic(obs_dim, log_std_init=log_std_init).cpu()
+        self._sync_collector()
         self.meta = {}
         self.diagnostics = {}
+
+    @torch.inference_mode()
+    def _sync_collector(self) -> None:
+        state = {
+            key: value.detach().cpu()
+            for key, value in self.net.state_dict().items()
+        }
+        self.collector_net.load_state_dict(state)
+        self.collector_net.eval()
 
     def anneal_lr(self, progress: float) -> None:
         """Linearly decay each group's learning rate; progress runs 0 -> 1."""
@@ -282,9 +311,9 @@ class PPO2Agent:
         Values are DENORMALISED so GAE runs on the same scale as rewards.
         """
         o = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
-        dist = self.net.dist(o)
+        dist = self.collector_net.dist(o)
         a, logp, latent = _sample_squashed(dist, deterministic=deterministic)
-        v_e, v_p = self.net.normalized_values(o)
+        v_e, v_p = self.collector_net.normalized_values(o)
         return (
             float(a.item()),
             float(logp.item()),
@@ -297,7 +326,7 @@ class PPO2Agent:
     def predict_action(self, obs: np.ndarray) -> float:
         """Deterministic actor-only inference for evaluation rollouts."""
         o = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
-        dist = self.net.dist(o)
+        dist = self.collector_net.dist(o)
         a, _, _ = _sample_squashed(dist, deterministic=True)
         return float(a.item())
 
@@ -324,12 +353,16 @@ class PPO2Agent:
         self.norm_energy.update(ret_e)
         self.norm_peak.update(ret_p)
 
-        obs = torch.as_tensor(buf.obs[:n])
-        latent = torch.as_tensor(buf.latent[:n])
-        logp_old = torch.as_tensor(buf.logp[:n])
-        adv_t = torch.as_tensor(adv)
-        ret_e_t = torch.as_tensor(self.norm_energy.normalize(ret_e))
-        ret_p_t = torch.as_tensor(self.norm_peak.normalize(ret_p))
+        obs = torch.as_tensor(buf.obs[:n], device=self.device)
+        latent = torch.as_tensor(buf.latent[:n], device=self.device)
+        logp_old = torch.as_tensor(buf.logp[:n], device=self.device)
+        adv_t = torch.as_tensor(adv, device=self.device)
+        ret_e_t = torch.as_tensor(
+            self.norm_energy.normalize(ret_e), device=self.device
+        )
+        ret_p_t = torch.as_tensor(
+            self.norm_peak.normalize(ret_p), device=self.device
+        )
 
         idx = np.arange(n)
         approx_kl = 0.0
@@ -338,7 +371,11 @@ class PPO2Agent:
             self._rng.shuffle(idx)
             kl_batches: list[float] = []
             for s in range(0, n, self.minibatch):
-                mb = idx[s:s + self.minibatch]
+                mb = torch.as_tensor(
+                    idx[s:s + self.minibatch],
+                    dtype=torch.long,
+                    device=self.device,
+                )
                 dist = self.net.dist(obs[mb])
                 logp = _squashed_log_prob_from_latent(dist, latent[mb])
                 log_ratio = logp - logp_old[mb]
@@ -372,6 +409,7 @@ class PPO2Agent:
                 stop_epoch = epoch + 1
                 break
 
+        self._sync_collector()
         self.diagnostics = {
             "adv_raw_std": adv_raw_std,
             "adv_near_zero_pct": float(100.0 * np.mean(np.abs(adv_e + adv_p) < 1e-3)),
@@ -385,9 +423,13 @@ class PPO2Agent:
 
     # ------------------------------------------------------------------
     def save(self, path):
+        state_dict = {
+            key: value.detach().cpu()
+            for key, value in self.net.state_dict().items()
+        }
         torch.save({
             "algo": "ppo2",
-            "state_dict": self.net.state_dict(),
+            "state_dict": state_dict,
             "value_normalizers": {
                 "energy": self.norm_energy.state(),
                 "peak": self.norm_peak.state(),
@@ -409,6 +451,7 @@ class PPO2Agent:
         self.norm_peak.load_state(normalizers["peak"])
         self.meta = ck["meta"]
         self.net.eval()
+        self._sync_collector()
 
 
 # ---------------------------------------------------------------------------

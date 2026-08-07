@@ -34,8 +34,7 @@ def _mlp(inp, out, h1=256, h2=128):
     )
 
 
-def resolve_grepo_device(device: str = "auto",
-                         batch_samples: int | None = None) -> str:
+def resolve_grepo_device(device: str = "auto") -> str:
     """Resolve a safe learner device without moving rollout inference."""
     requested = str(device).lower()
     if requested not in {"auto", "cpu", "cuda"}:
@@ -57,12 +56,9 @@ class GREPOAgent:
                  std: float = 0.30, beta: float = 0.5, clip: float = 0.2,
                  lr: float = 3e-4, epochs: int = 8, minibatch: int = 512,
                  vf_coef: float = 0.5, seed: int = 0,
-                 device: str = "auto",
-                 batch_samples: int | None = None):
+                 device: str = "auto"):
         torch.manual_seed(seed)
-        self.device = torch.device(
-            resolve_grepo_device(device, batch_samples=batch_samples)
-        )
+        self.device = torch.device(resolve_grepo_device(device))
         self.actor = _mlp(obs_dim, 1).to(self.device)
         self.critic = _mlp(obs_dim, 1).to(self.device)
         self._params = (

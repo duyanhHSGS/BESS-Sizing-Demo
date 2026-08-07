@@ -13,19 +13,21 @@ Run: python drl/train_grepo.py [--iters 400] [--group 8]
 from __future__ import annotations
 
 import argparse
+import math
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 import numpy as np
 
-from common import RESULTS_DIR, load_system_config, make_bess_config, score_month
+from common import RESULTS_DIR, score_month
 from benchmark import _rolling_30_minute_average
 from scenario_gen import MonthData
 from bess_env import BESSEnv
 from grepo_agent import GREPOAgent, resolve_grepo_device
 from baselines import run_no_bess, run_drl_policy
 from oracle_cache import load_cached_training_grids
+from training_common import build_training_bess_config, load_training_days
 from training_reports import write_curve, write_report
 from settings import GREPO_GAMMA
 from weather_forecast import build_forecast_bundle, fit_attach_forecasts
@@ -46,32 +48,6 @@ def _runtime_snapshot(perf):
         "decisions_per_second": perf["_decisions"] / rollout_seconds,
         "samples_per_second": perf["_samples"] / rollout_seconds,
     }
-
-
-def _load_csv_days(path):
-    """Np CSV cache site (date_iso,day_type,step,P_load_kW,P_pv_kW)."""
-    import csv as _csv
-    from scenario_gen import DayData
-    by_day: dict = {}
-    with open(path, encoding="utf-8") as f:
-        for r in _csv.DictReader(f):
-            d = by_day.setdefault(r["date_iso"], {
-                "load": [], "pv": [],
-                "day_type": r["day_type"],
-                "day_index": int(r["day_index"])})
-            t = int(r["step"])
-            while len(d["load"]) <= t:
-                d["load"].append(0.0)
-                d["pv"].append(0.0)
-            d["load"][t] = float(r["P_load_kW"])
-            d["pv"][t] = float(r["P_pv_kW"])
-    days = []
-    for iso in sorted(by_day):
-        v = by_day[iso]
-        days.append(DayData(load=np.asarray(v["load"], dtype=np.float64), pv=np.asarray(v["pv"], dtype=np.float64),
-                            day_type=v["day_type"], weather="tb",
-                            day_index=v["day_index"], date_iso=iso))
-    return days
 
 
 def main():
@@ -109,40 +85,14 @@ def main():
         raise SystemExit("gamma must be finite and in (0, 1]")
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    base = load_system_config()
-    cfg = base
-    if args.e_cap and args.p_rated:
-        cfg = make_bess_config(base, args.e_cap, args.p_rated,
-                               base.P_target_user)
-    if args.training_config:
-        import json as _json
-        from common import TOU_RULES, build_tariff_windows
-
-        tariff = _json.loads(Path(args.training_config).read_text(encoding="utf-8"))
-        cfg.price_peak = float(tariff.get("price_peak", cfg.price_peak))
-        cfg.price_mid = float(tariff.get("price_mid", cfg.price_mid))
-        cfg.price_off = float(tariff.get("price_off", cfg.price_off))
-        cfg.T_cap = float(tariff.get("t_cap", cfg.T_cap))
-        cfg.eta_ch = float(tariff.get("charge_efficiency", cfg.eta_ch))
-        cfg.eta_dis = float(tariff.get("discharge_efficiency", cfg.eta_dis))
-        cfg.SOC_min = float(tariff.get("minimum_soc", cfg.SOC_min))
-        cfg.SOC_max = float(tariff.get("maximum_soc", cfg.SOC_max))
-        cfg.SOC_eod = float(tariff.get("required_final_soc", cfg.SOC_eod))
-        for key, value in build_tariff_windows(tariff.get("peak_windows", ""), tariff.get("off_windows", ""), cfg.dt).items():
-            setattr(cfg, key, value)
-        TOU_RULES["sunday_no_peak"] = bool(tariff.get("sunday_no_peak", False))
-        if tariff.get("billing_mode") == "tou":
-            cfg.T_cap = 0.0
-    import math
-    csv_days = _load_csv_days(args.csv)
-    cfg.dt = 24.0 / len(csv_days[0].load)
-    if args.training_config:
-        from common import build_tariff_windows
-
-        for key, value in build_tariff_windows(
-            tariff.get("peak_windows", ""), tariff.get("off_windows", ""), cfg.dt
-        ).items():
-            setattr(cfg, key, value)
+    csv_days = load_training_days(args.csv, weather="tb")
+    csv_dt = 24.0 / len(csv_days[0].load)
+    cfg, billing_mode = build_training_bess_config(
+        args.e_cap,
+        args.p_rated,
+        csv_dt,
+        args.training_config,
+    )
     if args.val_days < 1 or args.test_days < 1:
         raise SystemExit("Validation days and test days must both be at least 1")
     split_days = args.val_days + args.test_days
@@ -177,20 +127,13 @@ def main():
         record_trajectory=False,
     )
     control_probe = make_env()
-    decisions_per_day = (
-        len(train_days[0].load) // control_probe.native_steps_per_action
-    )
-    batch_samples = args.group * decisions_per_day
-    learner_device = resolve_grepo_device(
-        args.device, batch_samples=batch_samples
-    )
+    learner_device = resolve_grepo_device(args.device)
     agent = GREPOAgent(
         control_probe.obs_dim, n_group=args.group, seed=args.seed,
         gamma=args.gamma, beta=args.beta, std=args.std,
-        device=learner_device, batch_samples=batch_samples,
+        device=learner_device,
     )
     # meta trc validation u tin  env val dng ng floor/p_ref
-    billing_mode = tariff.get("billing_mode", "2tc") if args.training_config else "2tc"
     agent.meta = {
         "p_ref_kw": p_ref,
         "algo": "grepo",
@@ -379,7 +322,6 @@ def main():
         beta=args.beta,
         seed=args.seed,
         device=learner_device,
-        batch_samples=batch_samples,
     )
     best_agent.load(RESULTS_DIR / f"policy_{tag}.pt")
     test_result = run_drl_policy(test_month, cfg, best_agent, p_ref_kw=p_ref)
