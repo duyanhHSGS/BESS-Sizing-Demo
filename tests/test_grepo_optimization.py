@@ -8,10 +8,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from bess_env import BESSEnv, OBS_DIM
-from common import load_system_config, make_bess_config
-from grepo_agent import GREPOAgent
-from scenario_gen import DayData, MonthData
+from bess.core.bess_env import BESSEnv, OBS_DIM
+from bess.core.common import load_system_config, make_bess_config
+from bess.agents.grepo_agent import GREPOAgent
+from bess.core.scenario_gen import DayData, MonthData
 
 
 def _case(minutes=15):

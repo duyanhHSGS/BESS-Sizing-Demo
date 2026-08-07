@@ -8,14 +8,14 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from benchmark import (
+from bess.evaluation.benchmark import (
     _demand_windows,
     _rolling_30_minute_average,
 )
-from bess_env import BESSEnv
-from common import load_system_config, make_bess_config
-from ppo_agent import PPOAgent, RolloutBuffer
-from scenario_gen import DayData, MonthData
+from bess.core.bess_env import BESSEnv
+from bess.core.common import load_system_config, make_bess_config
+from bess.agents.ppo_agent import PPOAgent, RolloutBuffer
+from bess.core.scenario_gen import DayData, MonthData
 
 
 def _reference_rolling(values, dt):

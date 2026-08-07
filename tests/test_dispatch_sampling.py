@@ -5,11 +5,11 @@ from unittest.mock import patch
 
 import numpy as np
 
-from baselines import run_drl_policy, validate_dispatch_sampling
-from common import load_system_config, make_bess_config
-from dispatch_runner import DispatchRunWarning, run_policy_dispatch
-from scenario_gen import DayData, MonthData
-from settings import DEFAULT_PARAMETERS
+from bess.evaluation.baselines import run_drl_policy, validate_dispatch_sampling
+from bess.core.common import load_system_config, make_bess_config
+from bess.dispatch.dispatch_runner import DispatchRunWarning, run_policy_dispatch
+from bess.core.scenario_gen import DayData, MonthData
+from bess.core.settings import DEFAULT_PARAMETERS
 
 
 class CountingPolicy:
@@ -102,7 +102,7 @@ class CrossResolutionDispatchTests(unittest.TestCase):
         }
 
         with patch(
-            "dispatch_runner.load_policy",
+            "bess.dispatch.dispatch_runner.load_policy",
             return_value=(policy, "ppo", policy.meta),
         ):
             result = run_policy_dispatch(
@@ -124,7 +124,7 @@ class CrossResolutionDispatchTests(unittest.TestCase):
         }
 
         with patch(
-            "dispatch_runner.load_policy",
+            "bess.dispatch.dispatch_runner.load_policy",
             return_value=(policy, "ppo", policy.meta),
         ):
             with self.assertRaisesRegex(DispatchRunWarning, "not an exact multiple"):

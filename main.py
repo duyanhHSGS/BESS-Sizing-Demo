@@ -5,26 +5,26 @@ from datetime import date
 
 from flask import Flask, Response, jsonify, render_template, request
 
-import benchmark_jobs
-import benchmark_store
-import benchmarking
-import dispatch_runner
-import dispatch_store
-import live_runs
-import oracle_cache
-import shadow_jobs
-import shadow_runs
-import thingsboard_connector
-import shadow_weather
-from benchmark import (
+import bess.evaluation.benchmark_jobs as benchmark_jobs
+import bess.evaluation.benchmark_store as benchmark_store
+import bess.evaluation.benchmarking as benchmarking
+import bess.dispatch.dispatch_runner as dispatch_runner
+import bess.dispatch.dispatch_store as dispatch_store
+import bess.shadow.live_runs as live_runs
+import bess.evaluation.oracle.oracle_cache as oracle_cache
+import bess.shadow.shadow_jobs as shadow_jobs
+import bess.shadow.shadow_runs as shadow_runs
+import bess.integrations.thingsboard_connector as thingsboard_connector
+import bess.forecasting.shadow_weather as shadow_weather
+from bess.evaluation.benchmark import (
     build_benchmark,
     detect_dt_hours,
     list_data_csvs,
     selected_data_filename,
     selected_data_path,
 )
-from oracle_lp import build_oracle_lp
-from settings import (
+from bess.evaluation.oracle.oracle_lp import build_oracle_lp
+from bess.core.settings import (
     BILLING_MODE_FIELD,
     BILLING_SUNDAY_FIELD,
     DEFAULT_PARAMETERS,
@@ -39,19 +39,19 @@ from settings import (
     PRO_GAMMA,
     SAMPLE_BATTERY_CANDIDATES,
 )
-from training_checkpoints import get_checkpoint_report, list_checkpoints
-from training_datasets import DatasetError, list_datasets
-from training_jobs import MANAGER
-from training_launcher import (
+from bess.training.training_checkpoints import get_checkpoint_report, list_checkpoints
+from bess.training.training_datasets import DatasetError, list_datasets
+from bess.training.training_jobs import MANAGER
+from bess.training.training_launcher import (
     TrainingLaunchError,
     UnsupportedAlgorithm,
     start_training,
     training_oracle_status,
 )
-from weather_forecast import WeatherError, fetch_weather, weather_status
+from bess.forecasting.weather_forecast import WeatherError, fetch_weather, weather_status
 
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder="web/templates")
 
 PARAMETERS = DEFAULT_PARAMETERS.copy()
 

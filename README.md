@@ -86,5 +86,10 @@ forecast inputs without reading future load/PV actuals. Save Weather first,
 then save the main Shadow configuration to freeze both data contracts.
 
 The connector initially uses the Tande ThingsBoard `SPEC` embedded in
-`thingsboard_connector.py`, so the Shadow panel opens prefilled and can be
+`bess/integrations/thingsboard_connector.py`, so the Shadow panel opens prefilled and can be
 tested without re-entering the site fields.
+
+Project layout
+--------------
+
+Application code lives under `bess/`, grouped by responsibility instead of being spread across the repository root. Manual utilities live in `scripts/`, performance probes live in `benchmarks/`, and Flask templates live in `web/templates/`. See `docs/project-structure.md` for the full map and package-module training commands.

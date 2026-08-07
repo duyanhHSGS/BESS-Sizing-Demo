@@ -8,9 +8,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from ppo2_agent import PPO2Agent, RolloutBuffer, resolve_ppo2_device
-from scenario_gen import DayData, MonthData
-from training_common import augment_month, build_training_bess_config
+from bess.agents.ppo2_agent import PPO2Agent, RolloutBuffer, resolve_ppo2_device
+from bess.core.scenario_gen import DayData, MonthData
+from bess.training.training_common import augment_month, build_training_bess_config
 
 
 class SharedTrainingHelpersTests(unittest.TestCase):
