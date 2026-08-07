@@ -1,4 +1,4 @@
-mini-faceIQ
+bESS
 ===========
 
 How to run
