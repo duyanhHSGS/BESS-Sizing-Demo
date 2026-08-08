@@ -12,7 +12,31 @@ import torch.nn as nn
 from bess.core.settings import PPO_GAMMA, PPO_LAMBDA
 
 torch.set_num_threads(6)
-_LOG_2PI = float(np.log(2.0 * np.pi))
+
+
+def _squashed_log_prob_from_latent(
+    distribution: torch.distributions.Normal,
+    latent: torch.Tensor,
+) -> torch.Tensor:
+    """Log-probability of ``tanh(latent)`` under a squashed Gaussian policy."""
+    correction = 2.0 * (
+        np.log(2.0)
+        - latent
+        - torch.nn.functional.softplus(-2.0 * latent)
+    )
+    return (distribution.log_prob(latent) - correction).sum(-1)
+
+
+def _sample_squashed(
+    distribution: torch.distributions.Normal,
+    *,
+    deterministic: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return bounded action, corrected log-probability, and pre-tanh latent."""
+    latent = distribution.mean if deterministic else distribution.rsample()
+    action = torch.tanh(latent)
+    log_probability = _squashed_log_prob_from_latent(distribution, latent)
+    return action, log_probability, latent
 
 
 def resolve_ppo_device(device: str = "auto") -> str:
@@ -46,7 +70,7 @@ class ActorCritic(nn.Module):
         self.log_std = nn.Parameter(torch.full((1,), -0.5))
 
     def dist(self, obs):
-        mean = torch.tanh(self.actor(obs))
+        mean = self.actor(obs)
         return torch.distributions.Normal(mean, self.log_std.exp())
 
     def value(self, obs):
@@ -57,6 +81,7 @@ class RolloutBuffer:
     def __init__(self, size: int, obs_dim: int):
         self.obs = np.zeros((size, obs_dim), np.float32)
         self.act = np.zeros((size, 1), np.float32)
+        self.latent = np.zeros((size, 1), np.float32)
         self.logp = np.zeros(size, np.float32)
         self.rew = np.zeros(size, np.float32)
         self.val = np.zeros(size, np.float32)
@@ -64,9 +89,9 @@ class RolloutBuffer:
         self.ptr = 0
         self.size = size
 
-    def add(self, o, a, lp, r, v, d):
+    def add(self, o, a, lp, r, v, d, latent):
         i = self.ptr
-        self.obs[i], self.act[i] = o, a
+        self.obs[i], self.act[i], self.latent[i] = o, a, latent
         self.logp[i], self.rew[i], self.val[i], self.done[i] = lp, r, v, d
         self.ptr += 1
 
@@ -104,27 +129,37 @@ class PPOAgent:
 
     # ------------------------------------------------------------------
     @torch.inference_mode()
-    def act(self, obs: np.ndarray, deterministic: bool = False):
+    def act_with_latent(self, obs: np.ndarray, deterministic: bool = False):
+        """Return bounded action plus its pre-tanh latent for exact PPO updates."""
         o = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
-        mean = torch.tanh(self.collector_net.actor(o))
-        std = self.collector_net.log_std.exp()
-        a = mean if deterministic else torch.normal(mean, std)
-        logp = (
-            -0.5 * ((a - mean) / std).square()
-            - self.collector_net.log_std
-            - 0.5 * _LOG_2PI
-        ).sum(-1)
-        v = self.collector_net.value(o)
-        return (float(np.clip(a.item(), -1.0, 1.0)),
-                float(logp.item()), float(v.item()))
+        distribution = self.collector_net.dist(o)
+        action, log_probability, latent = _sample_squashed(
+            distribution,
+            deterministic=deterministic,
+        )
+        value = self.collector_net.value(o)
+        return (
+            float(action.item()),
+            float(log_probability.item()),
+            float(latent.item()),
+            float(value.item()),
+        )
+
+    @torch.inference_mode()
+    def act(self, obs: np.ndarray, deterministic: bool = False):
+        action, log_probability, _latent, value = self.act_with_latent(
+            obs,
+            deterministic=deterministic,
+        )
+        return action, log_probability, value
 
     # ------------------------------------------------------------------
     @torch.inference_mode()
     def predict_action(self, obs: np.ndarray) -> float:
         """Deterministic actor-only inference for evaluation rollouts."""
         o = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
-        mean = torch.tanh(self.collector_net.actor(o))
-        return float(np.clip(mean.item(), -1.0, 1.0))
+        action = torch.tanh(self.collector_net.actor(o))
+        return float(action.item())
 
     # ------------------------------------------------------------------
     def update(self, buf: RolloutBuffer, last_val: float):
@@ -142,7 +177,7 @@ class PPOAgent:
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
         obs = torch.as_tensor(buf.obs[:n], device=self.device)
-        act = torch.as_tensor(buf.act[:n], device=self.device)
+        latent = torch.as_tensor(buf.latent[:n], device=self.device)
         logp_old = torch.as_tensor(buf.logp[:n], device=self.device)
         adv_t = torch.as_tensor(adv, device=self.device)
         ret_t = torch.as_tensor(ret, device=self.device)
@@ -156,13 +191,17 @@ class PPOAgent:
                     device=self.device,
                 )
                 dist = self.net.dist(obs[mb])
-                logp = dist.log_prob(act[mb]).sum(-1)
+                logp = _squashed_log_prob_from_latent(dist, latent[mb])
                 ratio = torch.exp(logp - logp_old[mb])
                 surr1 = ratio * adv_t[mb]
                 surr2 = torch.clamp(ratio, 1 - self.clip, 1 + self.clip) * adv_t[mb]
                 pi_loss = -torch.min(surr1, surr2).mean()
                 v_loss = ((self.net.value(obs[mb]) - ret_t[mb]) ** 2).mean()
-                ent = dist.entropy().sum(-1).mean()
+                _, entropy_log_probability, _ = _sample_squashed(
+                    dist,
+                    deterministic=False,
+                )
+                ent = -entropy_log_probability.mean()
                 loss = pi_loss + self.vf_coef * v_loss - self.ent_coef * ent
                 self.opt.zero_grad()
                 loss.backward()

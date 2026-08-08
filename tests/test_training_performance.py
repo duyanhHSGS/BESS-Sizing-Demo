@@ -98,8 +98,16 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         rng = np.random.default_rng(11)
         obs = rng.normal(size=13).astype(np.float32)
         for index in range(buffer.size):
-            action, logp, value = agent.act(obs)
-            buffer.add(obs, action, logp, float(index) / 100.0, value, 0.0)
+            action, logp, latent, value = agent.act_with_latent(obs)
+            buffer.add(
+                obs,
+                action,
+                logp,
+                float(index) / 100.0,
+                value,
+                0.0,
+                latent,
+            )
             obs = rng.normal(size=13).astype(np.float32)
         agent.update(buffer, 0.0)
         self.assertTrue(

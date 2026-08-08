@@ -249,9 +249,9 @@ def main() -> None:
     started = time.time()
     rollout_started = time.perf_counter()
     while steps < args.steps:
-        action, logp, value = agent.act(obs)
+        action, logp, latent, value = agent.act_with_latent(obs)
         next_obs, reward, done, step_info = env.step(action)
-        buffer.add(obs, action, logp, reward, value, float(done))
+        buffer.add(obs, action, logp, reward, value, float(done), latent=latent)
         steps += 1
         perf["decisions"] += 1
         perf["native_rows"] += int(step_info["native_rows"])
