@@ -1,6 +1,6 @@
 """bess.agents.ppo2_agent.py — PPO with reward-decomposed critics for the BESS CMDP.
 
-Architecture mirrors bess-drl (other-project/bess-drl):
+Architecture mirrors the archived senior reference in git-plz-ignore/senior-ppo2-reference/:
   - 2×128 Tanh MLPs (larger capacity than original PPO's 2×64)
   - Two value heads: critic_energy + critic_peak with PopArt normalisers
   - Per-component GAE lambda (energy ~0.97, peak ~0.5)

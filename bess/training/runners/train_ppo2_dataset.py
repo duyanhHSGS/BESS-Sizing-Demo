@@ -1,7 +1,8 @@
 """Train PPO2 with the senior reference project's algorithm and environment.
 
 PPO2 is intentionally a controlled reference port for A/B comparison against this
-repo's original PPO. Algorithmic choices mirror other-project's run_train_dataset:
+repo's original PPO. Algorithmic choices mirror the archived senior
+run_train_dataset.py in git-plz-ignore/senior-ppo2-reference/source/:
 15-minute 17D environment, fixed 30-minute blocks, month LP oracle, oracle-based
 peak shaping, behaviour cloning, decomposed PPO, calendar-month holdouts, and the
 same selection protocol. Only repository paths/config field names are adapted.

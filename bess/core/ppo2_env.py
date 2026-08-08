@@ -1,6 +1,7 @@
 """Exact senior-reference environment used only by PPO2.
 
-This is a direct logic port of other-project's causal BESS environment. The only
+This is a direct logic port of the archived senior causal BESS environment in
+git-plz-ignore/senior-ppo2-reference/. The only
 changes are attribute/import adapters for this repository's SADRBCConfig and
 DayData/MonthData types. The reference contract is intentionally 15-minute-only:
 96 slots/day, two slots per fixed 30-minute demand block, and a 17D observation.
