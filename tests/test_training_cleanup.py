@@ -11,7 +11,11 @@ from bess.agents.ppo2_agent import PPO2Agent, RolloutBuffer, resolve_ppo2_device
 from bess.core.scenario_gen import DayData, MonthData
 from bess.paths import PROJECT_ROOT
 from bess.training.training_common import augment_month, build_training_bess_config
-from bess.training.training_launcher import build_training_command, write_training_config
+from bess.training.training_launcher import (
+    TrainingLaunchError,
+    build_training_command,
+    write_training_config,
+)
 
 
 class SharedTrainingHelpersTests(unittest.TestCase):
@@ -102,6 +106,53 @@ class PPO2LauncherTests(unittest.TestCase):
         steps_index = command.index("--steps")
         self.assertEqual(command[steps_index + 1], "1500000")
         self.assertEqual(command[command.index("--control-dt-minutes") + 1], "15")
+
+    def test_reference_command_forwards_custom_ppo2_knobs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            csv_path = base / "site.csv"
+            config_path = base / "training_config.json"
+            oracle_path = base / "old_oracle.json"
+            rows = ["date_iso,day_index,step,day_type,P_load_kW,P_pv_kW"]
+            rows.extend(f"2026-01-01,1,{step},working,100,0" for step in range(96))
+            csv_path.write_text("\n".join(rows), encoding="utf-8")
+            config_path.write_text("{}", encoding="utf-8")
+            payload = {
+                "algo": "ppo2", "dataset_id": "test", "e_cap_kwh": 1000.0,
+                "p_rated_kw": 500.0, "obs_variant": "base", "device": "cpu",
+                "ppo2_rollout": 960, "ppo2_epochs": 4, "ppo2_minibatch": 128,
+                "ppo2_lam_peak": "0.7,0.97", "ppo2_torch_threads": 3,
+            }
+            command = build_training_command(
+                payload, csv_path, config_path, oracle_path,
+                python_executable="python", base_dir=base,
+            )["cmd"]
+        self.assertEqual(command[command.index("--rollout") + 1], "960")
+        self.assertEqual(command[command.index("--ppo-epochs") + 1], "4")
+        self.assertEqual(command[command.index("--minibatch") + 1], "128")
+        self.assertEqual(command[command.index("--lambda-peak") + 1], "0.7,0.97")
+        self.assertEqual(command[command.index("--torch-threads") + 1], "3")
+
+    def test_reference_command_rejects_non_reference_gamma(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            csv_path = base / "site.csv"
+            config_path = base / "training_config.json"
+            oracle_path = base / "old_oracle.json"
+            rows = ["date_iso,day_index,step,day_type,P_load_kW,P_pv_kW"]
+            rows.extend(f"2026-01-01,1,{step},working,100,0" for step in range(96))
+            csv_path.write_text("\n".join(rows), encoding="utf-8")
+            config_path.write_text("{}", encoding="utf-8")
+            payload = {
+                "algo": "ppo2", "dataset_id": "test", "e_cap_kwh": 1000.0,
+                "p_rated_kw": 500.0, "obs_variant": "base", "device": "cpu",
+                "ppo2_gamma": 0.99,
+            }
+            with self.assertRaisesRegex(TrainingLaunchError, "gamma=1.0"):
+                build_training_command(
+                    payload, csv_path, config_path, oracle_path,
+                    python_executable="python", base_dir=base,
+                )
 
     def test_training_config_carries_battery_wear_cost(self):
         with tempfile.TemporaryDirectory(dir=PROJECT_ROOT) as directory:

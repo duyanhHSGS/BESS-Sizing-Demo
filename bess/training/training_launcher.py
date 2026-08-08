@@ -76,6 +76,67 @@ def _int(payload: dict, key: str, default: int) -> int:
     return int(value)
 
 
+def _bounded_int(
+    payload: dict,
+    key: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
+    value = _int(payload, key, default)
+    if value < minimum or (maximum is not None and value > maximum):
+        upper = f", {maximum}" if maximum is not None else ""
+        raise TrainingLaunchError(f"{key} must be an integer in [{minimum}{upper}]")
+    return value
+
+
+def _bounded_float_list(
+    payload: dict,
+    key: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> str:
+    raw = str(payload.get(key, default) if payload.get(key, default) not in {None, ""} else default)
+    values = []
+    for item in raw.split(","):
+        text = item.strip()
+        if not text:
+            continue
+        try:
+            value = float(text)
+        except ValueError as exc:
+            raise TrainingLaunchError(f"{key} must be a comma-separated list of numbers") from exc
+        if not math.isfinite(value) or value < minimum or value > maximum:
+            raise TrainingLaunchError(f"{key} values must be finite and in [{minimum}, {maximum}]")
+        values.append(value)
+    if not values:
+        raise TrainingLaunchError(f"{key} must contain at least one value")
+    return ",".join(format(value, ".12g") for value in values)
+
+
+def _int_list(payload: dict, key: str) -> str:
+    raw = str(payload.get(key, "") or "").strip()
+    if not raw:
+        return ""
+    values = []
+    for item in raw.split(","):
+        text = item.strip()
+        if not text:
+            continue
+        try:
+            values.append(int(text))
+        except ValueError as exc:
+            raise TrainingLaunchError(f"{key} must be a comma-separated list of integers") from exc
+    if not values:
+        return ""
+    if len(values) > 64:
+        raise TrainingLaunchError(f"{key} supports at most 64 seeds")
+    return ",".join(str(value) for value in values)
+
+
 def _bounded_float(
     payload: dict,
     key: str,
@@ -176,7 +237,10 @@ def build_training_command(
 
     e_cap = _float(payload, "e_cap_kwh")
     p_rated = _float(payload, "p_rated_kw")
-    val_days, test_days = _split_days(payload)
+    if algo == "ppo2":
+        val_days, test_days = 0, 0  # PPO2 splits by calendar months, not day counts.
+    else:
+        val_days, test_days = _split_days(payload)
     dataset_id = str(payload.get("dataset_id", "dataset"))
     obs_variant = str(payload.get("obs_variant", "base")).strip().lower()
     if obs_variant not in {"base", "fc"}:
@@ -184,10 +248,14 @@ def build_training_command(
     device = str(payload.get("device", "auto")).strip().lower()
     if device not in {"auto", "cpu", "cuda"}:
         raise TrainingLaunchError("Training device must be auto, cpu, or cuda")
+    native_dt_minutes = float(detect_resolution_minutes(csv_path))
     control_dt_minutes = _control_dt_minutes(payload, csv_path)
-    if algo == "ppo2" and control_dt_minutes != 15:
+    if algo == "ppo2" and (
+        not math.isclose(native_dt_minutes, 15.0, rel_tol=0.0, abs_tol=1e-9)
+        or not math.isclose(control_dt_minutes, 15.0, rel_tol=0.0, abs_tol=1e-9)
+    ):
         raise TrainingLaunchError(
-            "PPO2 is the exact senior-reference experiment and requires 15-minute data/control"
+            "PPO2 senior-reference mode requires the dataset itself and control interval to be exactly 15 minutes"
         )
     if algo == "ppo2" and obs_variant != "base":
         raise TrainingLaunchError("PPO2 senior-reference mode is forecast-free (obs_variant=base)")
@@ -264,39 +332,56 @@ def build_training_command(
         )
     elif algo == "ppo2":
         gamma = _bounded_float(
-            payload,
-            "ppo2_gamma",
-            PPO2_GAMMA,
-            minimum=0.0,
-            minimum_inclusive=False,
-            maximum=1.0,
+            payload, "ppo2_gamma", PPO2_GAMMA,
+            minimum=0.0, minimum_inclusive=False, maximum=1.0,
         )
+        if not math.isclose(gamma, 1.0, rel_tol=0.0, abs_tol=1e-12):
+            raise TrainingLaunchError("PPO2 senior-reference mode requires ppo2_gamma=1.0")
         lam_energy = _bounded_float(
-            payload,
-            "ppo2_lam_energy",
-            PPO2_LAM_ENERGY,
-            minimum=0.0,
-            maximum=1.0,
+            payload, "ppo2_lam_energy", PPO2_LAM_ENERGY,
+            minimum=0.0, maximum=1.0,
         )
-        lam_peak = _bounded_float(
-            payload,
-            "ppo2_lam_peak",
-            PPO2_LAM_PEAK,
-            minimum=0.0,
-            maximum=1.0,
+        lam_peak = _bounded_float_list(
+            payload, "ppo2_lam_peak", PPO2_LAM_PEAK,
+            minimum=0.0, maximum=1.0,
         )
+        seeds = _int_list(payload, "ppo2_seeds")
         cmd.extend(
             [
-                "--steps",
-                str(_int(payload, "steps", 1_500_000)),
-                "--gamma",
-                str(gamma),
-                "--lam-energy",
-                str(lam_energy),
-                "--lam-peak",
-                str(lam_peak),
+                "--steps", str(_bounded_int(payload, "ppo2_steps", 1_500_000, minimum=1)),
+                "--seed", str(_int(payload, "ppo2_seed", 0)),
+                "--rollout", str(_bounded_int(payload, "ppo2_rollout", 2_880, minimum=1)),
+                "--eval-every", str(_bounded_int(payload, "ppo2_eval_every", 20, minimum=1)),
+                "--min-month-coverage", str(_bounded_float(payload, "ppo2_min_month_coverage", 0.8, minimum=0.01, maximum=1.0)),
+                "--val-months", str(_bounded_int(payload, "ppo2_val_months", 2, minimum=1, maximum=24)),
+                "--test-months", str(_bounded_int(payload, "ppo2_test_months", 1, minimum=1, maximum=24)),
+                "--gamma", str(gamma),
+                "--lambda-energy", str(lam_energy),
+                "--lambda-peak", lam_peak,
+                "--actor-lr", str(_bounded_float(payload, "ppo2_actor_lr", 3e-5, minimum=0.0, minimum_inclusive=False, maximum=1.0)),
+                "--critic-lr", str(_bounded_float(payload, "ppo2_critic_lr", 3e-4, minimum=0.0, minimum_inclusive=False, maximum=1.0)),
+                "--init-std", str(_bounded_float(payload, "ppo2_init_std", 0.15, minimum=0.0, minimum_inclusive=False, maximum=5.0)),
+                "--clip-penalty", str(_bounded_float(payload, "ppo2_clip_penalty", 100.0, minimum=0.0, maximum=1e9)),
+                "--bc-epochs", str(_bounded_int(payload, "ppo2_bc_epochs", 10, minimum=0, maximum=10_000)),
+                "--ppo-clip", str(_bounded_float(payload, "ppo2_clip", 0.2, minimum=0.0, minimum_inclusive=False, maximum=1.0)),
+                "--ppo-epochs", str(_bounded_int(payload, "ppo2_epochs", 6, minimum=1, maximum=1_000)),
+                "--minibatch", str(_bounded_int(payload, "ppo2_minibatch", 256, minimum=1, maximum=1_000_000)),
+                "--entropy-coef", str(_bounded_float(payload, "ppo2_ent_coef", 0.01, minimum=0.0, maximum=100.0)),
+                "--value-coef", str(_bounded_float(payload, "ppo2_vf_coef", 0.5, minimum=0.0, maximum=100.0)),
+                "--target-kl", str(_bounded_float(payload, "ppo2_target_kl", 0.01, minimum=0.0, minimum_inclusive=False, maximum=100.0)),
+                "--shaping-margin", str(_bounded_float(payload, "ppo2_shaping_margin", 0.9, minimum=0.0, maximum=1.0)),
+                "--aug-load-sigma", str(_bounded_float(payload, "ppo2_aug_load_sigma", 0.04, minimum=0.0, maximum=2.0)),
+                "--aug-pv-sigma", str(_bounded_float(payload, "ppo2_aug_pv_sigma", 0.08, minimum=0.0, maximum=2.0)),
+                "--aug-rho-load", str(_bounded_float(payload, "ppo2_aug_rho_load", 0.9, minimum=-0.999999, maximum=0.999999)),
+                "--aug-rho-pv", str(_bounded_float(payload, "ppo2_aug_rho_pv", 0.9, minimum=-0.999999, maximum=0.999999)),
+                "--bc-lr", str(_bounded_float(payload, "ppo2_bc_lr", 1e-3, minimum=0.0, minimum_inclusive=False, maximum=1.0)),
+                "--bc-minibatch", str(_bounded_int(payload, "ppo2_bc_minibatch", 256, minimum=1, maximum=1_000_000)),
+                "--bc-action-clip", str(_bounded_float(payload, "ppo2_bc_action_clip", 0.95, minimum=0.0, minimum_inclusive=False, maximum=1.0)),
+                "--torch-threads", str(_bounded_int(payload, "ppo2_torch_threads", 2, minimum=1, maximum=128)),
             ]
         )
+        if seeds:
+            cmd.extend(["--seeds", seeds])
     elif algo == "pro":
         gamma = _bounded_float(
             payload,
@@ -401,14 +486,17 @@ def training_oracle_status(payload: dict, parameters: dict) -> dict:
 
 def start_training(payload: dict, parameters: dict, manager: JobManager) -> tuple[Job, dict]:
     dataset_id = str(payload.get("dataset_id", "")).strip()
-    val_days, test_days = _split_days(payload)
-    source, oracle_parameters = training_oracle_parameters(payload, parameters)
     algo = str(payload.get("algo", "ppo")).lower()
-    required_train_days = 30 if algo == "grepro" else 1
-    n_days = require_min_days(source, val_days + test_days + required_train_days)
+    source, oracle_parameters = training_oracle_parameters(payload, parameters)
     if algo == "ppo2":
+        val_days, test_days = 0, 0
+        required_train_days = 1
+        n_days = require_min_days(source, required_train_days)
         oracle_path = Path("")  # PPO2 builds the senior fixed-block month LP internally.
     else:
+        val_days, test_days = _split_days(payload)
+        required_train_days = 30 if algo == "grepro" else 1
+        n_days = require_min_days(source, val_days + test_days + required_train_days)
         oracle_path, _ = oracle_cache.require_cached_oracle(oracle_parameters)
 
     USER_DATA_DIR.mkdir(parents=True, exist_ok=True)

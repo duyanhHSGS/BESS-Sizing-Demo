@@ -52,6 +52,19 @@ CLIP_PENALTY_PER_KWH = 100.0
 LAMBDA_ENERGY = 0.97
 LAMBDA_PEAK = 0.97
 BC_ACTION_CLIP = 0.95
+PPO_CLIP = 0.2
+PPO_EPOCHS = 6
+PPO_MINIBATCH = 256
+ENTROPY_COEF = 0.01
+VALUE_COEF = 0.5
+TARGET_KL = 0.01
+BC_LR = 1e-3
+BC_MINIBATCH = 256
+AUG_LOAD_SIGMA = 0.04
+AUG_PV_SIGMA = 0.08
+AUG_RHO_LOAD = 0.9
+AUG_RHO_PV = 0.9
+TORCH_THREADS = 2
 
 
 def _dataset_hash(path: Path) -> str:
@@ -116,11 +129,14 @@ def complete_month_blocks(
 
 
 def _split_months(
-    all_days: list[DayData], train_coverage: float
+    all_days: list[DayData],
+    train_coverage: float,
+    val_months: int = VAL_MONTHS,
+    test_months: int = TEST_MONTHS,
 ) -> tuple[list[MonthData], list[MonthData], list[MonthData]]:
     months = complete_month_blocks(all_days, min_coverage=train_coverage)
-    eligible = complete_month_blocks(all_days, min_coverage=EVAL_MONTH_COVERAGE)
-    holdout_count = VAL_MONTHS + TEST_MONTHS
+    eligible = complete_month_blocks(all_days, min_coverage=train_coverage)
+    holdout_count = val_months + test_months
     if len(months) < holdout_count + 1:
         raise SystemExit(
             f"Need at least {holdout_count + 1} calendar months covering "
@@ -129,18 +145,26 @@ def _split_months(
         )
     if len(eligible) < holdout_count:
         raise SystemExit(
-            f"Need {holdout_count} months covering {EVAL_MONTH_COVERAGE:.0%} of "
+            f"Need {holdout_count} months covering {train_coverage:.0%} of "
             f"their days for PPO2 validation/test (found {len(eligible)})"
         )
     holdout = months[-holdout_count:]
-    return months[:-holdout_count], holdout[:VAL_MONTHS], holdout[VAL_MONTHS:]
+    return months[:-holdout_count], holdout[:val_months], holdout[val_months:]
 
 
 def _flatten(months: list[MonthData]) -> list[DayData]:
     return [day for month in months for day in month.days]
 
 
-def _augment_month_reference(month: MonthData, rng: np.random.Generator) -> MonthData:
+def _augment_month_reference(
+    month: MonthData,
+    rng: np.random.Generator,
+    *,
+    load_sigma: float = AUG_LOAD_SIGMA,
+    pv_sigma: float = AUG_PV_SIGMA,
+    rho_load: float = AUG_RHO_LOAD,
+    rho_pv: float = AUG_RHO_PV,
+) -> MonthData:
     """Senior's scalar-draw AR(1) augmentation, including RNG consumption order."""
     out = MonthData(source=month.source + ":aug")
     for day in month.days:
@@ -151,8 +175,8 @@ def _augment_month_reference(month: MonthData, rng: np.random.Generator) -> Mont
                 error[step] = rho * error[step - 1] + white * rng.standard_normal()
             return error
 
-        load = np.maximum(0.0, day.load * (1.0 + _ar1(0.04, 0.9)))
-        pv = np.maximum(0.0, day.pv * (1.0 + _ar1(0.08, 0.9)))
+        load = np.maximum(0.0, day.load * (1.0 + _ar1(load_sigma, rho_load)))
+        pv = np.maximum(0.0, day.pv * (1.0 + _ar1(pv_sigma, rho_pv)))
         out.days.append(
             DayData(
                 load=load,
@@ -309,6 +333,8 @@ def _shaping_warm_starts(
     months: list[MonthData],
     cfg,
     oracle_solutions: list[dict] | None = None,
+    *,
+    margin: float = D_RUN_SHAPING_ORACLE_MARGIN,
 ) -> list[float]:
     if cfg.T_cap <= 0.0:
         return [0.0] * len(months)
@@ -321,7 +347,7 @@ def _shaping_warm_starts(
             fixed_pmax_day(np.maximum(0.0, day.load - day.pv))
             for day in month.days
         )
-        value = D_RUN_SHAPING_ORACLE_MARGIN * ppk
+        value = margin * ppk
         print(
             f"[train-ppo2] shaping {month.source}: W={value:.1f} kW "
             f"(oracle ppk {ppk:.1f}, no-BESS peak {nobess_peak:.1f}, "
@@ -342,6 +368,10 @@ def _behavior_clone_actor(
     clip_penalty_per_kwh: float,
     epochs: int,
     seed: int,
+    *,
+    learning_rate: float = BC_LR,
+    minibatch: int = BC_MINIBATCH,
+    action_clip: float = BC_ACTION_CLIP,
 ) -> None:
     if epochs <= 0:
         return
@@ -364,7 +394,7 @@ def _behavior_clone_actor(
             if done:
                 raise RuntimeError("PPO2 oracle trajectory is longer than the episode")
             action_star = float(np.clip(
-                target_power / cfg.P_rated_nominal, -BC_ACTION_CLIP, BC_ACTION_CLIP
+                target_power / cfg.P_rated_nominal, -action_clip, action_clip
             ))
             if env.history_ready:
                 observations.append(obs)
@@ -373,10 +403,9 @@ def _behavior_clone_actor(
 
     obs_tensor = torch.as_tensor(np.asarray(observations, dtype=np.float32))
     target_tensor = torch.as_tensor(np.asarray(targets, dtype=np.float32))
-    optimizer = torch.optim.Adam(agent.net.actor.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(agent.net.actor.parameters(), lr=learning_rate)
     rng = np.random.default_rng(seed)
     indices = np.arange(len(targets))
-    minibatch = 256
     loss_value = float("nan")
     for _ in range(epochs):
         rng.shuffle(indices)
@@ -440,6 +469,23 @@ def _train_seed(
     log_std_init: float,
     clip_penalty_per_kwh: float,
     bc_epochs: int,
+    gamma: float,
+    ppo_clip: float,
+    ppo_epochs: int,
+    ppo_minibatch: int,
+    entropy_coef: float,
+    value_coef: float,
+    target_kl: float,
+    bc_lr: float,
+    bc_minibatch: int,
+    bc_action_clip: float,
+    shaping_margin: float,
+    min_month_coverage: float,
+    aug_load_sigma: float,
+    aug_pv_sigma: float,
+    aug_rho_load: float,
+    aug_rho_pv: float,
+    torch_threads: int,
     train_oracle: list[dict] | None,
     config_hash: str,
 ) -> tuple[float, Path, list[dict]]:
@@ -452,9 +498,15 @@ def _train_seed(
     agent = PPO2Agent(
         env.obs_dim,
         seed=seed,
-        gamma=1.0,
+        gamma=gamma,
         lam_energy=lam_energy,
         lam_peak=lam_peak,
+        clip=ppo_clip,
+        epochs=ppo_epochs,
+        minibatch=ppo_minibatch,
+        ent_coef=entropy_coef,
+        vf_coef=value_coef,
+        target_kl=target_kl,
         actor_lr=actor_lr,
         critic_lr=critic_lr,
         log_std_init=log_std_init,
@@ -473,6 +525,9 @@ def _train_seed(
             clip_penalty_per_kwh,
             bc_epochs,
             seed,
+            learning_rate=bc_lr,
+            minibatch=bc_minibatch,
+            action_clip=bc_action_clip,
         )
 
     agent.meta = {
@@ -496,20 +551,29 @@ def _train_seed(
         "advantage_estimator": "decomposed_gae",
         "lambda_energy": lam_energy,
         "lambda_peak": lam_peak,
-        "gamma": 1.0,
+        "gamma": gamma,
+        "ppo_clip": ppo_clip,
+        "ppo_epochs": ppo_epochs,
+        "ppo_minibatch": ppo_minibatch,
+        "entropy_coef": entropy_coef,
+        "value_coef": value_coef,
+        "target_kl": target_kl,
         "actor_learning_rate": actor_lr,
         "critic_learning_rate": critic_lr,
         "log_std_init": log_std_init,
         "clip_penalty_per_kwh": clip_penalty_per_kwh,
         "bc_epochs": bc_epochs,
+        "bc_learning_rate": bc_lr,
+        "bc_minibatch": bc_minibatch,
+        "bc_action_clip": bc_action_clip,
         "rollout_steps": rollout,
         "total_steps": total_steps,
         "eval_every_updates": eval_every_updates,
         "d_run_shaping_anchor": "oracle_month_peak",
-        "d_run_shaping_margin": D_RUN_SHAPING_ORACLE_MARGIN,
+        "d_run_shaping_margin": shaping_margin,
         "train_warm_starts_kw": [round(value, 2) for value in train_warm_starts],
-        "min_month_coverage_train": MIN_MONTH_COVERAGE,
-        "min_month_coverage_eval": EVAL_MONTH_COVERAGE,
+        "min_month_coverage_train": min_month_coverage,
+        "min_month_coverage_eval": min_month_coverage,
         "value_normalization": "popart_per_component",
         "billing_mode": "tou" if cfg.T_cap <= 0.0 else "2tc",
         "demand_charge_active": cfg.T_cap > 0.0,
@@ -523,14 +587,26 @@ def _train_seed(
         "validation_range": [val_months[0].days[0].date_iso, val_months[-1].days[-1].date_iso],
         "test_range": [test_months[0].days[0].date_iso, test_months[-1].days[-1].date_iso],
         "train_month_count": len(train_months),
-        "augmentation": {"sigmaLoad": 0.04, "sigmaPv": 0.08, "rhoLoad": 0.9, "rhoPv": 0.9},
+        "validation_month_count": len(val_months),
+        "test_month_count": len(test_months),
+        "torch_threads": torch_threads,
+        "augmentation": {
+            "sigmaLoad": aug_load_sigma,
+            "sigmaPv": aug_pv_sigma,
+            "rhoLoad": aug_rho_load,
+            "rhoPv": aug_rho_pv,
+        },
     }
 
     buffer = RolloutBuffer(rollout, env.obs_dim)
     rng = np.random.default_rng(seed)
     month_index = 0
     obs = env.reset(
-        _augment_month_reference(train_months[0], rng),
+        _augment_month_reference(
+            train_months[0], rng,
+            load_sigma=aug_load_sigma, pv_sigma=aug_pv_sigma,
+            rho_load=aug_rho_load, rho_pv=aug_rho_pv,
+        ),
         d_run_shaping_init_kw=train_warm_starts[0],
     )
     candidate = RESULTS_DIR / f"policy_{tag}_seed{seed}.pt"
@@ -627,7 +703,11 @@ def _train_seed(
             month_index += 1
             next_index = month_index % len(train_months)
             next_obs = env.reset(
-                _augment_month_reference(train_months[next_index], rng),
+                _augment_month_reference(
+                    train_months[next_index], rng,
+                    load_sigma=aug_load_sigma, pv_sigma=aug_pv_sigma,
+                    rho_load=aug_rho_load, rho_pv=aug_rho_pv,
+                ),
                 d_run_shaping_init_kw=train_warm_starts[next_index],
             )
         obs = next_obs
@@ -652,9 +732,6 @@ def _train_seed(
 
 
 def main() -> None:
-    # Match the senior standalone trainer without globally contaminating other
-    # algorithms when this module is merely imported by the shared application.
-    torch.set_num_threads(2)
     parser = argparse.ArgumentParser()
     parser.add_argument("--csv", required=True)
     parser.add_argument("--e-cap", type=float, required=True)
@@ -666,12 +743,29 @@ def main() -> None:
     parser.add_argument("--rollout", type=int, default=ROLLOUT)
     parser.add_argument("--eval-every", type=int, default=EVAL_EVERY_UPDATES)
     parser.add_argument("--min-month-coverage", type=float, default=MIN_MONTH_COVERAGE)
+    parser.add_argument("--val-months", type=int, default=VAL_MONTHS)
+    parser.add_argument("--test-months", type=int, default=TEST_MONTHS)
     parser.add_argument("--lr", type=float, default=LEARNING_RATE)
     parser.add_argument("--actor-lr", type=float, default=ACTOR_LR)
     parser.add_argument("--critic-lr", type=float, default=CRITIC_LR)
     parser.add_argument("--init-std", type=float, default=INIT_STD)
     parser.add_argument("--clip-penalty", type=float, default=CLIP_PENALTY_PER_KWH)
     parser.add_argument("--bc-epochs", type=int, default=BC_EPOCHS)
+    parser.add_argument("--ppo-clip", type=float, default=PPO_CLIP)
+    parser.add_argument("--ppo-epochs", type=int, default=PPO_EPOCHS)
+    parser.add_argument("--minibatch", type=int, default=PPO_MINIBATCH)
+    parser.add_argument("--entropy-coef", type=float, default=ENTROPY_COEF)
+    parser.add_argument("--value-coef", type=float, default=VALUE_COEF)
+    parser.add_argument("--target-kl", type=float, default=TARGET_KL)
+    parser.add_argument("--shaping-margin", type=float, default=D_RUN_SHAPING_ORACLE_MARGIN)
+    parser.add_argument("--aug-load-sigma", type=float, default=AUG_LOAD_SIGMA)
+    parser.add_argument("--aug-pv-sigma", type=float, default=AUG_PV_SIGMA)
+    parser.add_argument("--aug-rho-load", type=float, default=AUG_RHO_LOAD)
+    parser.add_argument("--aug-rho-pv", type=float, default=AUG_RHO_PV)
+    parser.add_argument("--bc-lr", type=float, default=BC_LR)
+    parser.add_argument("--bc-minibatch", type=int, default=BC_MINIBATCH)
+    parser.add_argument("--bc-action-clip", type=float, default=BC_ACTION_CLIP)
+    parser.add_argument("--torch-threads", type=int, default=TORCH_THREADS)
     parser.add_argument("--lambda-energy", "--lam-energy", dest="lambda_energy", type=float, default=LAMBDA_ENERGY)
     parser.add_argument("--lambda-peak", "--lam-peak", dest="lambda_peak", type=str, default=str(LAMBDA_PEAK))
     parser.add_argument("--gamma", type=float, default=1.0)
@@ -695,13 +789,40 @@ def main() -> None:
     if abs(args.control_dt_minutes - 15.0) > 1e-9:
         raise SystemExit("PPO2 senior-reference mode requires a 15-minute control interval")
     resolve_ppo2_device(args.device)
-    if args.init_std <= 0.0:
-        raise SystemExit("--init-std must be > 0")
+    numeric_checks = (
+        (args.steps > 0, "--steps must be > 0"),
+        (args.rollout > 0, "--rollout must be > 0"),
+        (args.eval_every > 0, "--eval-every must be > 0"),
+        (0.0 < args.min_month_coverage <= 1.0, "--min-month-coverage must be in (0, 1]"),
+        (args.val_months > 0 and args.test_months > 0, "--val-months and --test-months must be > 0"),
+        (args.actor_lr > 0.0 and args.critic_lr > 0.0, "actor/critic learning rates must be > 0"),
+        (args.init_std > 0.0, "--init-std must be > 0"),
+        (args.clip_penalty >= 0.0, "--clip-penalty must be >= 0"),
+        (args.bc_epochs >= 0, "--bc-epochs must be >= 0"),
+        (0.0 < args.ppo_clip <= 1.0, "--ppo-clip must be in (0, 1]"),
+        (args.ppo_epochs > 0 and args.minibatch > 0, "PPO epochs/minibatch must be > 0"),
+        (args.entropy_coef >= 0.0 and args.value_coef >= 0.0, "entropy/value coefficients must be >= 0"),
+        (args.target_kl > 0.0, "--target-kl must be > 0"),
+        (0.0 <= args.shaping_margin <= 1.0, "--shaping-margin must be in [0, 1]"),
+        (args.aug_load_sigma >= 0.0 and args.aug_pv_sigma >= 0.0, "augmentation sigmas must be >= 0"),
+        (abs(args.aug_rho_load) < 1.0 and abs(args.aug_rho_pv) < 1.0, "augmentation rho values must satisfy abs(rho) < 1"),
+        (args.bc_lr > 0.0 and args.bc_minibatch > 0, "BC learning rate/minibatch must be > 0"),
+        (0.0 < args.bc_action_clip <= 1.0, "--bc-action-clip must be in (0, 1]"),
+        (args.torch_threads > 0, "--torch-threads must be > 0"),
+        (0.0 <= args.lambda_energy <= 1.0, "--lambda-energy must be in [0, 1]"),
+    )
+    for valid, message in numeric_checks:
+        if not valid:
+            raise SystemExit(message)
+    torch.set_num_threads(args.torch_threads)
 
     csv_path = Path(args.csv)
     all_days = _load_csv_days_reference(csv_path)
     train_months, val_months, test_months = _split_months(
-        all_days, args.min_month_coverage
+        all_days,
+        args.min_month_coverage,
+        val_months=args.val_months,
+        test_months=args.test_months,
     )
     train_days = _flatten(train_months)
     peak = max(float(day.load.max()) for day in train_days)
@@ -732,6 +853,8 @@ def main() -> None:
     ]
     if not lambda_peaks:
         raise SystemExit("--lambda-peak must list at least one value")
+    if any(not 0.0 <= value <= 1.0 for value in lambda_peaks):
+        raise SystemExit("--lambda-peak values must be in [0, 1]")
 
     need_train_oracle = cfg.T_cap > 0.0 or args.bc_epochs > 0
     train_oracle = (
@@ -746,7 +869,9 @@ def main() -> None:
         if need_train_oracle
         else None
     )
-    train_warm_starts = _shaping_warm_starts(train_months, cfg, train_oracle)
+    train_warm_starts = _shaping_warm_starts(
+        train_months, cfg, train_oracle, margin=args.shaping_margin
+    )
     log_std_init = math.log(args.init_std)
 
     if len(train_months) < 6:
@@ -795,6 +920,23 @@ def main() -> None:
                 log_std_init=log_std_init,
                 clip_penalty_per_kwh=args.clip_penalty,
                 bc_epochs=args.bc_epochs,
+                gamma=args.gamma,
+                ppo_clip=args.ppo_clip,
+                ppo_epochs=args.ppo_epochs,
+                ppo_minibatch=args.minibatch,
+                entropy_coef=args.entropy_coef,
+                value_coef=args.value_coef,
+                target_kl=args.target_kl,
+                bc_lr=args.bc_lr,
+                bc_minibatch=args.bc_minibatch,
+                bc_action_clip=args.bc_action_clip,
+                shaping_margin=args.shaping_margin,
+                min_month_coverage=args.min_month_coverage,
+                aug_load_sigma=args.aug_load_sigma,
+                aug_pv_sigma=args.aug_pv_sigma,
+                aug_rho_load=args.aug_rho_load,
+                aug_rho_pv=args.aug_rho_pv,
+                torch_threads=args.torch_threads,
                 train_oracle=train_oracle,
                 config_hash=config_hash,
             )
@@ -874,6 +1016,27 @@ def main() -> None:
             "critic_lr": args.critic_lr,
             "init_std": args.init_std,
             "bc_epochs": args.bc_epochs,
+            "bc_lr": args.bc_lr,
+            "bc_minibatch": args.bc_minibatch,
+            "bc_action_clip": args.bc_action_clip,
+            "ppo_clip": args.ppo_clip,
+            "ppo_epochs": args.ppo_epochs,
+            "ppo_minibatch": args.minibatch,
+            "entropy_coef": args.entropy_coef,
+            "value_coef": args.value_coef,
+            "target_kl": args.target_kl,
+            "shaping_margin": args.shaping_margin,
+            "min_month_coverage": args.min_month_coverage,
+            "validation_months": args.val_months,
+            "test_months": args.test_months,
+            "augmentation": {
+                "sigmaLoad": args.aug_load_sigma,
+                "sigmaPv": args.aug_pv_sigma,
+                "rhoLoad": args.aug_rho_load,
+                "rhoPv": args.aug_rho_pv,
+            },
+            "torch_threads": args.torch_threads,
+            "gamma": args.gamma,
             "lambda_energy": args.lambda_energy,
             "lambda_peak_sweep": lambda_peaks,
             "lambda_peak_selected": best_lambda,

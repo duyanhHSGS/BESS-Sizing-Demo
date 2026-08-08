@@ -1412,8 +1412,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label>E_cap (kWh) <input type="number" id="train-ecap" step="50" value="{{ battery_capacity_kWh }}"></label>
           <label>P_rated (kW) <input type="number" id="train-prated" step="25"
               value="{{ battery_power_limit_kW }}"></label>
-          <label>Validation days <input type="number" id="train-val-days" min="1" step="1" value="30"></label>
-          <label>Test days <input type="number" id="train-test-days" min="1" step="1" value="30"></label>
+          <label class="train-day-split-field">Validation days <input type="number" id="train-val-days" min="1" step="1" value="30"></label>
+          <label class="train-day-split-field">Test days <input type="number" id="train-test-days" min="1" step="1" value="30"></label>
           <label class="train-learning-field">Custom sampling Δt
             <select id="train-control-dt"></select>
           </label>
@@ -1447,10 +1447,37 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label class="train-pro-field" style="display:none">Oracle coefficient <input type="number" id="train-pro-oracle-coef" min="0" max="10" step="0.01" value="1.0"></label>
           <label class="train-pro-field" style="display:none">Oracle decay / update <input type="number" id="train-pro-oracle-decay" min="0" max="1" step="0.0001" value="0.002"></label>
           <label class="train-pro-field" style="display:none">PRO Gamma <input type="number" id="train-pro-gamma" min="0.0001" max="1" step="0.0001" value="{{ pro_gamma }}"></label>
-          <label class="train-ppo2-field" style="display:none">Steps <input type="number" id="train-ppo2-steps" value="400000" step="50000"></label>
-          <label class="train-ppo2-field" style="display:none">Gamma <input type="number" id="train-ppo2-gamma" min="0.0001" max="1" step="0.0001" value="{{ ppo2_gamma }}"></label>
+          <label class="train-ppo2-field" style="display:none">Steps <input type="number" id="train-ppo2-steps" value="1500000" min="1" step="50000"></label>
+          <label class="train-ppo2-field" style="display:none">Seed <input type="number" id="train-ppo2-seed" value="0" step="1"></label>
+          <label class="train-ppo2-field" style="display:none">Seed sweep <input id="train-ppo2-seeds" placeholder="e.g. 0,1,2" size="12"></label>
+          <label class="train-ppo2-field" style="display:none">Gamma (fixed reference) <input type="number" id="train-ppo2-gamma" min="1" max="1" step="1" value="{{ ppo2_gamma }}"></label>
           <label class="train-ppo2-field" style="display:none">λ energy <input type="number" id="train-ppo2-lam-energy" min="0" max="1" step="0.001" value="{{ ppo2_lam_energy }}"></label>
-          <label class="train-ppo2-field" style="display:none">λ peak <input type="number" id="train-ppo2-lam-peak" min="0" max="1" step="0.001" value="{{ ppo2_lam_peak }}"></label>
+          <label class="train-ppo2-field" style="display:none">λ peak sweep <input id="train-ppo2-lam-peak" value="{{ ppo2_lam_peak }}" placeholder="0.7,0.97" size="12"></label>
+          <label class="train-ppo2-field" style="display:none">Rollout steps <input type="number" id="train-ppo2-rollout" value="2880" min="1" step="96"></label>
+          <label class="train-ppo2-field" style="display:none">Eval every updates <input type="number" id="train-ppo2-eval-every" value="20" min="1" step="1"></label>
+          <label class="train-ppo2-field" style="display:none">Minimum month coverage <input type="number" id="train-ppo2-min-month-coverage" value="0.8" min="0.01" max="1" step="0.01"></label>
+          <label class="train-ppo2-field" style="display:none">Validation months <input type="number" id="train-ppo2-val-months" value="2" min="1" max="24" step="1"></label>
+          <label class="train-ppo2-field" style="display:none">Test months <input type="number" id="train-ppo2-test-months" value="1" min="1" max="24" step="1"></label>
+          <label class="train-ppo2-field" style="display:none">Actor LR <input type="number" id="train-ppo2-actor-lr" value="0.00003" min="0" step="0.00001"></label>
+          <label class="train-ppo2-field" style="display:none">Critic LR <input type="number" id="train-ppo2-critic-lr" value="0.0003" min="0" step="0.0001"></label>
+          <label class="train-ppo2-field" style="display:none">Initial std <input type="number" id="train-ppo2-init-std" value="0.15" min="0.0001" step="0.01"></label>
+          <label class="train-ppo2-field" style="display:none">Clip penalty VND/kWh <input type="number" id="train-ppo2-clip-penalty" value="100" min="0" step="10"></label>
+          <label class="train-ppo2-field" style="display:none">BC epochs <input type="number" id="train-ppo2-bc-epochs" value="10" min="0" step="1"></label>
+          <label class="train-ppo2-field" style="display:none">PPO clip <input type="number" id="train-ppo2-clip" value="0.2" min="0.0001" max="1" step="0.01"></label>
+          <label class="train-ppo2-field" style="display:none">PPO epochs <input type="number" id="train-ppo2-epochs" value="6" min="1" step="1"></label>
+          <label class="train-ppo2-field" style="display:none">PPO minibatch <input type="number" id="train-ppo2-minibatch" value="256" min="1" step="1"></label>
+          <label class="train-ppo2-field" style="display:none">Entropy coef <input type="number" id="train-ppo2-ent-coef" value="0.01" min="0" step="0.001"></label>
+          <label class="train-ppo2-field" style="display:none">Value coef <input type="number" id="train-ppo2-vf-coef" value="0.5" min="0" step="0.05"></label>
+          <label class="train-ppo2-field" style="display:none">Target KL <input type="number" id="train-ppo2-target-kl" value="0.01" min="0.000001" step="0.001"></label>
+          <label class="train-ppo2-field" style="display:none">Shaping margin <input type="number" id="train-ppo2-shaping-margin" value="0.9" min="0" max="1" step="0.01"></label>
+          <label class="train-ppo2-field" style="display:none">Load aug σ <input type="number" id="train-ppo2-aug-load-sigma" value="0.04" min="0" step="0.01"></label>
+          <label class="train-ppo2-field" style="display:none">PV aug σ <input type="number" id="train-ppo2-aug-pv-sigma" value="0.08" min="0" step="0.01"></label>
+          <label class="train-ppo2-field" style="display:none">Load aug ρ <input type="number" id="train-ppo2-aug-rho-load" value="0.9" min="-0.999" max="0.999" step="0.01"></label>
+          <label class="train-ppo2-field" style="display:none">PV aug ρ <input type="number" id="train-ppo2-aug-rho-pv" value="0.9" min="-0.999" max="0.999" step="0.01"></label>
+          <label class="train-ppo2-field" style="display:none">BC LR <input type="number" id="train-ppo2-bc-lr" value="0.001" min="0" step="0.0001"></label>
+          <label class="train-ppo2-field" style="display:none">BC minibatch <input type="number" id="train-ppo2-bc-minibatch" value="256" min="1" step="1"></label>
+          <label class="train-ppo2-field" style="display:none">BC action clip <input type="number" id="train-ppo2-bc-action-clip" value="0.95" min="0.0001" max="1" step="0.01"></label>
+          <label class="train-ppo2-field" style="display:none">Torch CPU threads <input type="number" id="train-ppo2-torch-threads" value="2" min="1" max="128" step="1"></label>
           <label>Checkpoint tag <input id="train-tag" size="22" placeholder="auto"></label>
           <button id="btn-train" class="primary" type="button">Start training</button>
           <button id="btn-train-stop" type="button" disabled>Stop</button>
@@ -4469,7 +4496,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       const datasetRange = dataset.validation_range ? dataset.validation_range.join(" → ") : meta.test_range?.join(" → ");
       const hyperparameters = checkpoint.algo === "ppo"
         ? `gamma ${training.gamma ?? meta.gamma ?? "?"}, lambda ${training.lambda ?? meta.lambda ?? "?"}`
-        : `gamma ${training.gamma ?? meta.gamma ?? "?"}, group ${training.group ?? meta.group ?? "?"}, beta ${training.beta ?? meta.beta ?? "?"}, std ${training.std ?? meta.std ?? "?"}`;
+        : checkpoint.algo === "ppo2"
+          ? `gamma ${training.gamma ?? meta.gamma ?? "?"}, λE ${training.lambda_energy ?? meta.lambda_energy ?? "?"}, λP ${training.lambda_peak_selected ?? meta.lambda_peak_selected ?? meta.lambda_peak ?? "?"}, actor/critic LR ${training.actor_lr ?? meta.actor_learning_rate ?? "?"}/${training.critic_lr ?? meta.critic_learning_rate ?? "?"}, PPO clip ${training.ppo_clip ?? meta.ppo_clip ?? "?"}`
+          : `gamma ${training.gamma ?? meta.gamma ?? "?"}, group ${training.group ?? meta.group ?? "?"}, beta ${training.beta ?? meta.beta ?? "?"}, std ${training.std ?? meta.std ?? "?"}`;
       const details = [
         ["Algorithm", checkpoint.algo || saved.algorithm],
         ["Brain mode", `${meta.obs_variant === "fc" ? "Forecast" : "Reactive"} — ${meta.obs_dim || (meta.obs_variant === "fc" ? 17 : 13)} inputs`],
@@ -4547,9 +4576,25 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       document.querySelectorAll(".train-ppo2-field").forEach((item) => {
         item.style.display = algo === "ppo2" ? "inline-flex" : "none";
       });
+      document.querySelectorAll(".train-day-split-field").forEach((item) => {
+        item.style.display = algo === "ppo2" ? "none" : "inline-flex";
+      });
       document.querySelectorAll(".train-pro-field").forEach((item) => {
         item.style.display = algo === "pro" ? "inline-flex" : "none";
       });
+      const ppo2Mode = algo === "ppo2";
+      trainObservation.disabled = ppo2Mode;
+      trainDevice.disabled = ppo2Mode;
+      trainControlDt.disabled = ppo2Mode;
+      trainControlDtCustom.disabled = ppo2Mode;
+      if (ppo2Mode) {
+        trainObservation.value = "base";
+        trainDevice.value = "cpu";
+        if (Array.from(trainControlDt.options).some((option) => option.value === "15")) {
+          trainControlDt.value = "15";
+        }
+        trainControlDtCustomWrap.style.display = "none";
+      }
       if (["ppo", "ppo2", "grepo", "grepro", "pro"].includes(algo)) {
         trainControlDtCustomWrap.style.display = trainControlDt.value === "custom" ? "inline-flex" : "none";
       }
@@ -4575,6 +4620,23 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       const controlDt = selectedControlDt();
       const brainMode = trainObservation.value;
       const validControlDt = isCompatibleControlDt(controlDt, nativeDt);
+      if (algo === "ppo2") {
+        const ppo2Ready = Math.abs(nativeDt - 15) < 1e-9
+          && Math.abs(controlDt - 15) < 1e-9
+          && trainObservation.value === "base"
+          && trainDevice.value === "cpu"
+          && Math.abs(Number(document.getElementById("train-ppo2-gamma").value) - 1) < 1e-12;
+        trainButton.disabled = !ppo2Ready;
+        if (!ppo2Ready) {
+          trainPlan.textContent = `PPO2 senior-reference mode requires the source CSV itself to be 15-minute data, 15-minute control, reactive/base observation, CPU, and gamma=1.0. Current native Δt: ${nativeDt}m.`;
+          return;
+        }
+        const valMonths = document.getElementById("train-ppo2-val-months").value;
+        const testMonths = document.getElementById("train-ppo2-test-months").value;
+        const coverage = Number(document.getElementById("train-ppo2-min-month-coverage").value) * 100;
+        trainPlan.textContent = `PPO2 reference plan: ${document.getElementById("train-ppo2-steps").value} steps; fixed 15m/17D reference environment; calendar-month split with ${valMonths} validation + ${testMonths} newest test month(s), ≥${formatNumber(coverage, 0)}% coverage; λ_energy ${document.getElementById("train-ppo2-lam-energy").value}; λ_peak sweep ${document.getElementById("train-ppo2-lam-peak").value}; internal fixed-block month Oracle; CPU threads ${document.getElementById("train-ppo2-torch-threads").value}. No shared rolling-Oracle cache is required.`;
+        return;
+      }
       trainButton.disabled = valDays < 1 || testDays < 1 || trainDays < 1 || algo === "grpo" || !validControlDt;
       if (algo === "grpo") {
         trainPlan.textContent = "GRPO is visible for planning, but it is not implemented in this repo yet.";
@@ -4802,6 +4864,37 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             pro_oracle_coef: Number(trainProOracleCoef.value),
             pro_oracle_decay: Number(trainProOracleDecay.value),
             pro_gamma: Number(trainProGamma.value),
+            ppo2_steps: Number(document.getElementById("train-ppo2-steps").value),
+            ppo2_seed: Number(document.getElementById("train-ppo2-seed").value),
+            ppo2_seeds: document.getElementById("train-ppo2-seeds").value.trim(),
+            ppo2_gamma: Number(document.getElementById("train-ppo2-gamma").value),
+            ppo2_lam_energy: Number(document.getElementById("train-ppo2-lam-energy").value),
+            ppo2_lam_peak: document.getElementById("train-ppo2-lam-peak").value.trim(),
+            ppo2_rollout: Number(document.getElementById("train-ppo2-rollout").value),
+            ppo2_eval_every: Number(document.getElementById("train-ppo2-eval-every").value),
+            ppo2_min_month_coverage: Number(document.getElementById("train-ppo2-min-month-coverage").value),
+            ppo2_val_months: Number(document.getElementById("train-ppo2-val-months").value),
+            ppo2_test_months: Number(document.getElementById("train-ppo2-test-months").value),
+            ppo2_actor_lr: Number(document.getElementById("train-ppo2-actor-lr").value),
+            ppo2_critic_lr: Number(document.getElementById("train-ppo2-critic-lr").value),
+            ppo2_init_std: Number(document.getElementById("train-ppo2-init-std").value),
+            ppo2_clip_penalty: Number(document.getElementById("train-ppo2-clip-penalty").value),
+            ppo2_bc_epochs: Number(document.getElementById("train-ppo2-bc-epochs").value),
+            ppo2_clip: Number(document.getElementById("train-ppo2-clip").value),
+            ppo2_epochs: Number(document.getElementById("train-ppo2-epochs").value),
+            ppo2_minibatch: Number(document.getElementById("train-ppo2-minibatch").value),
+            ppo2_ent_coef: Number(document.getElementById("train-ppo2-ent-coef").value),
+            ppo2_vf_coef: Number(document.getElementById("train-ppo2-vf-coef").value),
+            ppo2_target_kl: Number(document.getElementById("train-ppo2-target-kl").value),
+            ppo2_shaping_margin: Number(document.getElementById("train-ppo2-shaping-margin").value),
+            ppo2_aug_load_sigma: Number(document.getElementById("train-ppo2-aug-load-sigma").value),
+            ppo2_aug_pv_sigma: Number(document.getElementById("train-ppo2-aug-pv-sigma").value),
+            ppo2_aug_rho_load: Number(document.getElementById("train-ppo2-aug-rho-load").value),
+            ppo2_aug_rho_pv: Number(document.getElementById("train-ppo2-aug-rho-pv").value),
+            ppo2_bc_lr: Number(document.getElementById("train-ppo2-bc-lr").value),
+            ppo2_bc_minibatch: Number(document.getElementById("train-ppo2-bc-minibatch").value),
+            ppo2_bc_action_clip: Number(document.getElementById("train-ppo2-bc-action-clip").value),
+            ppo2_torch_threads: Number(document.getElementById("train-ppo2-torch-threads").value),
             control_dt_minutes: selectedControlDt(),
             tag: trainTag.value.trim(),
           }),
@@ -4840,6 +4933,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       updateTrainPlan();
     });
     [trainEcap, trainPrated, trainValDays, trainTestDays, trainSteps, trainGamma, trainLambda, trainIters, trainGrepoGamma, trainGreproIters, trainGreproGroup, trainGreproBeta, trainGreproStd, trainGreproGamma, trainControlDtCustom].forEach((input) => input.addEventListener("input", updateTrainPlan));
+    document.querySelectorAll(".train-ppo2-field input").forEach((input) => input.addEventListener("input", updateTrainPlan));
     trainButton.addEventListener("click", startTraining);
     trainStopButton.addEventListener("click", stopTraining);
     checkpointTableBody.addEventListener("click", (event) => {
