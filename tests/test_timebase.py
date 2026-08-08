@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from bess.core.timebase import build_tariff_windows, demand_window_steps, steps_per_day_from_dt
+from bess.core.timebase import (
+    build_tariff_windows,
+    demand_window_steps,
+    fixed_demand_block_averages,
+    fixed_demand_windows,
+    steps_per_day_from_dt,
+)
 
 
 class TimebaseTests(unittest.TestCase):
@@ -30,6 +36,21 @@ class TimebaseTests(unittest.TestCase):
     def test_dt_must_tile_30_minute_billing_window(self):
         with self.assertRaisesRegex(ValueError, "30 minutes"):
             demand_window_steps(4.0 / 60.0)
+
+    def test_demand_meter_uses_fixed_non_overlapping_blocks(self):
+        values = [100.0, 500.0, 500.0, 100.0]
+        self.assertEqual(fixed_demand_block_averages(values, 0.25), [300.0, 300.0])
+        self.assertEqual(
+            fixed_demand_windows(len(values), 0.25),
+            [[(0, 0.5), (1, 0.5)], [(2, 0.5), (3, 0.5)]],
+        )
+
+    def test_fixed_blocks_scale_with_native_resolution(self):
+        values = list(range(60))
+        blocks = fixed_demand_block_averages(values, 1.0 / 60.0)
+        self.assertEqual(len(blocks), 2)
+        self.assertAlmostEqual(blocks[0], 14.5)
+        self.assertAlmostEqual(blocks[1], 44.5)
 
 
 if __name__ == "__main__":

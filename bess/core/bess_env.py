@@ -15,8 +15,9 @@ The RL problem is therefore unconstrained for the learner; the projection
 makes the 4 critical scenarios in CLAUDE.md structurally satisfiable.
 
 SPARSE DEMAND-CHARGE SHAPING:
-  The monthly demand charge T_cap * max_t D_t (D = 30-min rolling average of
-  grid import) is path-dependent and fires once a month. We shape it into a
+  The monthly demand charge T_cap * max_b D_b (D = fixed, clock-aligned
+  30-minute meter-block average of grid import) is path-dependent and fires
+  once a month. We shape it into a
   dense signal by charging the MARGINAL increment of the running monthly
   peak at each step:  pen_t = T_cap * max(0, D_t - D_run).
   Summed over the month this telescopes to exactly T_cap * (D_peak - D_run0).
@@ -42,13 +43,10 @@ COUNTERFACTUAL VARIANCE REDUCTION:
   Subtracting policy-independent terms changes no gradients in expectation
   but shrinks advantage variance by an order of magnitude.
 
-PEAK-SAFE CHARGING PROJECTION:
-  Grid-charging is capped so it can never itself raise the running monthly
-  peak (cg <= max(0, d_run - eff_load)). Charging is deferrable, and at
-  T_cap = 235k VND/kW a self-inflicted peak always dominates the ~7k
-  VND/kWh/day arbitrage value it could enable, so this cut never removes
-  the optimum  and it deletes the catastrophic exploration spikes that
-  destabilised early training.
+ACTION PROJECTION:
+  The environment enforces physical feasibility only: SOC bounds, rated power,
+  and zero export. Demand economics are learned from the actual fixed 30-minute
+  meter-block reward instead of being hard-coded as a per-sample peak guard.
 """
 from __future__ import annotations
 
@@ -148,12 +146,10 @@ class BESSEnv:
         self._phi_coef_base = config.E_cap * config.eta_dis
 
     def _reset_demand_window(self) -> None:
-        self._roll_grid = np.zeros(self.roll_k, dtype=np.float64)
-        self._roll_nb = np.zeros(self.roll_k, dtype=np.float64)
-        self._roll_pos = 0
-        self._roll_count = 0
-        self._roll_grid_sum = 0.0
-        self._roll_nb_sum = 0.0
+        """Reset the current fixed 30-minute meter integration block."""
+        self._block_count = 0
+        self._block_grid_sum = 0.0
+        self._block_nb_sum = 0.0
 
     # ------------------------------------------------------------------
     def _configure_control_interval(self) -> None:
@@ -362,12 +358,10 @@ class BESSEnv:
         )
         pv_charge_kw = min(requested_charge_kw, pv_surplus_kw)  # free PV first
 
-        # Peak-safe rule: grid charging may not create a new monthly peak.
-        grid_charge_limit_kw = max(0.0, self.d_run - net_load_kw)
-        grid_charge_kw = min(
-            requested_charge_kw - pv_charge_kw,
-            grid_charge_limit_kw,
-        )
+        # Grid charging is limited only by physical feasibility here. The
+        # fixed-block demand charge belongs in the reward/billing model, not in
+        # a stricter per-sample rule that can delete valid optimal schedules.
+        grid_charge_kw = requested_charge_kw - pv_charge_kw
         return 0.0, grid_charge_kw, pv_charge_kw
 
     # ------------------------------------------------------------------
@@ -401,38 +395,29 @@ class BESSEnv:
         # --- actual electricity cost -----------------------------------
         electricity_cost = self.tariff[time_step] * grid_import_kw * self.dt
 
-        # --- rolling 30-minute demand meter ----------------------------
-        rolling_index = self._roll_pos
-        if self._roll_count == self.roll_k:
-            self._roll_grid_sum -= self._roll_grid[rolling_index]
-            self._roll_nb_sum -= self._roll_nb[rolling_index]
-        else:
-            self._roll_count += 1
+        # --- fixed 30-minute meter integration block --------------------
+        self._block_count += 1
+        self._block_grid_sum += grid_import_kw
+        self._block_nb_sum += net_load_kw
 
-        self._roll_grid[rolling_index] = grid_import_kw
-        self._roll_nb[rolling_index] = net_load_kw
-        self._roll_grid_sum += grid_import_kw
-        self._roll_nb_sum += net_load_kw
-        self._roll_pos = (rolling_index + 1) % self.roll_k
+        demand_peak_penalty = 0.0
+        no_bess_peak_penalty = 0.0
+        if self._block_count == self.roll_k:
+            block_demand_kw = self._block_grid_sum / self.roll_k
+            no_bess_block_demand_kw = self._block_nb_sum / self.roll_k
 
-        if self._roll_count < self.roll_k:
-            rolling_demand_kw = 0.0
-            no_bess_rolling_demand_kw = 0.0
-        else:
-            rolling_demand_kw = self._roll_grid_sum / self.roll_k
-            no_bess_rolling_demand_kw = self._roll_nb_sum / self.roll_k
+            demand_peak_penalty = config.T_cap * max(
+                0.0,
+                block_demand_kw - self.d_run,
+            )
+            self.d_run = max(self.d_run, block_demand_kw)
 
-        demand_peak_penalty = config.T_cap * max(
-            0.0,
-            rolling_demand_kw - self.d_run,
-        )
-        self.d_run = max(self.d_run, rolling_demand_kw)
-
-        no_bess_peak_penalty = config.T_cap * max(
-            0.0,
-            no_bess_rolling_demand_kw - self.d_run_nb,
-        )
-        self.d_run_nb = max(self.d_run_nb, no_bess_rolling_demand_kw)
+            no_bess_peak_penalty = config.T_cap * max(
+                0.0,
+                no_bess_block_demand_kw - self.d_run_nb,
+            )
+            self.d_run_nb = max(self.d_run_nb, no_bess_block_demand_kw)
+            self._reset_demand_window()
 
         battery_wear_cost = (
             self.deg

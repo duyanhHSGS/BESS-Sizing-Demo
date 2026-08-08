@@ -123,20 +123,20 @@ _DEFAULTS = SADRBCConfig()
 
 
 # =====================================================================
-# Billing-aligned 30-minute rolling PMax
+# Billing-aligned fixed 30-minute meter PMax
 # =====================================================================
 def compute_PMax_30min_rolling(p_grid, dt_h=None):
+    """Legacy API name; compute fixed/non-overlapping 30-minute meter PMax."""
     if dt_h is None:
         dt_h = _DEFAULTS.dt
     win = demand_window_steps(dt_h)
     if len(p_grid) < win:
         return max(p_grid) if p_grid else 0.0
-    rolling_max = 0.0
-    for i in range(0, len(p_grid) - win + 1):
-        avg = sum(p_grid[i:i + win]) / win
-        if avg > rolling_max:
-            rolling_max = avg
-    return rolling_max
+    complete_steps = len(p_grid) - (len(p_grid) % win)
+    return max(
+        (sum(p_grid[i:i + win]) / win for i in range(0, complete_steps, win)),
+        default=0.0,
+    )
 
 
 def thermal_derate(T_battery, P_nominal=None, T_DERATE_table=None):

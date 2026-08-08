@@ -2,12 +2,12 @@
 monthly-billing scorer used by EVERY method (DRL, SADRBC, Oracle, No-BESS)
 so comparisons are scored on one identical cost model.
 
-Cost model (EVN 2-part tariff, TT16/2014 params from settings.SYSTEM_CONFIG):
+Cost model (EVN 2-part tariff params from settings.SYSTEM_CONFIG):
   energy_cost  = sum_t tariff[t] * max(0, grid[t]) * dt        (dense)
   demand_cost  = T_cap * PMax_month
-  PMax_month   = max over days of the 30-min ROLLING-AVERAGE grid import
-                 (same convention as sadrbc.compute_PMax_30min_rolling)
-  zero export  = grid[t] >= 0 for all t  (hard, TT05/2025)
+  PMax_month   = max over clock-aligned, fixed/non-overlapping 30-minute
+                 meter integration intervals
+  zero export  = grid[t] >= 0 for all t  (hard)
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 from bess.paths import PROJECT_ROOT
 
 from bess.core.settings import DEFAULT_PARAMETERS, SYSTEM_CONFIG
-from bess.core.timebase import demand_window_steps, steps_per_day_from_dt
+from bess.core.timebase import fixed_demand_block_averages, steps_per_day_from_dt
 
 import numpy as np
 
@@ -190,14 +190,16 @@ def tariff_vector_day(cfg: SADRBCConfig, day) -> np.ndarray:
     return tariff_vector(cfg)
 
 
-def rolling_pmax_day(p_grid_day: np.ndarray, dt_hours: float) -> float:
-    """Max 30-minute rolling average for the supplied native timestep."""
-    from bess.evaluation.benchmark import _rolling_30_minute_average
-
-    demand_window_steps(dt_hours)  # reject a timestep that cannot tile 30 minutes
+def fixed_pmax_day(p_grid_day: np.ndarray, dt_hours: float) -> float:
+    """Max fixed, clock-aligned 30-minute meter-interval average."""
     g = np.maximum(0.0, np.asarray(p_grid_day, dtype=np.float64))
-    rolling = _rolling_30_minute_average(g, dt_hours)
-    return float(max(rolling, default=0.0))
+    block_averages = fixed_demand_block_averages(g, dt_hours)
+    return float(max(block_averages, default=0.0))
+
+
+# Backward-compatible name for older callers; semantics are now fixed blocks.
+def rolling_pmax_day(p_grid_day: np.ndarray, dt_hours: float) -> float:
+    return fixed_pmax_day(p_grid_day, dt_hours)
 
 
 def score_month(p_grid_days: list[np.ndarray], cfg: SADRBCConfig,
@@ -220,7 +222,7 @@ def score_month(p_grid_days: list[np.ndarray], cfg: SADRBCConfig,
                 "set cfg.dt from the selected data resolution."
             )
         energy += float(np.sum(g * t) * cfg.dt)
-        pmax = max(pmax, rolling_pmax_day(g, cfg.dt))
+        pmax = max(pmax, fixed_pmax_day(g, cfg.dt))
     demand = pmax * cfg.T_cap
     return {
         "energy_cost_vnd": energy,

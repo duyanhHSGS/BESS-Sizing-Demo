@@ -45,8 +45,40 @@ def steps_for_minutes(duration_minutes: float, dt_hours: float) -> int:
 
 
 def demand_window_steps(dt_hours: float) -> int:
-    """Number of native samples in the 30-minute demand-charge window."""
+    """Number of native samples in one fixed 30-minute demand interval."""
     return steps_for_minutes(DEMAND_WINDOW_MINUTES, dt_hours)
+
+
+def fixed_demand_block_starts(step_count: int, dt_hours: float) -> range:
+    """Clock-aligned starts for non-overlapping 30-minute meter intervals.
+
+    Step 0 is midnight, so blocks are [00:00,00:30), [00:30,01:00), ... .
+    The caller must supply complete native samples; a final incomplete block is
+    intentionally omitted rather than pretending it was a full billing interval.
+    """
+    steps = max(0, int(step_count))
+    block_steps = demand_window_steps(dt_hours)
+    complete_steps = steps - (steps % block_steps)
+    return range(0, complete_steps, block_steps)
+
+
+def fixed_demand_block_averages(values, dt_hours: float) -> list[float]:
+    """Average each fixed, non-overlapping 30-minute meter interval."""
+    block_steps = demand_window_steps(dt_hours)
+    return [
+        sum(float(value) for value in values[start:start + block_steps]) / block_steps
+        for start in fixed_demand_block_starts(len(values), dt_hours)
+    ]
+
+
+def fixed_demand_windows(step_count: int, dt_hours: float) -> list[list[tuple[int, float]]]:
+    """Linear weights for complete fixed 30-minute demand intervals."""
+    block_steps = demand_window_steps(dt_hours)
+    weight = 1.0 / block_steps
+    return [
+        [(step, weight) for step in range(start, start + block_steps)]
+        for start in fixed_demand_block_starts(step_count, dt_hours)
+    ]
 
 
 def _clock_minutes(clock_text: str) -> float:

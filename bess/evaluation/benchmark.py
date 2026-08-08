@@ -6,6 +6,8 @@ from bess.paths import PROJECT_ROOT
 
 import numpy as np
 
+from bess.core.timebase import demand_window_steps, fixed_demand_block_averages, fixed_demand_windows
+
 
 BASE_DIR = PROJECT_ROOT
 DATA_DIR = BASE_DIR / "data"
@@ -278,48 +280,37 @@ def _rolling_average(values, window):
 
 
 def _rolling_30_minute_average(values, dt):
+    """Legacy API name; returns fixed meter-block averages expanded per sample.
+
+    The real two-component tariff PMax is measured over clock-aligned,
+    non-overlapping 30-minute integration intervals. Repeating each completed
+    block average across its native samples preserves the existing plotting/data
+    shape while changing the billing semantics to the meter's fixed blocks.
+    """
     values = np.asarray(values, dtype=np.float64)
-    steps = len(values)
-    if steps == 0:
+    if len(values) == 0:
         return []
-
-    samples = DEMAND_WINDOW_HOURS / dt
-    rounded_samples = int(round(samples))
-    if rounded_samples >= 1 and abs(samples - rounded_samples) <= FLOAT_EPSILON:
-        prefix = np.empty(steps + 1, dtype=np.float64)
-        prefix[0] = 0.0
-        np.cumsum(values, out=prefix[1:])
-        starts = np.arange(steps)
-        ends = np.minimum(starts + rounded_samples, steps)
-        counts = ends - starts
-        return ((prefix[ends] - prefix[starts]) / counts).tolist()
-
-    # Preserve the weighted partial-sample behavior for unusual resolutions.
-    return [
-        sum(values[step] * weight for step, weight in window)
-        for window in _demand_windows(steps, dt)
-    ]
+    block_steps = demand_window_steps(dt)
+    block_averages = fixed_demand_block_averages(values, dt)
+    expanded = np.repeat(np.asarray(block_averages, dtype=np.float64), block_steps)
+    if len(expanded) != len(values):
+        raise ValueError("Grid day must contain complete 30-minute meter intervals")
+    return expanded.tolist()
 
 
 def _demand_windows(steps, dt):
-    return [_demand_window(step, steps, dt) for step in range(steps)]
+    """Fixed, non-overlapping 30-minute LP demand constraints."""
+    return fixed_demand_windows(steps, dt)
 
 
 def _demand_window(start, steps, dt):
-    available_hours = max(0.0, (steps - start) * dt)
-    window_hours = min(DEMAND_WINDOW_HOURS, available_hours)
-    if window_hours <= 0.0:
-        return [(start, 1.0)]
-
-    window = []
-    remaining_hours = window_hours
-    step = start
-    while step < steps and remaining_hours > FLOAT_EPSILON:
-        covered_hours = min(dt, remaining_hours)
-        window.append((step, covered_hours / window_hours))
-        remaining_hours -= covered_hours
-        step += 1
-    return window
+    """Return the fixed meter block containing ``start`` (legacy helper)."""
+    block_steps = demand_window_steps(dt)
+    block_start = (int(start) // block_steps) * block_steps
+    if block_start + block_steps > int(steps):
+        return []
+    weight = 1.0 / block_steps
+    return [(step, weight) for step in range(block_start, block_start + block_steps)]
 
 
 def _time_labels(step_count, dt):

@@ -14,7 +14,7 @@ from bess.evaluation.benchmark import selected_data_path
 
 BASE_DIR = PROJECT_ROOT
 CACHE_DIR = BASE_DIR / "user_data" / "oracle_lp_cache"
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 
 ORACLE_PARAMETER_KEYS = (
     "selected_data_csv",
