@@ -349,6 +349,39 @@
       width: 100%;
     }
 
+    .tariff-visual-controls {
+      align-items: end;
+      background: rgba(17, 25, 34, .7);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: 8px 0 0;
+      padding: 10px 12px;
+    }
+
+    .tariff-visual-controls label {
+      min-width: 145px;
+    }
+
+    .tariff-visual-controls input[type="color"] {
+      cursor: pointer;
+      height: 34px;
+      padding: 3px;
+      width: 58px;
+    }
+
+    .tariff-visual-controls input[type="range"] {
+      min-width: 170px;
+    }
+
+    .tariff-strength-value {
+      color: var(--muted);
+      font-size: 12px;
+      min-width: 34px;
+    }
+
     .bill-strip {
       background: #111922;
       border: 1px solid var(--border);
@@ -955,6 +988,13 @@
                 data-tip="Clock ranges that use the cheap price. Example: 00:00-06:00 means overnight power is cheap.">?</span></span><input
               id="tf-woff" name="billing_windows_cheap" size="24" placeholder="00:00-06:00"
               value="{{ billing_windows_cheap }}"></label>
+        </div>
+        <div class="tariff-visual-controls" aria-label="Daily chart tariff band appearance">
+          <label><span class="field-name">Cheap band color</span><input type="color" id="tariff-cheap-color" value="#34d399"></label>
+          <label><span class="field-name">Expensive band color</span><input type="color" id="tariff-expensive-color" value="#f87171"></label>
+          <label><span class="field-name">Band strength</span><input type="range" id="tariff-band-strength" min="4" max="30" step="1" value="12"></label>
+          <output class="tariff-strength-value" id="tariff-strength-value" for="tariff-band-strength">12%</output>
+          <small>Chart-only preference saved in this browser; billing math is unchanged.</small>
         </div>
         <div class="row">
           <label><span class="field-name">Battery cell price (VND/kWh)<span class="hint" tabindex="0"
@@ -1879,6 +1919,13 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const sizingTableBody = document.getElementById("sizing-table-body");
 
     const sampleBatteryCandidates = {{ sample_battery_candidates | tojson }};
+    const currentTariffConfig = {
+      cheapWindows: {{ billing_windows_cheap | tojson }},
+      expensiveWindows: {{ billing_windows_expensive | tojson }},
+      sundayNoPeak: {{ billing_sunday | tojson }},
+    };
+    const tariffAppearanceStorageKey = "sizing-demo-tariff-band-appearance-v1";
+    const tariffAppearance = loadTariffAppearance();
 
     const seriesStyles = [
       { key: "load", label: "Load", color: "#92400e" },
@@ -1933,6 +1980,161 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
     }
+
+    function loadTariffAppearance() {
+      const defaults = { cheapColor: "#34d399", expensiveColor: "#f87171", opacity: 0.12 };
+      try {
+        const saved = JSON.parse(localStorage.getItem(tariffAppearanceStorageKey) || "null");
+        if (!saved || typeof saved !== "object") return defaults;
+        return {
+          cheapColor: /^#[0-9a-f]{6}$/i.test(saved.cheapColor || "") ? saved.cheapColor : defaults.cheapColor,
+          expensiveColor: /^#[0-9a-f]{6}$/i.test(saved.expensiveColor || "") ? saved.expensiveColor : defaults.expensiveColor,
+          opacity: Math.min(0.30, Math.max(0.04, Number(saved.opacity) || defaults.opacity)),
+        };
+      } catch (_error) {
+        return defaults;
+      }
+    }
+
+    function saveTariffAppearance() {
+      try {
+        localStorage.setItem(tariffAppearanceStorageKey, JSON.stringify(tariffAppearance));
+      } catch (_error) {
+        // Browser storage can be disabled; the controls still work for this page load.
+      }
+    }
+
+    function tariffConfigFromParameters(parameters = {}) {
+      return {
+        cheapWindows: parameters.billing_windows_cheap ?? parameters.cheap_windows ?? "",
+        expensiveWindows: parameters.billing_windows_expensive ?? parameters.expensive_windows ?? "",
+        sundayNoPeak: Boolean(parameters.billing_sunday ?? parameters.sunday_no_peak),
+      };
+    }
+
+    function tariffMinute(value) {
+      const match = String(value).trim().match(/^(\d{1,2}):([0-5]\d)$/);
+      if (!match) return null;
+      const hour = Number(match[1]);
+      const minute = Number(match[2]);
+      if (hour > 24 || (hour === 24 && minute !== 0)) return null;
+      return hour * 60 + minute;
+    }
+
+    function parseTariffWindows(rawWindows) {
+      const intervals = [];
+      String(rawWindows || "").split(",").forEach((rawWindow) => {
+        const parts = rawWindow.trim().split("-");
+        if (parts.length !== 2) return;
+        const start = tariffMinute(parts[0]);
+        const end = tariffMinute(parts[1]);
+        if (start === null || end === null || start === end) return;
+        if (start < end) intervals.push([start, end]);
+        else {
+          if (start < 1440) intervals.push([start, 1440]);
+          if (end > 0) intervals.push([0, end]);
+        }
+      });
+      return intervals;
+    }
+
+    function dateIsSunday(dateIso) {
+      const match = String(dateIso || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (!match) return false;
+      const parsed = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+      return parsed.getFullYear() === Number(match[1])
+        && parsed.getMonth() === Number(match[2]) - 1
+        && parsed.getDate() === Number(match[3])
+        && parsed.getDay() === 0;
+    }
+
+    function minuteInsideIntervals(minute, intervals) {
+      return intervals.some(([start, end]) => start <= minute && minute < end);
+    }
+
+    function colorWithOpacity(hexColor, opacity) {
+      const value = parseInt(String(hexColor).slice(1), 16);
+      const red = (value >> 16) & 255;
+      const green = (value >> 8) & 255;
+      const blue = value & 255;
+      return `rgba(${red}, ${green}, ${blue}, ${opacity})`;
+    }
+
+    function drawTariffBands(canvasContext, plot, tariffConfig, dateIso) {
+      if (!tariffConfig || plot.width <= 0 || plot.height <= 0) return;
+      const cheap = parseTariffWindows(tariffConfig.cheapWindows);
+      const expensive = tariffConfig.sundayNoPeak && dateIsSunday(dateIso)
+        ? [] : parseTariffWindows(tariffConfig.expensiveWindows);
+      const boundaries = Array.from(new Set([
+        0, 1440,
+        ...cheap.flat(),
+        ...expensive.flat(),
+      ])).sort((left, right) => left - right);
+
+      canvasContext.save();
+      canvasContext.beginPath();
+      canvasContext.rect(plot.left, plot.top, plot.width, plot.height);
+      canvasContext.clip();
+      const labelsDrawn = { cheap: false, expensive: false };
+      for (let index = 0; index < boundaries.length - 1; index += 1) {
+        const start = boundaries[index];
+        const end = boundaries[index + 1];
+        const midpoint = (start + end) / 2;
+        const isCheap = minuteInsideIntervals(midpoint, cheap);
+        const isExpensive = !isCheap && minuteInsideIntervals(midpoint, expensive);
+        if (!isCheap && !isExpensive) continue;
+        const kind = isCheap ? "cheap" : "expensive";
+        const color = isCheap ? tariffAppearance.cheapColor : tariffAppearance.expensiveColor;
+        const x = plot.left + plot.width * start / 1440;
+        const bandWidth = plot.width * (end - start) / 1440;
+        canvasContext.fillStyle = colorWithOpacity(color, tariffAppearance.opacity);
+        canvasContext.fillRect(
+          x, plot.top, bandWidth, plot.height,
+        );
+        if (!labelsDrawn[kind] && bandWidth >= 58) {
+          canvasContext.fillStyle = colorWithOpacity(color, Math.min(0.85, tariffAppearance.opacity + 0.55));
+          canvasContext.font = "700 10px Segoe UI, system-ui, sans-serif";
+          canvasContext.textAlign = "center";
+          canvasContext.fillText(isCheap ? "CHEAP" : "EXPENSIVE", x + bandWidth / 2, plot.top + 13);
+          labelsDrawn[kind] = true;
+        }
+      }
+      canvasContext.restore();
+    }
+
+    function redrawDailyTariffCharts() {
+      if (benchmark.days.length) {
+        drawBenchmark();
+        drawDispatchViewer();
+      }
+      if (liveLastPayload) renderSelectedLiveDay();
+      if (shadowLastDays.length) renderSelectedShadowDay();
+      if (benchmarkingState.result) drawBenchmarkVersus();
+    }
+
+    function initializeTariffAppearanceControls() {
+      const cheapColor = document.getElementById("tariff-cheap-color");
+      const expensiveColor = document.getElementById("tariff-expensive-color");
+      const strength = document.getElementById("tariff-band-strength");
+      const strengthValue = document.getElementById("tariff-strength-value");
+      cheapColor.value = tariffAppearance.cheapColor;
+      expensiveColor.value = tariffAppearance.expensiveColor;
+      strength.value = String(Math.round(tariffAppearance.opacity * 100));
+      strengthValue.value = `${strength.value}%`;
+      const update = () => {
+        tariffAppearance.cheapColor = cheapColor.value;
+        tariffAppearance.expensiveColor = expensiveColor.value;
+        tariffAppearance.opacity = Number(strength.value) / 100;
+        strengthValue.value = `${strength.value}%`;
+        saveTariffAppearance();
+        redrawDailyTariffCharts();
+      };
+      cheapColor.addEventListener("input", update);
+      expensiveColor.addEventListener("input", update);
+      strength.addEventListener("input", update);
+    }
+
+    initializeTariffAppearanceControls();
 
     function billValue(day, field) {
       return day && Number.isFinite(Number(day[field])) ? Number(day[field]) : null;
@@ -2412,6 +2614,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       ctx.fillStyle = "#111922";
       ctx.fillRect(0, 0, width, height);
 
+      drawTariffBands(ctx, {
+        left: padding.left, top: padding.top, width: plotWidth, height: plotHeight,
+      }, currentTariffConfig, day.date_iso);
       drawGrid(width, height, padding, plotWidth, plotHeight, maxY);
       visibleSeries
         .filter((series) => !series.reference && !series.oracleReference && !series.soc)
@@ -2842,6 +3047,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       dispatchCtx.clearRect(0, 0, width, height);
       dispatchCtx.fillStyle = "#111922";
       dispatchCtx.fillRect(0, 0, width, height);
+      drawTariffBands(dispatchCtx, {
+        left: padding.left, top: padding.top, width: plotWidth, height: plotHeight,
+      }, currentTariffConfig, day.date_iso);
       drawDispatchGrid(width, height, padding, plotWidth, plotHeight, maxY);
 
       visibleSeries
@@ -3459,6 +3667,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       const { ctx, width, height } = prepareBenchmarkCanvas("benchmarking-versus-chart");
       const pad = 34; const series = [dayA.rolling_grid || [], dayB.rolling_grid || []];
       const max = Math.max(...series.flat(), 1);
+      const sourceDay = benchmark.days.find((day) => day.day_index === dayIndex);
+      drawTariffBands(ctx, {
+        left: pad, top: pad, width: width - pad * 2, height: height - pad * 2,
+      }, currentTariffConfig, sourceDay?.date_iso);
       series.forEach((values, seriesIndex) => {
         ctx.strokeStyle = seriesIndex ? "#dc2626" : "#4f46e5"; ctx.lineWidth = 2; ctx.beginPath();
         values.forEach((value, index) => {
@@ -3562,7 +3774,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       }));
     }
 
-    function drawDailyDispatchChart(canvasId, trace, policyLabel, activeSeries) {
+    function drawDailyDispatchChart(canvasId, trace, policyLabel, activeSeries, dayMeta = null, tariffConfig = currentTariffConfig) {
       const canvas = document.getElementById(canvasId);
       const width = Math.max(320, canvas.clientWidth || 600);
       const height = Math.max(320, canvas.clientHeight || 430);
@@ -3588,6 +3800,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       const plotW = width - pad.left - pad.right;
       const plotH = height - pad.top - pad.bottom;
       const maxY = Math.max(1, ...powerSeries.flatMap((series) => series.values.map(Number))) * 1.08;
+      drawTariffBands(dailyCtx, {
+        left: pad.left, top: pad.top, width: plotW, height: plotH,
+      }, tariffConfig, dayMeta?.date ?? dayMeta?.date_iso);
       dailyCtx.strokeStyle = "#263241";
       dailyCtx.fillStyle = "#8496a8";
       dailyCtx.font = "12px Segoe UI, system-ui, sans-serif";
@@ -3698,7 +3913,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       const days = liveLastPayload?.days || [];
       const selected = days.find((day) => String(day.day) === liveChartDay.value) || days[days.length - 1];
       const policyLabel = liveLastPayload?.status?.policy || "Policy";
-      drawDailyDispatchChart("live-dispatch-chart", selected?.trace, policyLabel, liveDailyActiveSeries);
+      const tariffConfig = tariffConfigFromParameters(liveLastPayload?.status?.tariff);
+      drawDailyDispatchChart("live-dispatch-chart", selected?.trace, policyLabel, liveDailyActiveSeries, selected, tariffConfig);
       renderDailyDispatchLegend("live-dispatch-legend", liveDailyActiveSeries, policyLabel, renderSelectedLiveDay);
       liveChartInfo.textContent = selected
         ? `Day ${selected.day} · ${selected.date} · ${selected.day_type} · ${selected.trace?.load?.length || 0} native samples.`
@@ -3847,6 +4063,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     let shadowJobId = null;
     let shadowPollTimer = null;
     let shadowLastDays = [];
+    let shadowTariffConfig = currentTariffConfig;
 
     function updateShadowSourceFields() {
       document.getElementById("shadow-source-csv-wrap").style.display = shadowSourceKind.value === "csv" ? "inline-flex" : "none";
@@ -4096,7 +4313,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     function renderSelectedShadowDay() {
       const selected = shadowLastDays.find((day) => day.date === shadowChartDay.value)
         || shadowLastDays[shadowLastDays.length - 1];
-      drawDailyDispatchChart("shadow-dispatch-chart", selected?.trace, "Policy", shadowDailyActiveSeries);
+      drawDailyDispatchChart("shadow-dispatch-chart", selected?.trace, "Policy", shadowDailyActiveSeries, selected, shadowTariffConfig);
       renderDailyDispatchLegend("shadow-dispatch-legend", shadowDailyActiveSeries, "Policy", renderSelectedShadowDay);
       shadowChartInfo.textContent = selected
         ? `${selected.date} · ${selected.day_type} · ${selected.trace?.load?.length || 0} native samples.`
@@ -4104,9 +4321,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     }
 
     async function renderShadowData() {
-      const [daysPayload, monthsPayload] = await Promise.all([
-        liveApi("/api/shadow/days"), liveApi("/api/shadow/monthly"),
+      const [daysPayload, monthsPayload, config] = await Promise.all([
+        liveApi("/api/shadow/days"), liveApi("/api/shadow/monthly"), liveApi("/api/shadow/config"),
       ]);
+      shadowTariffConfig = tariffConfigFromParameters(config.parameters);
       const days = daysPayload.days || [];
       const months = monthsPayload.months || [];
       const okDays = days.filter((row) => row.status === "OK");

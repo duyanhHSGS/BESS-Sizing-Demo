@@ -237,6 +237,11 @@ class LiveRunSession:
             "auto_interval_s": self.auto_interval,
             "error": self.error,
             "created": self.created,
+            "tariff": {
+                "cheap_windows": self.parameters.get("billing_windows_cheap", ""),
+                "expensive_windows": self.parameters.get("billing_windows_expensive", ""),
+                "sunday_no_peak": bool(self.parameters.get("billing_sunday")),
+            },
             "methods": ["no_bess", "sadrbc_v13", self.policy_name],
             "method_labels": {
                 "no_bess": "No BESS",
