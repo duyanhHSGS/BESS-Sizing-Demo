@@ -162,17 +162,17 @@ def main():
     # --- environment & agent -----------------------------------------------
     make_env = lambda: BESSEnv(  # noqa: E731
         cfg,
-        p_ref_kw=p_ref,
-        gamma=args.gamma,
-        control_dt_minutes=args.control_dt_minutes,
-        use_forecast=args.obs_variant == "fc",
+        reference_power_kw=p_ref,
+        discount_factor=args.gamma,
+        control_interval_minutes=args.control_dt_minutes,
+        forecast_enabled=args.obs_variant == "fc",
         record_trajectory=False,
     )
     control_probe = make_env()
     native_steps = len(train_days[0].load)
-    decisions_per_day = native_steps // control_probe.native_steps_per_action
+    decisions_per_day = native_steps // control_probe.native_samples_per_action
     agent = PROAgent(
-        control_probe.obs_dim,
+        control_probe.observation_dimensions,
         oracle_coef=args.oracle_coef,
         oracle_coef_decay=args.oracle_decay,
         seed=args.seed,
@@ -188,7 +188,7 @@ def main():
         "billing_mode": billing_mode,
         "gamma": args.gamma,
         "obs_variant": args.obs_variant,
-        "obs_dim": control_probe.obs_dim,
+        "obs_dim": control_probe.observation_dimensions,
         "native_dt_minutes": cfg.dt * 60.0,
         "control_dt_minutes": args.control_dt_minutes,
         "oracle_coef": args.oracle_coef,
@@ -203,7 +203,7 @@ def main():
         agent.forecast_bundle = build_forecast_bundle(csv_days)
     if d_run0 is not None:
         agent.meta["d_run_init_kw"] = d_run0
-    agent.meta["native_steps_per_action"] = control_probe.native_steps_per_action
+    agent.meta["native_steps_per_action"] = control_probe.native_samples_per_action
 
     # --- validation baselines ----------------------------------------------
     val_base = score_month(
@@ -245,8 +245,8 @@ def main():
             "seed": args.seed,
             "gamma": args.gamma,
             "native_dt_minutes": cfg.dt * 60.0,
-            "control_dt_minutes": control_probe.control_dt_minutes,
-            "native_steps_per_action": control_probe.native_steps_per_action,
+            "control_dt_minutes": control_probe.control_interval_minutes,
+            "native_steps_per_action": control_probe.native_samples_per_action,
             "device_requested": args.device,
             "device": str(agent.device),
             "oracle_coef": args.oracle_coef,
@@ -276,7 +276,7 @@ def main():
         f"[pro] config {tag} | gamma={args.gamma:g} | "
         f"oracle_coef={args.oracle_coef:g} decay={args.oracle_decay:g} | "
         f"learner={agent.device} (requested {args.device}) | "
-        f"native dt {cfg.dt * 60:g}m | control dt {control_probe.control_dt_minutes:g}m | "
+        f"native dt {cfg.dt * 60:g}m | control dt {control_probe.control_interval_minutes:g}m | "
         f"val no-BESS {val_base/1e6:.1f}M, oracle {val_oracle/1e6:.1f}M VND",
         flush=True,
     )
@@ -286,7 +286,7 @@ def main():
     t0 = time.time()
     steps = 0
     rng = np.random.default_rng(args.seed)
-    buf = PROBuffer(decisions_per_day, control_probe.obs_dim)
+    buf = PROBuffer(decisions_per_day, control_probe.observation_dimensions)
 
     for it in range(args.iters):
         # Sample a random training day
@@ -306,7 +306,7 @@ def main():
         # Down-sample oracle actions to match the control interval.
         # The oracle action for a control step is the mean over its native sub-steps
         # (all sub-steps inside one control interval share the same decision).
-        interval = control_probe.native_steps_per_action
+        interval = control_probe.native_samples_per_action
         oracle_actions = np.array([
             float(np.clip(oracle_actions_native[i * interval:(i + 1) * interval].mean(),
                           -1.0, 1.0))
@@ -323,7 +323,7 @@ def main():
             d_run_init = float(d_run0 * rng.uniform(0.8, 1.5))
         else:
             d_run_init = float(rng.uniform(0.5, 0.9) * p_ref)
-        env.d_run_init = d_run_init
+        env.initial_running_peak_kw = d_run_init
         obs = env.reset(episode, soc_init=soc_init)
         done = False
         decision_idx = 0
@@ -424,7 +424,7 @@ def main():
     test_days = csv_days[-args.test_days:]
     test_month = MonthData(days=test_days, source="csv_test")
     best_agent = PROAgent(
-        control_probe.obs_dim,
+        control_probe.observation_dimensions,
         oracle_coef=0.0,  # no oracle needed for test inference
         seed=args.seed,
         gamma=args.gamma,

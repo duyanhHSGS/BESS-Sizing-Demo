@@ -87,11 +87,11 @@ class LiveRunSession:
             }
         self.env = env_class(
             self.policy_cfg,
-            p_ref_kw=p_ref,
-            use_forecast=meta.get("obs_variant") == "fc",
-            d_run_init_kw=meta.get("d_run_init_kw"),
-            gamma=float(meta.get("gamma", PPO_GAMMA)),
-            control_dt_minutes=control_minutes,
+            reference_power_kw=p_ref,
+            forecast_enabled=meta.get("obs_variant") == "fc",
+            initial_running_peak_kw=meta.get("d_run_init_kw"),
+            discount_factor=float(meta.get("gamma", PPO_GAMMA)),
+            control_interval_minutes=control_minutes,
             **env_kwargs,
         )
         self.observation = self.env.reset(self.month)
@@ -119,15 +119,15 @@ class LiveRunSession:
 
     def _advance_policy_day(self, day_index: int) -> tuple[np.ndarray, np.ndarray]:
         done = False
-        while not done and self.env.day == day_index:
+        while not done and self.env.current_day_index == day_index:
             if hasattr(self.agent, "predict_action"):
                 action = self.agent.predict_action(self.observation)
             else:
                 action, _, _ = self.agent.act(self.observation, deterministic=True)
             self.observation, _, done, _ = self.env.step(action)
         return (
-            np.asarray(self.env.log_grid[day_index], dtype=np.float64),
-            np.asarray(self.env.log_soc[day_index], dtype=np.float64),
+            np.asarray(self.env.grid_import_history[day_index], dtype=np.float64),
+            np.asarray(self.env.state_of_charge_history[day_index], dtype=np.float64),
         )
 
     def _method_kpi(self, method: str, cfg) -> dict[str, float]:

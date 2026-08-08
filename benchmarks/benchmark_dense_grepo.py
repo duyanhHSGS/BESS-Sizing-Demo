@@ -10,7 +10,7 @@ import time
 import numpy as np
 import torch
 
-from bess.core.bess_env import BESSEnv, OBS_DIM
+from bess.core.bess_env import BESSEnv, REACTIVE_OBSERVATION_DIM
 from bess.core.common import load_system_config, make_bess_config
 from bess.agents.grepo_agent import GREPOAgent
 from bess.core.scenario_gen import DayData, MonthData
@@ -36,12 +36,15 @@ def benchmark_resolution(minutes, group=8):
 
     def make_env():
         return BESSEnv(
-            cfg, p_ref_kw=1000.0, d_run_init_kw=300.0,
-            control_dt_minutes=float(minutes), record_trajectory=False,
+            cfg,
+            reference_power_kw=1000.0,
+            initial_running_peak_kw=300.0,
+            control_interval_minutes=float(minutes),
+            record_trajectory=False,
         )
 
     agent = GREPOAgent(
-        OBS_DIM, n_group=group, seed=23, device="cpu"
+        REACTIVE_OBSERVATION_DIM, n_group=group, seed=23, device="cpu"
     )
     noise = np.random.default_rng(23).normal(
         size=(group, steps)
@@ -71,7 +74,7 @@ def benchmark_resolution(minutes, group=8):
         if device == "cuda" and not torch.cuda.is_available():
             continue
         learner = GREPOAgent(
-            OBS_DIM, n_group=group, seed=23, device=device
+            REACTIVE_OBSERVATION_DIM, n_group=group, seed=23, device=device
         )
         started = time.perf_counter()
         learner.update(*optimized)

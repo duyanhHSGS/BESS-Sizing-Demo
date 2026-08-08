@@ -122,11 +122,11 @@ def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
             }
         env = env_class(
             cfg,
-            p_ref_kw=p_ref_kw,
-            use_forecast=use_fc,
-            d_run_init_kw=meta.get("d_run_init_kw"),
-            gamma=float(meta.get("gamma", PPO_GAMMA)),
-            control_dt_minutes=control_dt_minutes,
+            reference_power_kw=p_ref_kw,
+            forecast_enabled=use_fc,
+            initial_running_peak_kw=meta.get("d_run_init_kw"),
+            discount_factor=float(meta.get("gamma", PPO_GAMMA)),
+            control_interval_minutes=control_dt_minutes,
             **env_kwargs,
         )
 
@@ -150,7 +150,14 @@ def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
         obs, _, done, info = env.step(a)
         blocked_actions += int(info.get("blocked_action", False))
         decisions += 1
-    out = _result(env.log_grid, env.log_soc, env.log_pbess)
+    if meta.get("reference_env") == "ppo2_senior_15m_v1":
+        out = _result(env.log_grid, env.log_soc, env.log_pbess)
+    else:
+        out = _result(
+            env.grid_import_history,
+            env.state_of_charge_history,
+            env.battery_power_history,
+        )
     out["blocked_action_count"] = blocked_actions
     out["decision_count"] = decisions
     out["blocked_action_pct"] = 100.0 * blocked_actions / max(1, decisions)

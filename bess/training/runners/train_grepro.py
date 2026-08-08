@@ -138,10 +138,10 @@ def main():
     )
     make_env = lambda: SADRBCResidualEnv(   # noqa: E731
         cfg,
-        p_ref_kw=p_ref,
-        gamma=args.gamma,
-        control_dt_minutes=args.control_dt_minutes,
-        use_forecast=args.obs_variant == "fc",
+        reference_power_kw=p_ref,
+        discount_factor=args.gamma,
+        control_interval_minutes=args.control_dt_minutes,
+        forecast_enabled=args.obs_variant == "fc",
         record_trajectory=False,
         residual_limit=args.residual_limit,
         forecast_spec=forecast_spec,
@@ -149,7 +149,7 @@ def main():
     control_probe = make_env()
     learner_device = resolve_grepo_device(args.device)
     agent = GREPROAgent(
-        control_probe.obs_dim, n_group=args.group, seed=args.seed,
+        control_probe.observation_dimensions, n_group=args.group, seed=args.seed,
         gamma=args.gamma, beta=args.beta, std=args.std,
         device=learner_device,
     )
@@ -167,7 +167,7 @@ def main():
         "std": args.std,
         "gamma": args.gamma,
         "obs_variant": args.obs_variant,
-        "obs_dim": control_probe.obs_dim,
+        "obs_dim": control_probe.observation_dimensions,
         "native_dt_minutes": cfg.dt * 60.0,
         "control_dt_minutes": args.control_dt_minutes,
         "residual_limit": args.residual_limit,
@@ -185,7 +185,7 @@ def main():
         agent.forecast_bundle = build_forecast_bundle(csv_days)
     if d_run0 is not None:
         agent.meta["d_run_init_kw"] = d_run0
-    agent.meta["native_steps_per_action"] = control_probe.native_steps_per_action
+    agent.meta["native_steps_per_action"] = control_probe.native_samples_per_action
     val_base = score_month(
         run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_month.days
     )["total_cost_vnd"]
@@ -232,8 +232,8 @@ def main():
             "std": args.std,
             "gamma": args.gamma,
             "native_dt_minutes": cfg.dt * 60.0,
-            "control_dt_minutes": control_probe.control_dt_minutes,
-            "native_steps_per_action": control_probe.native_steps_per_action,
+            "control_dt_minutes": control_probe.control_interval_minutes,
+            "native_steps_per_action": control_probe.native_samples_per_action,
             "device_requested": args.device,
             "device": learner_device,
             "horizon_curriculum_days": [3, 7, 30],
@@ -274,7 +274,7 @@ def main():
     )
     print(f"[grepro] config {tag} | group={args.group} | gamma={args.gamma:g} | "
           f"learner={learner_device} (requested {args.device}) | "
-          f"native dt {cfg.dt * 60:g}m | control dt {control_probe.control_dt_minutes:g}m | "
+          f"native dt {cfg.dt * 60:g}m | control dt {control_probe.control_interval_minutes:g}m | "
           f"fixed residual {args.residual_limit * 100:g}% | "
           f"SADRBC forecast seed={forecast_spec.seed}, load sigma={forecast_spec.load_sigma:g}, "
           f"PV sigma={forecast_spec.pv_sigma:g} | val no-BESS {val_base/1e6:.1f}M, "
@@ -417,7 +417,7 @@ def main():
     test_days = csv_days[-args.test_days:]
     test_month = MonthData(days=test_days, source="csv_test")
     best_agent = GREPROAgent(
-        control_probe.obs_dim,
+        control_probe.observation_dimensions,
         n_group=args.group,
         gamma=args.gamma,
         std=args.std,

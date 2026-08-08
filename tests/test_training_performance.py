@@ -8,41 +8,37 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from bess.evaluation.benchmark import (
-    _demand_windows,
-    _rolling_30_minute_average,
-)
+from bess.evaluation.benchmark import _rolling_30_minute_average
 from bess.core.bess_env import BESSEnv
 from bess.core.common import load_system_config, make_bess_config
 from bess.agents.ppo_agent import PPOAgent, RolloutBuffer
 from bess.core.scenario_gen import DayData, MonthData
 
 
-def _reference_rolling(values, dt):
-    values = list(values)
-    return [
-        sum(values[step] * weight for step, weight in window)
-        for window in _demand_windows(len(values), dt)
-    ]
+def _reference_fixed_30_minute_meter(values, dt):
+    values = np.asarray(values, dtype=np.float64)
+    samples_per_block = int(round(0.5 / dt))
+    if len(values) % samples_per_block:
+        raise ValueError("Grid day must contain complete 30-minute meter intervals")
+    block_averages = values.reshape(-1, samples_per_block).mean(axis=1)
+    return np.repeat(block_averages, samples_per_block)
 
 
-class RollingDemandTests(unittest.TestCase):
-    def test_vectorized_rolling_matches_reference_at_supported_resolutions(self):
+class FixedDemandBlockTests(unittest.TestCase):
+    def test_vectorized_fixed_blocks_match_reference_at_supported_resolutions(self):
         rng = np.random.default_rng(123)
         for minutes in (1, 5, 15, 30):
             with self.subTest(minutes=minutes):
                 values = rng.uniform(0.0, 1500.0, 1440 // minutes)
                 dt = minutes / 60.0
                 actual = _rolling_30_minute_average(values, dt)
-                expected = _reference_rolling(values, dt)
+                expected = _reference_fixed_30_minute_meter(values, dt)
                 np.testing.assert_allclose(actual, expected, rtol=1e-13, atol=1e-10)
 
-    def test_partial_end_of_day_windows_keep_existing_normalization(self):
+    def test_partial_end_of_day_block_is_rejected(self):
         values = np.asarray([10.0, 20.0, 30.0, 40.0])
-        actual = _rolling_30_minute_average(values, 5.0 / 60.0)
-        expected = _reference_rolling(values, 5.0 / 60.0)
-        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-12)
-        self.assertEqual(actual[-1], 40.0)
+        with self.assertRaisesRegex(ValueError, "complete 30-minute meter intervals"):
+            _rolling_30_minute_average(values, 5.0 / 60.0)
 
 
 class InferenceAndEnvironmentTests(unittest.TestCase):
@@ -68,9 +64,9 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         )
         env = BESSEnv(
             cfg,
-            p_ref_kw=1000.0,
-            d_run_init_kw=100.0,
-            control_dt_minutes=1.0,
+            reference_power_kw=1000.0,
+            initial_running_peak_kw=100.0,
+            control_interval_minutes=1.0,
         )
         obs = env.reset(MonthData(days=[day], source="test"))
         rewards = []
@@ -84,15 +80,15 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         self.assertTrue(done)
         self.assertIsNone(obs)
         self.assertTrue(np.isfinite(rewards).all())
-        self.assertTrue((env.log_grid[0] >= 0.0).all())
-        self.assertGreaterEqual(env.log_soc[0].min(), cfg.SOC_min - 1e-12)
-        self.assertLessEqual(env.log_soc[0].max(), cfg.SOC_max + 1e-12)
-        trailing = np.convolve(
-            env.log_grid[0], np.ones(env.roll_k) / env.roll_k, mode="valid"
-        )
+        self.assertTrue((env.grid_import_history[0] >= 0.0).all())
+        self.assertGreaterEqual(env.state_of_charge_history[0].min(), cfg.SOC_min - 1e-12)
+        self.assertLessEqual(env.state_of_charge_history[0].max(), cfg.SOC_max + 1e-12)
+        fixed_block_averages = env.grid_import_history[0].reshape(
+            -1, env.samples_per_demand_block
+        ).mean(axis=1)
         self.assertAlmostEqual(
-            env.d_run,
-            max(env.d_run_init, float(trailing.max())),
+            env.running_monthly_peak_kw,
+            max(env.initial_running_peak_kw, float(fixed_block_averages.max())),
             places=9,
         )
 

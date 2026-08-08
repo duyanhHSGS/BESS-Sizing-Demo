@@ -147,7 +147,7 @@ class GREPOAgent:
     @staticmethod
     def _decision_count(env, month) -> int:
         native_rows = sum(len(day.load) for day in month.days)
-        interval = int(env.native_steps_per_action)
+        interval = int(env.native_samples_per_action)
         if native_rows % interval:
             raise ValueError(
                 "episode native rows must be divisible by the control interval"
@@ -180,16 +180,16 @@ class GREPOAgent:
         observations = [None] * self.n_group
         for group_index, env in enumerate(envs):
             if d_run_init is not None:
-                env.d_run_init = float(d_run_init)
+                env.initial_running_peak_kw = float(d_run_init)
             if residual_limit is not None and hasattr(env, "residual_limit"):
                 env.residual_limit = float(residual_limit)
             shared_static = (
-                envs[0]._obs_static
-                if group_index > 0 and not env.use_forecast
+                envs[0]._static_observation_cache
+                if group_index > 0 and not env.forecast_enabled
                 else None
             )
             observations[group_index] = env.reset(
-                month, soc_init=soc_init,
+                month, initial_state_of_charge=soc_init,
                 static_observation_cache=shared_static,
             )
 
@@ -258,8 +258,8 @@ class GREPOAgent:
         rew_g = np.empty((self.n_group, decisions), dtype=np.float32)
         for group_index, env in enumerate(envs):
             if d_run_init is not None:
-                env.d_run_init = float(d_run_init)
-            obs = env.reset(month, soc_init=soc_init)
+                env.initial_running_peak_kw = float(d_run_init)
+            obs = env.reset(month, initial_state_of_charge=soc_init)
             for t in range(decisions):
                 obs_g[group_index, t] = obs
                 with torch.inference_mode():
