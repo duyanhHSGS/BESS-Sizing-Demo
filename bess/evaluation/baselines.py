@@ -135,6 +135,7 @@ def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
     lat = []
     blocked_actions = 0
     decisions = 0
+    final_soc_forced_charge_kwh = 0.0
     while not done:
         t0 = time.perf_counter()
         if meta.get("reference_env") == "ppo2_senior_15m_v1":
@@ -149,6 +150,7 @@ def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
             lat.append((time.perf_counter() - t0) * 1e3)
         obs, _, done, info = env.step(a)
         blocked_actions += int(info.get("blocked_action", False))
+        final_soc_forced_charge_kwh += float(info.get("final_soc_forced_charge_kwh", 0.0))
         decisions += 1
     if meta.get("reference_env") == "ppo2_senior_15m_v1":
         out = _result(env.log_grid, env.log_soc, env.log_pbess)
@@ -159,6 +161,7 @@ def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
             env.battery_power_history,
         )
     out["blocked_action_count"] = blocked_actions
+    out["final_soc_forced_charge_kwh"] = final_soc_forced_charge_kwh
     out["decision_count"] = decisions
     out["blocked_action_pct"] = 100.0 * blocked_actions / max(1, decisions)
     if measure_latency:

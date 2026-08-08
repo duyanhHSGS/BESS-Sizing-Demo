@@ -12,7 +12,9 @@ from bess.evaluation.benchmark import _rolling_30_minute_average
 from bess.core.bess_env import BESSEnv, REACTIVE_OBSERVATION_DIM
 from bess.core.common import load_system_config, make_bess_config
 from bess.agents.ppo_agent import PPOAgent, RolloutBuffer
+from bess.agents.pro_agent import PROAgent, PROBuffer
 from bess.core.scenario_gen import DayData, MonthData
+from bess.core.settings import PRO_GAMMA
 
 
 def _reference_fixed_30_minute_meter(values, dt):
@@ -110,10 +112,22 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
                 latent,
             )
             obs = rng.normal(size=REACTIVE_OBSERVATION_DIM).astype(np.float32)
-        agent.update(buffer, 0.0)
+        diagnostics = agent.update(buffer, 0.0)
         self.assertTrue(
             all(torch.isfinite(parameter).all() for parameter in agent.net.parameters())
         )
+        for key in (
+            "approx_kl", "clip_fraction", "policy_loss", "value_loss", "entropy",
+            "log_std", "actor_grad_norm", "critic_grad_norm", "adv_raw_std",
+            "explained_variance", "learning_rate",
+        ):
+            self.assertTrue(np.isfinite(diagnostics[key]), key)
+
+        before_rng = torch.random.get_rng_state().clone()
+        _ = agent.predict_value(obs)
+        self.assertTrue(torch.equal(before_rng, torch.random.get_rng_state()))
+        agent.anneal_lr(0.5)
+        self.assertAlmostEqual(agent.opt.param_groups[0]["lr"], 1.5e-4, places=12)
 
         agent.meta = {"native_dt_minutes": 1.0, "control_dt_minutes": 1.0}
         with tempfile.TemporaryDirectory() as directory:
@@ -124,6 +138,35 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
             self.assertEqual(loaded.meta, agent.meta)
             probe = np.zeros(REACTIVE_OBSERVATION_DIM, dtype=np.float32)
             self.assertEqual(loaded.predict_action(probe), agent.predict_action(probe))
+
+    def test_pro_uses_exact_squashed_rollout_contract(self):
+        agent = PROAgent(
+            obs_dim=REACTIVE_OBSERVATION_DIM,
+            seed=17,
+            epochs=1,
+            minibatch=8,
+        )
+        self.assertEqual(agent.gamma, PRO_GAMMA)
+        buffer = PROBuffer(16, REACTIVE_OBSERVATION_DIM)
+        rng = np.random.default_rng(17)
+        for index in range(buffer.size):
+            obs = rng.normal(size=REACTIVE_OBSERVATION_DIM).astype(np.float32)
+            action, logp, latent, value = agent.act_with_latent(obs)
+            buffer.add(
+                obs,
+                np.array([action], dtype=np.float32),
+                logp,
+                float(index) / 100.0,
+                value,
+                0.0,
+                latent,
+                a_oracle=0.25,
+            )
+            self.assertAlmostEqual(float(buffer.act[index, 0]), float(np.tanh(buffer.latent[index, 0])), places=6)
+        diagnostics = agent.update(buffer, 0.0)
+        self.assertTrue(all(torch.isfinite(parameter).all() for parameter in agent.net.parameters()))
+        for key in ("pi_loss", "vf_loss", "ent", "oracle_loss", "approx_kl", "clip_fraction"):
+            self.assertTrue(np.isfinite(diagnostics[key]), key)
 
 
 if __name__ == "__main__":

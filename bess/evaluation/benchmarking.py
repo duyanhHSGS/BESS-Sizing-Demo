@@ -11,13 +11,13 @@ import bess.evaluation.benchmark_store as benchmark_store
 import bess.dispatch.dispatch_runner as dispatch_runner
 import bess.evaluation.oracle.oracle_cache as oracle_cache
 from bess.evaluation.baselines import run_no_bess, run_sadrbc
-from bess.evaluation.benchmark import _demand_charge, _month_start_day, selected_data_path
+from bess.evaluation.benchmark import _demand_charge, _month_group_key, selected_data_path
 from bess.evaluation.benchmark_jobs import BenchmarkCancelled
 from bess.core.common import check_hard_constraints
 from bess.training.training_checkpoints import CHECKPOINT_DIR, list_checkpoints
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 REFERENCE_IDS = ("no_bess", "sadrbc_v13", "oracle")
 SAMPLING_FIELDS = {"native_dt_minutes", "control_dt_minutes", "native_steps_per_action"}
 
@@ -308,16 +308,19 @@ def _decorate_days(days, p_bess_days, dt, parameters, safety_days):
 
 def _summary(days, parameters, constraints):
     blocks = []
-    for month_start in sorted({_month_start_day(day["day_index"]) for day in days}):
-        block_days = [day for day in days if _month_start_day(day["day_index"]) == month_start]
+    month_keys = sorted({_month_group_key(day) for day in days})
+    for month_key in month_keys:
+        block_days = [day for day in days if _month_group_key(day) == month_key]
+        start_day = block_days[0]["day_index"] if block_days else None
         energy = sum(float(day.get("energy_bill_vnd", day.get("energy_cost_vnd", 0))) for day in block_days)
         wear = sum(float(day.get("wear_cost_vnd", 0)) for day in block_days)
         peak = max((max(day.get("rolling_grid", []) or [0]) for day in block_days), default=0.0)
         demand = _demand_charge(parameters, peak)
         blocks.append(
             {
-                "start_day": month_start,
-                "end_day": block_days[-1]["day_index"] if block_days else month_start,
+                "start_day": start_day,
+                "end_day": block_days[-1]["day_index"] if block_days else start_day,
+                "calendar_month": month_key[1] if month_key[0] == "calendar" else None,
                 "energy_cost_vnd": round(energy),
                 "demand_cost_vnd": round(demand),
                 "wear_cost_vnd": round(wear),

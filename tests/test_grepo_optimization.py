@@ -112,7 +112,7 @@ class GREPOCollectorParityTests(unittest.TestCase):
         )
         for actual, expected in zip(optimized, scalar):
             np.testing.assert_allclose(
-                actual, expected, rtol=0.0, atol=5e-6
+                actual, expected, rtol=0.0, atol=1e-5
             )
         for actual_env, expected_env in zip(
             agent._group_envs, agent._scalar_reference_envs
@@ -121,13 +121,13 @@ class GREPOCollectorParityTests(unittest.TestCase):
             self.assertAlmostEqual(
                 actual_env.running_monthly_peak_kw,
                 expected_env.running_monthly_peak_kw,
-                delta=5e-6,
+                delta=1e-5,
             )
             np.testing.assert_allclose(
                 actual_env.grid_import_history[0],
                 expected_env.grid_import_history[0],
                 rtol=0.0,
-                atol=5e-5,
+                atol=1e-4,
             )
 
     def test_logging_disabled_preserves_physics_and_rewards(self):

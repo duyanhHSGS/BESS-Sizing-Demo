@@ -22,7 +22,12 @@ from bess.agents.grepo_agent import resolve_grepo_device
 from bess.agents.grepro_agent import GREPROAgent
 from bess.evaluation.baselines import run_no_bess, run_drl_policy, run_sadrbc
 from bess.evaluation.policy_diagnostics import monthly_policy_diagnostics
-from bess.training.training_common import build_training_bess_config, load_training_days, score_cached_oracle
+from bess.training.training_common import (
+    build_training_bess_config,
+    heldout_calendar_split,
+    load_training_days,
+    score_cached_oracle,
+)
 from bess.training.training_reports import write_curve, write_report
 from bess.core.settings import GREPRO_GAMMA
 from bess.forecasting.weather_forecast import build_forecast_bundle, fit_attach_forecasts
@@ -105,17 +110,19 @@ def main():
     )
     if args.val_days < 1 or args.test_days < 1:
         raise SystemExit("Validation days and test days must both be at least 1")
-    split_days = args.val_days + args.test_days
-    if len(csv_days) <= split_days:
-        raise SystemExit(f"CSV has {len(csv_days)} days; need more than {split_days}")
+    try:
+        train_days, val_days, test_days, split_meta = heldout_calendar_split(
+            csv_days, args.val_days, args.test_days
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     peak = max(float(d.load.max()) for d in csv_days)
     p_ref = math.ceil(peak / 500.0) * 500.0
     peaks = [
         max(_rolling_30_minute_average(np.maximum(0, d.load - d.pv), cfg.dt), default=0.0)
-        for d in csv_days[:-split_days]
+        for d in train_days
     ]
     d_run0 = 0.5 * float(np.mean(peaks))
-    train_days = csv_days[:-split_days]
     if len(train_days) < 30:
         raise SystemExit(
             f"GrePRO needs at least 30 chronological training days; found {len(train_days)}"
@@ -128,8 +135,7 @@ def main():
             csv_days, Path(args.weather_data), len(train_days),
             Path(args.forecast_artifact), p_ref,
         )
-    val_month = MonthData(source="csv_val")
-    val_month.days = csv_days[-split_days:-args.test_days]
+    val_month = MonthData(days=val_days, source="csv_val")
     tag = args.tag or f"grepro_{cfg.E_cap:.0f}kwh_{cfg.P_rated_nominal:.0f}kw"
 
     forecast_spec = SADRBCForecastSpec(
@@ -224,16 +230,11 @@ def main():
             "source": str(args.csv),
             "total_days": len(csv_days),
             "train_days": len(train_days),
-            "validation_days": len(val_month.days),
-            "test_days": args.test_days,
-            "validation_range": [
-                val_month.days[0].date_iso,
-                val_month.days[-1].date_iso,
-            ],
-            "test_range": [
-                csv_days[-args.test_days].date_iso,
-                csv_days[-1].date_iso,
-            ],
+            "validation_days": len(val_days),
+            "test_days": len(test_days),
+            "validation_range": [val_days[0].date_iso, val_days[-1].date_iso],
+            "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
+            "split": split_meta,
         },
         "battery": {"e_cap_kwh": cfg.E_cap, "p_rated_kw": cfg.P_rated_nominal},
         "training": {
@@ -428,7 +429,6 @@ def main():
                   f"val {val_cost/1e6:8.1f}M | saving {sav:5.1f}% | "
                   f"gap {gap:6.1f}% | no new best", flush=True)
 
-    test_days = csv_days[-args.test_days:]
     test_month = MonthData(days=test_days, source="csv_test")
     best_agent = GREPROAgent(
         control_probe.observation_dimensions,

@@ -305,5 +305,7 @@ def run_cheap_window_acceptance(agent, cfg, *, reference_power_kw: float) -> dic
         "required_average_charge_kw": required_average_charge_kw,
         "avoidable_normal_charge_limit_kwh": threshold_kwh,
         "passed": diagnostics["avoidable_normal_charge_kwh"] <= threshold_kwh,
+        "deployment_gate": False,
+        "criterion": "avoidable normal charging only; real-data economics decide deployment",
         "diagnostics": diagnostics,
     }

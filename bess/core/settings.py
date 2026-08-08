@@ -73,8 +73,11 @@ SYSTEM_CONFIG = {
     },
 }
 
-# PPO training defaults. PPO_GAMMA is also used by potential-based SOC shaping.
-PPO_GAMMA = 0.995
+# PPO optimizes a finite-horizon monetary bill, so its default discount is 1.0:
+# one VND tomorrow is still one VND in the utility bill. PPO_GAMMA is also used
+# by potential-based SOC shaping, which then telescopes without economically
+# discounting later peak savings.
+PPO_GAMMA = 1.0
 PPO_LAMBDA = 0.97
 PRO_GAMMA = 0.995
 GREPO_GAMMA = 0.995

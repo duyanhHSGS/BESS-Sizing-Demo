@@ -11,6 +11,7 @@ Cost model (EVN 2-part tariff params from settings.SYSTEM_CONFIG):
 """
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from bess.paths import PROJECT_ROOT
@@ -161,6 +162,23 @@ def tariff_vector(cfg: SADRBCConfig) -> np.ndarray:
 TOU_RULES = {"sunday_no_peak": bool(SYSTEM_CONFIG["Tariff"]["sunday_no_peak"])}
 
 
+def billing_month_key(day) -> tuple[str, str | int]:
+    """Return the real calendar month when dated, else a legacy 30-day bucket."""
+    iso = day.get("date_iso") if isinstance(day, dict) else getattr(day, "date_iso", None)
+    if iso:
+        try:
+            parsed = date.fromisoformat(str(iso))
+            return ("calendar", f"{parsed.year:04d}-{parsed.month:02d}")
+        except ValueError:
+            pass
+    day_index = day.get("day_index") if isinstance(day, dict) else getattr(day, "day_index", None)
+    if day_index is None:
+        # A scorer caller with neither calendar date nor index is still grouped
+        # deterministically as one legacy month instead of inventing a date.
+        return ("legacy30", 1)
+    return ("legacy30", ((int(day_index) - 1) // 30) * 30 + 1)
+
+
 def is_sunday(day) -> bool:
     """DayData  c phi Ch nht khng (da date_iso; thiu ngy  False,
     d liu simulator khng c lch tht nn khng p quy tc)."""
@@ -205,31 +223,43 @@ def rolling_pmax_day(p_grid_day: np.ndarray, dt_hours: float) -> float:
 
 def score_month(p_grid_days: list[np.ndarray], cfg: SADRBCConfig,
                 days: list | None = None) -> dict:
-    """Monthly bill on the shared cost model. Input: list of daily grids.
-    `days` (list DayData, cng th t vi grids): cho quy tc lch 
-    Ch nht khng cao im khi TOU_RULES['sunday_no_peak'] bt."""
+    """Score utility energy plus one PMax demand charge per billing month.
+
+    Dated inputs use their real ``date_iso`` calendar month. Undated legacy
+    inputs fall back to sequential 30-day buckets by ``day_index``. If ``days``
+    is omitted entirely, all provided grids are treated as one billing month.
+    """
+    if days is not None and len(days) != len(p_grid_days):
+        raise ValueError("days and grid day counts must match for calendar billing")
     tar = tariff_vector(cfg)
     tar_sun = (tariff_vector(cfg_no_peak(cfg))
                if TOU_RULES.get("sunday_no_peak") and days else tar)
     energy = 0.0
-    pmax = 0.0
+    month_peaks: dict[tuple[str, str | int], float] = {}
     for i, g in enumerate(p_grid_days):
         g = np.maximum(0.0, np.asarray(g, dtype=np.float64))
-        t = tar_sun if (days is not None and i < len(days)
-                        and is_sunday(days[i])) else tar
+        day = days[i] if days is not None and i < len(days) else None
+        t = tar_sun if (day is not None and is_sunday(day)) else tar
         if len(t) != len(g):
             raise ValueError(
                 f"Tariff length {len(t)} does not match grid length {len(g)}; "
                 "set cfg.dt from the selected data resolution."
             )
         energy += float(np.sum(g * t) * cfg.dt)
-        pmax = max(pmax, fixed_pmax_day(g, cfg.dt))
-    demand = pmax * cfg.T_cap
+        month_key = billing_month_key(day) if day is not None else ("implicit", 1)
+        month_peaks[month_key] = max(
+            month_peaks.get(month_key, 0.0),
+            fixed_pmax_day(g, cfg.dt),
+        )
+    demand = sum(peak * cfg.T_cap for peak in month_peaks.values())
+    pmax = max(month_peaks.values(), default=0.0)
     return {
         "energy_cost_vnd": energy,
         "demand_cost_vnd": demand,
         "total_cost_vnd": energy + demand,
         "pmax_month_kw": pmax,
+        "month_count": len(month_peaks),
+        "monthly_pmax_kw": {str(key[1]): peak for key, peak in month_peaks.items()},
     }
 
 

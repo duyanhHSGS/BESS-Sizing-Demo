@@ -18,6 +18,7 @@ from bess.evaluation.policy_diagnostics import monthly_policy_diagnostics, run_c
 from bess.training.training_common import (
     augment_month,
     build_training_bess_config,
+    heldout_calendar_split,
     load_training_days,
     month_blocks,
     score_cached_oracle,
@@ -61,16 +62,13 @@ def main() -> None:
     days = load_training_days(args.csv, weather="csv")
     if args.val_days < 1 or args.test_days < 1:
         raise SystemExit("Validation days and test days must both be at least 1")
-    split_days = args.val_days + args.test_days
-    if len(days) <= split_days:
-        raise SystemExit(
-            f"Need more than {split_days} days for train/val/test split; found {len(days)}"
+    try:
+        train_days, val_days, test_days, split_meta = heldout_calendar_split(
+            days, args.val_days, args.test_days
         )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     csv_dt = 24.0 / len(days[0].load)
-
-    test_days = days[-args.test_days:]
-    val_days = days[-split_days:-args.test_days]
-    train_days = days[:-split_days]
     peak = max(float(day.load.max()) for day in days)
     p_ref = math.ceil(peak / 500.0) * 500.0
     daily_peaks = [
@@ -174,6 +172,7 @@ def main() -> None:
             "test_days": len(test_days),
             "validation_range": [val_days[0].date_iso, val_days[-1].date_iso],
             "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
+            "split": split_meta,
         },
         "battery": {"e_cap_kwh": args.e_cap, "p_rated_kw": args.p_rated},
         "economics": {"battery_wear_cost": cfg.battery_wear_cost_vnd_per_kwh},
@@ -294,8 +293,9 @@ def main() -> None:
         perf["rollout"] += time.perf_counter() - rollout_started
         updates += 1
         update_started = time.perf_counter()
-        _, _, last_value = agent.act(obs)
-        agent.update(buffer, 0.0 if done else last_value)
+        agent.anneal_lr(min(1.0, steps / max(1, args.steps)))
+        last_value = 0.0 if done else agent.predict_value(obs)
+        update_diagnostics = agent.update(buffer, last_value)
         perf["update"] += time.perf_counter() - update_started
         validation_started = time.perf_counter()
         result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
@@ -307,7 +307,27 @@ def main() -> None:
         perf["scoring"] += time.perf_counter() - scoring_started
         saving = (val_base - val_cost) / val_base * 100
         gap = (val_cost - val_oracle) / val_oracle * 100
-        curve.append({"steps": steps, "val_cost_vnd": val_cost, "oracle_gap_pct": gap, "saving_vs_nobess_pct": saving})
+        curve.append({
+            "steps": steps,
+            "val_cost_vnd": val_cost,
+            "oracle_gap_pct": gap,
+            "saving_vs_nobess_pct": saving,
+            "approx_kl": update_diagnostics["approx_kl"],
+            "clip_fraction": update_diagnostics["clip_fraction"],
+            "ppo_epochs_run": update_diagnostics["epochs_run"],
+            "policy_loss": update_diagnostics["policy_loss"],
+            "value_loss": update_diagnostics["value_loss"],
+            "entropy": update_diagnostics["entropy"],
+            "log_std": update_diagnostics["log_std"],
+            "actor_grad_norm": update_diagnostics["actor_grad_norm"],
+            "critic_grad_norm": update_diagnostics["critic_grad_norm"],
+            "adv_raw_std": update_diagnostics["adv_raw_std"],
+            "explained_variance": update_diagnostics["explained_variance"],
+            "learning_rate": update_diagnostics["learning_rate"],
+            "final_soc_forced_charge_kwh": float(
+                result.get("final_soc_forced_charge_kwh", 0.0)
+            ),
+        })
         persist_progress()
         is_best = val_cost < best_val
         if val_cost < best_val:
@@ -319,7 +339,12 @@ def main() -> None:
         if should_log:
             print(
                 f"  update {updates:>4} | step {steps:>7} | val {val_cost/1e6:8.1f}M | "
-                f"saving {saving:5.1f}% | gap {gap:6.1f}% | {steps/(time.time()-started):,.0f} sps",
+                f"saving {saving:5.1f}% | gap {gap:6.1f}% | "
+                f"KL {update_diagnostics['approx_kl']:.4f} | "
+                f"clip {100 * update_diagnostics['clip_fraction']:.1f}% | "
+                f"logstd {update_diagnostics['log_std']:.2f} | "
+                f"EV {update_diagnostics['explained_variance']:.2f} | "
+                f"{steps/(time.time()-started):,.0f} sps",
                 flush=True,
             )
             print_performance()
@@ -375,12 +400,19 @@ def main() -> None:
     cheap_window_acceptance = run_cheap_window_acceptance(
         best_agent, cfg, reference_power_kw=p_ref
     )
+    validation_saving = (val_base - best_val) / val_base * 100
+    economic_acceptance_passed = validation_saving > 0.0 and test_saving > 0.0
     best_agent.meta = {
         **agent.meta,
         "test_saving_pct": round(test_saving, 2),
         "test_oracle_gap_pct": round(test_oracle_gap, 2),
+        "validation_saving_pct": round(validation_saving, 2),
+        # The synthetic cheap-window lab is a narrow behavioral diagnostic.
+        # Held-out real-data economics decide whether a PPO is deployable.
         "cheap_window_acceptance_passed": cheap_window_acceptance["passed"],
         "cheap_window_avoidable_normal_charge_kwh": cheap_window_acceptance["diagnostics"]["avoidable_normal_charge_kwh"],
+        "economic_acceptance_passed": economic_acceptance_passed,
+        "deployment_acceptance_passed": economic_acceptance_passed,
         "trained": date.today().isoformat(),
     }
     best_agent.save(RESULTS_DIR / f"policy_{tag}.pt")
@@ -393,6 +425,16 @@ def main() -> None:
         "oracle_vnd": test_oracle_cost,
         "oracle_gap_pct": test_oracle_gap,
         "wear_cost_vnd": test_operating["wear_cost_vnd"],
+        "final_soc_forced_charge_kwh": float(
+            result.get("final_soc_forced_charge_kwh", 0.0)
+        ),
+    }
+    report["acceptance"] = {
+        "deployment_passed": economic_acceptance_passed,
+        "validation_saving_pct": validation_saving,
+        "test_saving_pct": test_saving,
+        "rule": "validation saving > 0 and held-out test saving > 0",
+        "cheap_window_lab_is_deployment_gate": False,
     }
     report["diagnostics"] = {
         "validation_months": monthly_policy_diagnostics(

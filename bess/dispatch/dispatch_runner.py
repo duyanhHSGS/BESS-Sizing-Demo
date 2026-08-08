@@ -16,7 +16,7 @@ from bess.evaluation.benchmark import (
     _day_energy_cost,
     _demand_charge,
     _month_peaks,
-    _month_start_day,
+    _month_group_key,
     _rounded_series,
     _rolling_30_minute_average,
     _to_float,
@@ -456,7 +456,7 @@ def policy_result_to_days(
         days.append(day_row)
     month_peaks = _month_peaks(days, cfg.dt)
     for day_row in days:
-        month_peak = month_peaks.get(_month_start_day(day_row["day_index"]))
+        month_peak = month_peaks.get(_month_group_key(day_row))
         day_row["month_peak"] = month_peak
         day_row["demand_charge_vnd"] = round(_demand_charge(parameters, month_peak["value_kW"])) if month_peak else 0
     _annotate_day_billing(days, parameters, cfg.dt)
