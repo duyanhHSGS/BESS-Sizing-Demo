@@ -17,6 +17,7 @@ from bess.agents.ppo_agent import (
     LOG_STD_MIN,
     PPOAgent,
     RolloutBuffer,
+    _compute_gae,
     _sample_squashed,
     _squashed_log_prob_from_latent,
 )
@@ -77,19 +78,14 @@ class PROAgent(PPOAgent):
     def update(self, buf: PROBuffer, last_val: float) -> dict:
         """Run exact squashed-PPO updates plus Oracle-action imitation."""
         n = buf.ptr
-        adv = np.zeros(n, np.float32)
-        gae = 0.0
-        next_val, next_nonterm = last_val, 1.0
-        for i in reversed(range(n)):
-            delta = (
-                buf.rew[i]
-                + self.gamma * next_val * next_nonterm
-                - buf.val[i]
-            )
-            gae = delta + self.gamma * self.lam * next_nonterm * gae
-            adv[i] = gae
-            next_val = buf.val[i]
-            next_nonterm = 1.0 - buf.done[i]
+        adv = _compute_gae(
+            buf.rew[:n],
+            buf.val[:n],
+            buf.done[:n],
+            last_val,
+            self.gamma,
+            self.lam,
+        )
 
         ret = adv + buf.val[:n]
         adv_raw_std = float(adv.std())

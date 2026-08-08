@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 import torch
 
-from bess.agents.ppo_agent import PPOAgent, _squashed_log_prob_from_latent
+from bess.agents.ppo_agent import PPOAgent, _compute_gae, _squashed_log_prob_from_latent
 
 
 class PPOSquashedActionTests(unittest.TestCase):
@@ -45,6 +45,27 @@ class PPOSquashedActionTests(unittest.TestCase):
         self.assertLessEqual(action, 1.0)
         self.assertAlmostEqual(action, math.tanh(latent), places=6)
         self.assertAlmostEqual(log_probability, float(expected_log_probability.item()), places=6)
+
+    def test_gae_does_not_bootstrap_or_leak_across_done_transition(self):
+        rewards = np.asarray([0.0, 1.0, 0.0], dtype=np.float32)
+        values = np.asarray([10.0, 20.0, 999.0], dtype=np.float32)
+        dones = np.asarray([0.0, 1.0, 0.0], dtype=np.float32)
+
+        advantages = _compute_gae(
+            rewards,
+            values,
+            dones,
+            last_value=123.0,
+            gamma=1.0,
+            lam=1.0,
+        )
+
+        # Transition 1 terminates its episode, so value[2] belongs to a fresh
+        # episode and must never affect transitions 0 or 1.
+        self.assertAlmostEqual(float(advantages[1]), 1.0 - 20.0, places=6)
+        self.assertAlmostEqual(float(advantages[0]), 1.0 - 10.0, places=6)
+        # The final non-terminal transition still bootstraps from last_value.
+        self.assertAlmostEqual(float(advantages[2]), 123.0 - 999.0, places=6)
 
 
 if __name__ == "__main__":

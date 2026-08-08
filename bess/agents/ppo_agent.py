@@ -42,6 +42,31 @@ def _sample_squashed(
     return action, log_probability, latent
 
 
+def _compute_gae(
+    rewards: np.ndarray,
+    values: np.ndarray,
+    dones: np.ndarray,
+    last_value: float,
+    gamma: float,
+    lam: float,
+) -> np.ndarray:
+    """Compute GAE without ever bootstrapping across an episode boundary."""
+    n = len(rewards)
+    advantages = np.zeros(n, np.float32)
+    gae = 0.0
+    for index in reversed(range(n)):
+        nonterminal = 1.0 - float(dones[index])
+        next_value = float(last_value) if index == n - 1 else float(values[index + 1])
+        delta = (
+            float(rewards[index])
+            + gamma * next_value * nonterminal
+            - float(values[index])
+        )
+        gae = delta + gamma * lam * nonterminal * gae
+        advantages[index] = gae
+    return advantages
+
+
 def resolve_ppo_device(device: str = "auto") -> str:
     requested = str(device).lower()
     if requested not in {"auto", "cpu", "cuda"}:
@@ -194,15 +219,14 @@ class PPOAgent:
     # ------------------------------------------------------------------
     def update(self, buf: RolloutBuffer, last_val: float):
         n = buf.ptr
-        adv = np.zeros(n, np.float32)
-        gae = 0.0
-        next_val, next_nonterm = last_val, 1.0
-        for i in reversed(range(n)):
-            delta = buf.rew[i] + self.gamma * next_val * next_nonterm - buf.val[i]
-            gae = delta + self.gamma * self.lam * next_nonterm * gae
-            adv[i] = gae
-            next_val = buf.val[i]
-            next_nonterm = 1.0 - buf.done[i]
+        adv = _compute_gae(
+            buf.rew[:n],
+            buf.val[:n],
+            buf.done[:n],
+            last_val,
+            self.gamma,
+            self.lam,
+        )
         ret = adv + buf.val[:n]
         adv_raw_std = float(adv.std())
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
