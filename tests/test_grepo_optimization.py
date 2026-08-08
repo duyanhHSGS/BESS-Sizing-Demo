@@ -34,11 +34,11 @@ def _case(minutes=15):
 class GREPOInferenceAndMathTests(unittest.TestCase):
     def test_observation_and_network_contracts_are_unchanged(self):
         agent = GREPOAgent(REACTIVE_OBSERVATION_DIM, device="cpu")
-        self.assertEqual(REACTIVE_OBSERVATION_DIM, 13)
-        self.assertEqual(agent.actor[0].in_features, 13)
+        self.assertEqual(REACTIVE_OBSERVATION_DIM, 15)
+        self.assertEqual(agent.actor[0].in_features, 15)
         self.assertEqual(agent.actor[0].out_features, 256)
         self.assertEqual(agent.actor[2].out_features, 128)
-        self.assertEqual(agent.critic[0].in_features, 13)
+        self.assertEqual(agent.critic[0].in_features, 15)
 
     def test_predict_action_matches_deterministic_act(self):
         agent = GREPOAgent(REACTIVE_OBSERVATION_DIM, seed=7, device="cpu")

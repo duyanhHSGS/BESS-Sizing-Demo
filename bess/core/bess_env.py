@@ -1,8 +1,9 @@
 """bess.core.bess_env.py  CMDP environment for reactive or real-forecast BESS dispatch.
 
 Design follows the two-layer framework in CoSoLyThuyet_DRL_BESS_Sizing.html
-(Hu et al. 2026): the 13-input variant sees real-time measurements only.
-The 17-input variant adds four externally prepared, causal look-ahead
+(Hu et al. 2026): the 15-input variant sees real-time measurements and the
+state of the current fixed 30-minute demand meter block. The 19-input variant
+adds four externally prepared, causal look-ahead
 predictions. Both output one continuous action in [-1, 1].
 
 HARD-CONSTRAINT SAFETY PROJECTION (never learned, always enforced):
@@ -57,16 +58,48 @@ from bess.core.scenario_gen import MonthData
 from bess.core.settings import PPO_GAMMA
 from bess.core.timebase import demand_window_steps, dt_from_steps_per_day, steps_per_day_from_dt
 
-REACTIVE_OBSERVATION_DIM = 13
-FORECAST_OBSERVATION_DIM = 17             # forecast-informed variant (+4 features)
+REACTIVE_OBSERVATION_DIM = 15
+FORECAST_OBSERVATION_DIM = 19             # forecast-informed variant (+4 features)
+NORMAL_OBSERVATION_SCHEMA = "bess_meter_aware_v2"
 REWARD_SCALE_VND = 1e6          # rewards in millions of VND
+
+
+def normal_observation_compatibility_error(algo: str, meta: dict) -> str | None:
+    """Return why a normal checkpoint cannot use the current BESSEnv contract."""
+    if str(algo).lower() == "ppo2":
+        return None
+    if str(algo).lower() not in {"ppo", "grepo", "grepro", "pro"}:
+        return None
+    if meta.get("observation_schema") != NORMAL_OBSERVATION_SCHEMA:
+        return (
+            f"legacy observation schema; expected {NORMAL_OBSERVATION_SCHEMA}. "
+            "Retrain before deployment"
+        )
+    expected = FORECAST_OBSERVATION_DIM if meta.get("obs_variant") == "fc" else REACTIVE_OBSERVATION_DIM
+    if meta.get("controller") == "sadrbc_residual":
+        expected += 1
+    try:
+        actual = int(meta.get("obs_dim"))
+    except (TypeError, ValueError):
+        return "checkpoint is missing a valid obs_dim; retrain before deployment"
+    if actual != expected:
+        return f"checkpoint obs_dim={actual}, current contract requires {expected}; retrain before deployment"
+    try:
+        learned_wear = float(meta.get("battery_wear_cost"))
+    except (TypeError, ValueError):
+        return "checkpoint is missing a valid battery_wear_cost; retrain before deployment"
+    if not np.isfinite(learned_wear) or learned_wear < 0.0:
+        return "checkpoint battery_wear_cost must be finite and non-negative; retrain before deployment"
+    if meta.get("cheap_window_acceptance_passed") is False:
+        return "checkpoint failed the cheap-window acceptance gate; retrain before deployment"
+    return None
 
 
 class BESSEnv:
     """Month-long episode using the selected data resolution."""
 
     def __init__(self, config, reference_power_kw: float = 500.0,
-                 degradation_cost_vnd_per_kwh: float = 50.0,
+                 degradation_cost_vnd_per_kwh: float | None = None,
                  initial_peak_fraction_of_reference: float = 0.6,
                  initial_running_peak_kw: float | None = None,
                  discount_factor: float = PPO_GAMMA,
@@ -107,7 +140,16 @@ class BESSEnv:
         self.samples_per_demand_block = demand_window_steps(self.native_timestep_hours)
         self.config = config
         self.reference_power_kw = float(reference_power_kw)
-        self.degradation_cost_vnd_per_kwh = float(degradation_cost_vnd_per_kwh)
+        resolved_wear_cost = (
+            getattr(config, "battery_wear_cost_vnd_per_kwh", None)
+            if degradation_cost_vnd_per_kwh is None
+            else degradation_cost_vnd_per_kwh
+        )
+        if resolved_wear_cost is None:
+            raise ValueError("BESS config must provide battery wear cost in VND/kWh")
+        self.degradation_cost_vnd_per_kwh = float(resolved_wear_cost)
+        if not np.isfinite(self.degradation_cost_vnd_per_kwh) or self.degradation_cost_vnd_per_kwh < 0.0:
+            raise ValueError("battery wear cost must be finite and >= 0")
 
         # Start the shaping peak below the site's realistic optimum so the agent
         # actually receives a learning signal when it creates a new monthly peak.
@@ -282,8 +324,15 @@ class BESSEnv:
             # jumped 0.99->0.0 exactly at midnight -- the boundary where the
             # cheap off-peak window begins.
             observation_cache[timestep_index, 12] = time_since_tariff_change[timestep_index]
+            sample_inside_demand_block = timestep_index % self.samples_per_demand_block
+            observation_cache[timestep_index, 13] = (
+                sample_inside_demand_block / (self.samples_per_demand_block - 1)
+                if self.samples_per_demand_block > 1
+                else 0.0
+            )
+            observation_cache[timestep_index, 14] = 0.0
             if self.forecast_enabled:
-                observation_cache[timestep_index, 13:17] = self._get_forecast_features(timestep_index)
+                observation_cache[timestep_index, 15:19] = self._get_forecast_features(timestep_index)
         self._static_observation_cache = observation_cache
 
     def _compute_tariff_transition_fractions(self):
@@ -323,6 +372,11 @@ class BESSEnv:
         observation[5] = self.state_of_charge
         observation[8] = self.running_monthly_peak_kw * self._inverse_reference_power
         observation[9] = self.previous_grid_import_kw * self._inverse_reference_power
+        observation[14] = (
+            self._demand_block_grid_import_sum_kw
+            / self.samples_per_demand_block
+            * self._inverse_reference_power
+        )
         self._fill_extra_observation_features(observation, timestep_index)
         return observation
 
@@ -487,9 +541,9 @@ class BESSEnv:
         every native row.
         """
         state_of_charge_before_action = self.state_of_charge
-        # Save the tariff seen when PPO made this decision. The native-step loop
-        # below may move time forward or even cross midnight.
-        decision_tariff_vnd_per_kwh = self.current_day_tariff[self.current_timestep_index]
+        # Potential shaping uses the tariff belonging to each state. The
+        # native-step loop may cross a tariff or calendar boundary.
+        current_state_tariff_vnd_per_kwh = self.current_day_tariff[self.current_timestep_index]
 
         total_electricity_cost_vnd = 0.0
         total_battery_energy_cost_delta_vnd = 0.0
@@ -530,13 +584,17 @@ class BESSEnv:
             if episode_done:
                 break
 
-        stored_energy_value_vnd_per_soc_fraction = self._deliverable_energy_kwh_per_soc_fraction * decision_tariff_vnd_per_kwh
+        stored_energy_value_vnd_per_soc_fraction = self._deliverable_energy_kwh_per_soc_fraction * current_state_tariff_vnd_per_kwh
         stored_energy_value_before_vnd = (
             state_of_charge_before_action - self.config.SOC_min
         ) * stored_energy_value_vnd_per_soc_fraction
-        stored_energy_value_after_vnd = (
-            self.state_of_charge - self.config.SOC_min
-        ) * stored_energy_value_vnd_per_soc_fraction
+        if episode_done:
+            stored_energy_value_after_vnd = 0.0
+        else:
+            next_state_tariff_vnd_per_kwh = self.current_day_tariff[self.current_timestep_index]
+            stored_energy_value_after_vnd = (
+                self.state_of_charge - self.config.SOC_min
+            ) * self._deliverable_energy_kwh_per_soc_fraction * next_state_tariff_vnd_per_kwh
         state_of_charge_shaping_reward_vnd = (
             self.discount_factor * stored_energy_value_after_vnd - stored_energy_value_before_vnd
         )

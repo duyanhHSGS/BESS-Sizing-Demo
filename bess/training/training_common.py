@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from bess.agents.sadrbc import SADRBCConfig
-from bess.core.common import TOU_RULES, load_system_config
+from bess.core.common import TOU_RULES, load_system_config, score_month
 from bess.core.scenario_gen import DayData, MonthData
 
 
@@ -124,9 +124,15 @@ def build_training_bess_config(
     """Build one canonical BESS/tariff config for every training algorithm."""
     base = load_system_config()
     tariff = json.loads(Path(training_config_path).read_text(encoding="utf-8"))
+    if "battery_wear_cost" not in tariff:
+        raise ValueError("training config requires battery_wear_cost")
+    battery_wear_cost = float(tariff["battery_wear_cost"])
+    if not np.isfinite(battery_wear_cost) or battery_wear_cost < 0.0:
+        raise ValueError("battery_wear_cost must be finite and >= 0")
     cfg = SADRBCConfig({
         "E_cap_kWh": e_cap_kwh,
         "P_rated_kW": p_rated_kw,
+        "battery_wear_cost_vnd_per_kwh": battery_wear_cost,
         "eta_ch": float(tariff.get("charge_efficiency", base.eta_ch)),
         "eta_dis": float(tariff.get("discharge_efficiency", base.eta_dis)),
         "soc_min": float(tariff.get("minimum_soc", base.SOC_min)),
@@ -154,3 +160,23 @@ def build_training_bess_config(
     if billing == "tou":
         cfg.T_cap = 0.0
     return cfg, billing
+
+
+def score_cached_oracle(
+    cache_path: str | Path,
+    day_indexes: list[int],
+    cfg,
+    source_days: list[DayData],
+) -> dict:
+    """Score cached Oracle grid plus its saved UI-priced throughput wear."""
+    from bess.evaluation.oracle.oracle_cache import load_cached_training_days
+
+    oracle_days = load_cached_training_days(cache_path, day_indexes)
+    utility = score_month([day["grid"] for day in oracle_days], cfg, days=source_days)
+    wear_cost = sum(float(day.get("wear_cost_vnd", 0.0)) for day in oracle_days)
+    return {
+        **utility,
+        "wear_cost_vnd": wear_cost,
+        "total_operating_cost_vnd": utility["total_cost_vnd"] + wear_cost,
+        "days": oracle_days,
+    }

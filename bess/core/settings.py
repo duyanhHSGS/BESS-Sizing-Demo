@@ -40,6 +40,7 @@ SYSTEM_CONFIG = {
     "BESS": {
         "E_cap_kWh": float(DEFAULT_PARAMETERS["battery_capacity_kWh"]),
         "P_rated_kW": float(DEFAULT_PARAMETERS["battery_power_limit_kW"]),
+        "battery_wear_cost_vnd_per_kwh": float(DEFAULT_PARAMETERS["battery_wear_cost"]),
         "eta_ch": float(DEFAULT_PARAMETERS["charge_efficiency"]),
         "eta_dis": float(DEFAULT_PARAMETERS["discharge_efficiency"]),
         "soc_min": float(DEFAULT_PARAMETERS["minimum_soc"]),

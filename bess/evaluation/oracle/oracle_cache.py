@@ -152,6 +152,32 @@ def load_cached_training_grids(
     return [[float(value) for value in by_index[index]["grid"]] for index in day_indexes]
 
 
+def load_cached_training_days(
+    cache_path: str | Path,
+    day_indexes: list[int],
+) -> list[dict[str, Any]]:
+    """Load complete solved Oracle day records for training diagnostics/scoring."""
+    path = Path(cache_path).resolve()
+    if path.parent != CACHE_DIR.resolve():
+        raise OracleCacheRequired(f"Oracle cache path is outside the cache directory: {path}")
+    payload = _read_cache(path)
+    result = payload.get("result") if payload else None
+    days = result.get("days") if isinstance(result, dict) else None
+    if not isinstance(days, list):
+        raise OracleCacheRequired("Oracle LP cache is missing or invalid.")
+    by_index = {
+        int(day["day_index"]): day
+        for day in days
+        if day.get("solved") and isinstance(day.get("grid"), list)
+    }
+    missing = [index for index in day_indexes if index not in by_index]
+    if missing:
+        raise OracleCacheRequired(
+            f"Oracle LP cache does not contain requested day indexes: {missing[:10]}"
+        )
+    return [dict(by_index[index]) for index in day_indexes]
+
+
 def _payload(parameters: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     csv_path = selected_data_path(parameters)
     return {

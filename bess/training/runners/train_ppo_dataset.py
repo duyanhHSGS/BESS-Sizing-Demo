@@ -9,17 +9,18 @@ from pathlib import Path
 import numpy as np
 
 from bess.evaluation.baselines import run_drl_policy, run_no_bess
-from bess.core.bess_env import BESSEnv
+from bess.core.bess_env import BESSEnv, NORMAL_OBSERVATION_SCHEMA
 from bess.evaluation.benchmark import _rolling_30_minute_average
-from bess.core.common import RESULTS_DIR, score_month
+from bess.core.common import RESULTS_DIR, score_month, score_operating_month
 from bess.agents.ppo_agent import PPOAgent, RolloutBuffer, resolve_ppo_device
 from bess.core.scenario_gen import MonthData
-from bess.evaluation.oracle.oracle_cache import load_cached_training_grids
+from bess.evaluation.policy_diagnostics import monthly_policy_diagnostics, run_cheap_window_acceptance
 from bess.training.training_common import (
     augment_month,
     build_training_bess_config,
     load_training_days,
     month_blocks,
+    score_cached_oracle,
 )
 from bess.training.training_reports import write_curve, write_report
 from bess.core.settings import PPO_GAMMA, PPO_LAMBDA
@@ -55,6 +56,7 @@ def main() -> None:
         raise SystemExit("gamma must be finite and in (0, 1]")
     if not math.isfinite(args.lambda_value) or not 0.0 <= args.lambda_value <= 1.0:
         raise SystemExit("lambda must be finite and in [0, 1]")
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     days = load_training_days(args.csv, weather="csv")
     if args.val_days < 1 or args.test_days < 1:
@@ -107,6 +109,7 @@ def main() -> None:
         discount_factor=gamma,
         control_interval_minutes=args.control_dt_minutes,
         forecast_enabled=args.obs_variant == "fc",
+        degradation_cost_vnd_per_kwh=cfg.battery_wear_cost_vnd_per_kwh,
     )
     learner_device = resolve_ppo_device(args.device)
     agent = PPOAgent(
@@ -123,6 +126,8 @@ def main() -> None:
         "p_rated_kw": args.p_rated,
         "obs_variant": args.obs_variant,
         "obs_dim": env.observation_dimensions,
+        "battery_wear_cost": cfg.battery_wear_cost_vnd_per_kwh,
+        "observation_schema": NORMAL_OBSERVATION_SCHEMA,
         "d_run_init_kw": d_run0,
         "gamma": gamma,
         "lambda": args.lambda_value,
@@ -146,16 +151,19 @@ def main() -> None:
     buffer = RolloutBuffer(decisions_per_day * ROLLOUT_DAYS, env.observation_dimensions)
 
     val_base = score_month(run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
-    oracle_grids = load_cached_training_grids(
-        args.oracle_cache, [day.day_index for day in val_days]
+    val_oracle_result = score_cached_oracle(
+        args.oracle_cache, [day.day_index for day in val_days], cfg, val_days
     )
-    val_oracle = score_month(oracle_grids, cfg, days=val_days)["total_cost_vnd"]
+    val_oracle = val_oracle_result["total_operating_cost_vnd"]
     curve_path = RESULTS_DIR / f"training_curve_{tag}.csv"
     report_path = RESULTS_DIR / f"training_report_{tag}.json"
     report = {
         "version": 1,
         "status": "running",
         "algorithm": "ppo",
+        "observation_schema": NORMAL_OBSERVATION_SCHEMA,
+        "obs_dim": env.observation_dimensions,
+        "battery_wear_cost": cfg.battery_wear_cost_vnd_per_kwh,
         "tag": tag,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "dataset": {
@@ -168,6 +176,7 @@ def main() -> None:
             "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
         },
         "battery": {"e_cap_kwh": args.e_cap, "p_rated_kw": args.p_rated},
+        "economics": {"battery_wear_cost": cfg.battery_wear_cost_vnd_per_kwh},
         "training": {
             "requested_steps": args.steps,
             "seed": args.seed,
@@ -239,6 +248,23 @@ def main() -> None:
         for key in perf:
             perf[key] = 0 if key in ("decisions", "native_rows") else 0.0
 
+    # The zero-initialized deterministic actor is a real no-action candidate.
+    # Save it before exploration so checkpoint selection can never regress
+    # beyond the idle policy merely because the first PPO update is unlucky.
+    initial_result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
+    best_val = score_operating_month(
+        initial_result["p_grid_days"], initial_result["p_bess_days"], cfg,
+        days=val_days,
+    )["total_operating_cost_vnd"]
+    curve.append({
+        "steps": 0,
+        "val_cost_vnd": best_val,
+        "oracle_gap_pct": (best_val - val_oracle) / val_oracle * 100,
+        "saving_vs_nobess_pct": (val_base - best_val) / val_base * 100,
+    })
+    agent.save(RESULTS_DIR / f"policy_{tag}.pt")
+    persist_progress()
+
     month_index = 0
     augment_started = time.perf_counter()
     first_month = train_months[0] if args.obs_variant == "fc" else augment_month(train_months[0], rng)
@@ -275,7 +301,9 @@ def main() -> None:
         result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
         perf["validation"] += time.perf_counter() - validation_started
         scoring_started = time.perf_counter()
-        val_cost = score_month(result["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
+        val_cost = score_operating_month(
+            result["p_grid_days"], result["p_bess_days"], cfg, days=val_days
+        )["total_operating_cost_vnd"]
         perf["scoring"] += time.perf_counter() - scoring_started
         saving = (val_base - val_cost) / val_base * 100
         gap = (val_cost - val_oracle) / val_oracle * 100
@@ -311,7 +339,9 @@ def main() -> None:
 
     if not curve:
         result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
-        val_cost = score_month(result["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
+        val_cost = score_operating_month(
+            result["p_grid_days"], result["p_bess_days"], cfg, days=val_days
+        )["total_operating_cost_vnd"]
         saving = (val_base - val_cost) / val_base * 100
         gap = (val_cost - val_oracle) / val_oracle * 100
         curve.append({"steps": steps, "val_cost_vnd": val_cost, "oracle_gap_pct": gap, "saving_vs_nobess_pct": saving})
@@ -329,11 +359,30 @@ def main() -> None:
     test_month = MonthData(days=test_days, source="test")
     best_agent = PPOAgent(env.observation_dimensions, device=learner_device)
     best_agent.load(RESULTS_DIR / f"policy_{tag}.pt")
+    validation_result = run_drl_policy(val_month, cfg, best_agent, p_ref_kw=p_ref)
     result = run_drl_policy(test_month, cfg, best_agent, p_ref_kw=p_ref)
-    test_cost = score_month(result["p_grid_days"], cfg, days=test_days)["total_cost_vnd"]
+    test_operating = score_operating_month(
+        result["p_grid_days"], result["p_bess_days"], cfg, days=test_days
+    )
+    test_cost = test_operating["total_operating_cost_vnd"]
     no_bess_cost = score_month(run_no_bess(test_month, cfg)["p_grid_days"], cfg, days=test_days)["total_cost_vnd"]
+    test_oracle_result = score_cached_oracle(
+        args.oracle_cache, [day.day_index for day in test_days], cfg, test_days
+    )
+    test_oracle_cost = test_oracle_result["total_operating_cost_vnd"]
     test_saving = (no_bess_cost - test_cost) / no_bess_cost * 100
-    best_agent.meta = {**agent.meta, "test_saving_pct": round(test_saving, 2), "trained": date.today().isoformat()}
+    test_oracle_gap = (test_cost - test_oracle_cost) / test_oracle_cost * 100
+    cheap_window_acceptance = run_cheap_window_acceptance(
+        best_agent, cfg, reference_power_kw=p_ref
+    )
+    best_agent.meta = {
+        **agent.meta,
+        "test_saving_pct": round(test_saving, 2),
+        "test_oracle_gap_pct": round(test_oracle_gap, 2),
+        "cheap_window_acceptance_passed": cheap_window_acceptance["passed"],
+        "cheap_window_avoidable_normal_charge_kwh": cheap_window_acceptance["diagnostics"]["avoidable_normal_charge_kwh"],
+        "trained": date.today().isoformat(),
+    }
     best_agent.save(RESULTS_DIR / f"policy_{tag}.pt")
     report["status"] = "complete"
     report["completed_at"] = datetime.now(timezone.utc).isoformat()
@@ -341,11 +390,32 @@ def main() -> None:
         "policy_cost_vnd": test_cost,
         "no_bess_vnd": no_bess_cost,
         "saving_pct": test_saving,
+        "oracle_vnd": test_oracle_cost,
+        "oracle_gap_pct": test_oracle_gap,
+        "wear_cost_vnd": test_operating["wear_cost_vnd"],
+    }
+    report["diagnostics"] = {
+        "validation_months": monthly_policy_diagnostics(
+            val_month,
+            validation_result,
+            cfg,
+            oracle_days=val_oracle_result["days"],
+            initial_running_peak_kw=d_run0,
+        ),
+        "test_months": monthly_policy_diagnostics(
+            test_month,
+            result,
+            cfg,
+            oracle_days=test_oracle_result["days"],
+            initial_running_peak_kw=d_run0,
+        ),
+        "cheap_window_acceptance": cheap_window_acceptance,
     }
     write_report(report_path, report)
     print(
         f"[train-ds] TEST {test_days[0].date_iso}->{test_days[-1].date_iso}: "
-        f"{test_cost/1e6:.1f}M vs no-BESS {no_bess_cost/1e6:.1f}M -> saving {test_saving:.2f}%",
+        f"{test_cost/1e6:.1f}M vs no-BESS {no_bess_cost/1e6:.1f}M -> saving {test_saving:.2f}% | "
+        f"oracle gap {test_oracle_gap:.2f}%",
         flush=True,
     )
 

@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 
 from bess.paths import PROJECT_ROOT
+from bess.core.bess_env import normal_observation_compatibility_error
 
 
 BASE_DIR = PROJECT_ROOT
@@ -56,6 +57,7 @@ def list_checkpoints(checkpoint_dir: Path = CHECKPOINT_DIR) -> list[dict]:
         if not path.is_file() or "archive" in path.parts:
             continue
         algo, meta, error = _load_checkpoint_meta(path)
+        compatibility_error = normal_observation_compatibility_error(algo, meta)
         rows.append(
             {
                 "name": path.name,
@@ -67,7 +69,7 @@ def list_checkpoints(checkpoint_dir: Path = CHECKPOINT_DIR) -> list[dict]:
                 "test_saving_pct": meta.get("test_saving_pct"),
                 "trained": meta.get("trained"),
                 "meta": meta,
-                "error": error,
+                "error": error or compatibility_error,
             }
         )
     return rows
@@ -179,6 +181,8 @@ def get_checkpoint_report(
     points, warnings = _load_curve(curve_path)
     saved_report, report_warnings = _load_report(report_path)
     warnings.extend(report_warnings)
+    if checkpoint.get("error"):
+        warnings.append(f"Retrain required: {checkpoint['error']}")
     required_sampling = {
         "native_dt_minutes",
         "control_dt_minutes",

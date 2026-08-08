@@ -67,6 +67,11 @@ class ActorCritic(nn.Module):
         super().__init__()
         self.actor = _mlp(obs_dim, 1)
         self.critic = _mlp(obs_dim, 1)
+        # Start deterministic deployment at physical idle. Exploration still
+        # comes from log_std, but random final-layer bias can no longer make
+        # the first checkpoint an always-charge policy.
+        nn.init.zeros_(self.actor[-1].weight)
+        nn.init.zeros_(self.actor[-1].bias)
         self.log_std = nn.Parameter(torch.full((1,), -0.5))
 
     def dist(self, obs):

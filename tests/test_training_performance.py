@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from bess.evaluation.benchmark import _rolling_30_minute_average
-from bess.core.bess_env import BESSEnv
+from bess.core.bess_env import BESSEnv, REACTIVE_OBSERVATION_DIM
 from bess.core.common import load_system_config, make_bess_config
 from bess.agents.ppo_agent import PPOAgent, RolloutBuffer
 from bess.core.scenario_gen import DayData, MonthData
@@ -43,10 +43,11 @@ class FixedDemandBlockTests(unittest.TestCase):
 
 class InferenceAndEnvironmentTests(unittest.TestCase):
     def test_actor_only_prediction_matches_deterministic_act(self):
-        agent = PPOAgent(obs_dim=13, seed=7)
-        obs = np.linspace(-1.0, 1.0, 13, dtype=np.float32)
+        agent = PPOAgent(obs_dim=REACTIVE_OBSERVATION_DIM, seed=7)
+        obs = np.linspace(-1.0, 1.0, REACTIVE_OBSERVATION_DIM, dtype=np.float32)
         expected, _, _ = agent.act(obs, deterministic=True)
         self.assertEqual(agent.predict_action(obs), expected)
+        self.assertEqual(expected, 0.0)
 
     def test_native_trajectory_constraints_and_running_peak(self):
         base = load_system_config()
@@ -93,10 +94,10 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         )
 
     def test_seeded_update_stays_finite_and_checkpoint_is_compatible(self):
-        agent = PPOAgent(obs_dim=13, seed=11, epochs=1, minibatch=8)
-        buffer = RolloutBuffer(16, 13)
+        agent = PPOAgent(obs_dim=REACTIVE_OBSERVATION_DIM, seed=11, epochs=1, minibatch=8)
+        buffer = RolloutBuffer(16, REACTIVE_OBSERVATION_DIM)
         rng = np.random.default_rng(11)
-        obs = rng.normal(size=13).astype(np.float32)
+        obs = rng.normal(size=REACTIVE_OBSERVATION_DIM).astype(np.float32)
         for index in range(buffer.size):
             action, logp, latent, value = agent.act_with_latent(obs)
             buffer.add(
@@ -108,7 +109,7 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
                 0.0,
                 latent,
             )
-            obs = rng.normal(size=13).astype(np.float32)
+            obs = rng.normal(size=REACTIVE_OBSERVATION_DIM).astype(np.float32)
         agent.update(buffer, 0.0)
         self.assertTrue(
             all(torch.isfinite(parameter).all() for parameter in agent.net.parameters())
@@ -118,10 +119,10 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "policy.pt"
             agent.save(path)
-            loaded = PPOAgent(obs_dim=13)
+            loaded = PPOAgent(obs_dim=REACTIVE_OBSERVATION_DIM)
             loaded.load(path)
             self.assertEqual(loaded.meta, agent.meta)
-            probe = np.zeros(13, dtype=np.float32)
+            probe = np.zeros(REACTIVE_OBSERVATION_DIM, dtype=np.float32)
             self.assertEqual(loaded.predict_action(probe), agent.predict_action(probe))
 
 

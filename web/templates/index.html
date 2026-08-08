@@ -1438,8 +1438,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           </label>
           <label>Brain mode
             <select id="train-observation">
-              <option value="base">Reactive — 13 inputs</option>
-              <option value="fc">Forecast — 17 inputs</option>
+              <option value="base">Reactive — 15 inputs</option>
+              <option value="fc">Forecast — 19 inputs</option>
             </select>
           </label>
           <label>Training device
@@ -1549,6 +1549,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
                   <th>Billing</th>
                   <th>Test saving</th>
                   <th>Trained</th>
+                  <th>Status</th>
                 </tr>
               </thead>
               <tbody id="checkpoint-table-body"></tbody>
@@ -4655,7 +4656,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         `<td>${escapeHtml(`${checkpoint.e_cap_kwh ?? "?"}/${checkpoint.p_rated_kw ?? "?"}`)}</td>` +
         `<td>${escapeHtml(checkpoint.billing_mode || "")}</td>` +
         `<td>${checkpoint.test_saving_pct == null ? "-" : escapeHtml(checkpoint.test_saving_pct + "%")}</td>` +
-        `<td>${escapeHtml(checkpoint.trained || "")}</td></tr>`
+        `<td>${escapeHtml(checkpoint.trained || "")}</td>` +
+        `<td>${checkpoint.error ? `<span class="warning">Retrain required: ${escapeHtml(checkpoint.error)}</span>` : "Ready"}</td></tr>`
       )).join("");
       if (!checkpoints.length) {
         selectedCheckpointName = null;
@@ -4694,11 +4696,14 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       const dataset = saved.dataset || {};
       const validation = saved.validation || {};
       const test = saved.test || {};
+      const cheapAcceptance = saved.diagnostics?.cheap_window_acceptance;
       const summary = payload.summary || {};
       const bestBill = summary.best_bill || {};
       const bestSaving = summary.best_saving || {};
       const bestGap = summary.best_oracle_gap || {};
       const testSaving = test.saving_pct ?? checkpoint.test_saving_pct;
+      const learnedWearCost = Number(meta.battery_wear_cost ?? saved.economics?.battery_wear_cost);
+      const currentWearCost = Number(document.getElementById("tf-wear").value);
       trainingReportTitle.textContent = `${checkpoint.name || "Checkpoint"} — training report`;
       const headline = [
         reportMetric("Best validation bill", reportValue(bestBill.val_cost_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)),
@@ -4719,7 +4724,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           : `gamma ${training.gamma ?? meta.gamma ?? "?"}, group ${training.group ?? meta.group ?? "?"}, beta ${training.beta ?? meta.beta ?? "?"}, std ${training.std ?? meta.std ?? "?"}`;
       const details = [
         ["Algorithm", checkpoint.algo || saved.algorithm],
-        ["Brain mode", `${meta.obs_variant === "fc" ? "Forecast" : "Reactive"} — ${meta.obs_dim || (meta.obs_variant === "fc" ? 17 : 13)} inputs`],
+        ["Brain mode", `${meta.obs_variant === "fc" ? "Forecast" : "Reactive"} — ${meta.obs_dim ?? "legacy / unknown"} inputs`],
+        ["Learned wear cost", reportValue(meta.battery_wear_cost ?? saved.economics?.battery_wear_cost, (value) => `${formatNumber(value, 1)} VND/kWh throughput`)],
+        ["Current UI wear cost", reportValue(currentWearCost, (value) => `${formatNumber(value, 1)} VND/kWh throughput`)],
         ["Learner device", `${training.device ?? meta.device ?? "unknown"} (requested ${training.device_requested ?? meta.device_requested ?? "legacy"})`],
         ["Battery E/P", `${checkpoint.e_cap_kwh ?? saved.battery?.e_cap_kwh ?? "?"} kWh / ${checkpoint.p_rated_kw ?? saved.battery?.p_rated_kw ?? "?"} kW`],
         ["Billing mode", checkpoint.billing_mode || saved.billing_mode],
@@ -4745,11 +4752,40 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         ["Test Oracle", reportValue(test.oracle_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
         ["Test energy cost", reportValue(test.energy_cost_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
         ["Test demand cost", reportValue(test.demand_cost_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
+        ["Cheap-window acceptance", cheapAcceptance ? `${cheapAcceptance.passed ? "PASS" : "FAIL"} — avoidable ${formatNumber(cheapAcceptance.diagnostics?.avoidable_normal_charge_kwh, 1)} / ${formatNumber(cheapAcceptance.avoidable_normal_charge_limit_kwh, 1)} kWh limit` : "Unavailable"],
+        ["Lab charge cheap / normal / expensive", cheapAcceptance ? `${formatNumber(cheapAcceptance.diagnostics?.cheap_grid_charge_kwh, 1)} / ${formatNumber(cheapAcceptance.diagnostics?.normal_grid_charge_kwh, 1)} / ${formatNumber(cheapAcceptance.diagnostics?.expensive_grid_charge_kwh, 1)} kWh` : "Unavailable"],
+        ["Lab SOC 22:30 / 00:00 / 06:00", cheapAcceptance ? `${formatNumber(cheapAcceptance.diagnostics?.soc_2230_pct, 1)}% / ${formatNumber(cheapAcceptance.diagnostics?.soc_0000_pct, 1)}% / ${formatNumber(cheapAcceptance.diagnostics?.soc_0600_pct, 1)}%` : "Unavailable"],
         ["Report status", saved.status || (payload.artifacts?.report ? "saved" : "legacy / reconstructed")],
         ["Curve artifact", payload.artifacts?.curve || "Unavailable"],
       ].map(([label, value]) => reportDetail(label, value)).join("");
-      trainingReportBody.innerHTML = `<div class="training-report-grid">${headline}</div><div class="training-report-details">${details}</div>`;
-      const warnings = payload.warnings || [];
+      const diagnosticRows = [
+        ...(saved.diagnostics?.validation_months || []).map((row) => ({ ...row, split: "Validation" })),
+        ...(saved.diagnostics?.test_months || []).map((row) => ({ ...row, split: "Test" })),
+      ];
+      const diagnosticTable = diagnosticRows.length ? `
+        <h3>Monthly charging diagnostics</h3>
+        <div class="sizing-table-wrap"><table class="sizing-table"><thead><tr>
+          <th>Split / month</th><th>Cheap grid</th><th>Normal grid</th><th>Expensive grid</th><th>PV charge</th>
+          <th>Avg cheap</th><th>Unused peak-safe cheap</th><th>Avoidable normal</th><th>SOC 00/06</th>
+          <th>PMax policy / no-BESS / Oracle</th><th>Operating bill / Oracle / gap</th>
+        </tr></thead><tbody>${diagnosticRows.map((row) => `<tr>
+          <td>${escapeHtml(`${row.split} / ${row.month}`)}</td>
+          <td>${formatNumber(row.cheap_grid_charge_kwh, 1)} kWh</td>
+          <td>${formatNumber(row.normal_grid_charge_kwh, 1)} kWh</td>
+          <td>${formatNumber(row.expensive_grid_charge_kwh, 1)} kWh</td>
+          <td>${formatNumber(row.pv_charge_kwh, 1)} kWh</td>
+          <td>${formatNumber(row.average_cheap_grid_charge_kw, 1)} kW</td>
+          <td>${formatNumber(row.unused_peak_safe_cheap_capacity_kwh, 1)} kWh</td>
+          <td>${formatNumber(row.avoidable_normal_charge_kwh, 1)} kWh</td>
+          <td>${formatNumber(row.soc_0000_pct_mean, 1)}% / ${formatNumber(row.soc_0600_pct_mean, 1)}%</td>
+          <td>${formatNumber(row.policy_pmax_kw, 1)} / ${formatNumber(row.no_bess_pmax_kw, 1)} / ${row.oracle_pmax_kw == null ? "-" : formatNumber(row.oracle_pmax_kw, 1)} kW</td>
+          <td>${formatNumber(row.policy_total_operating_vnd / 1e6, 2)}M / ${row.oracle_total_operating_vnd == null ? "-" : `${formatNumber(row.oracle_total_operating_vnd / 1e6, 2)}M`} / ${row.policy_oracle_gap_vnd == null ? "-" : `${formatNumber(row.policy_oracle_gap_vnd / 1e6, 2)}M`} VND</td>
+        </tr>`).join("")}</tbody></table></div>` : "";
+      trainingReportBody.innerHTML = `<div class="training-report-grid">${headline}</div><div class="training-report-details">${details}</div>${diagnosticTable}`;
+      const warnings = [...(payload.warnings || [])];
+      if (Number.isFinite(learnedWearCost) && Number.isFinite(currentWearCost) && Math.abs(learnedWearCost - currentWearCost) > 1e-9) {
+        warnings.push(`Wear-cost mismatch: checkpoint learned with ${formatNumber(learnedWearCost, 1)} VND/kWh, while current evaluation uses ${formatNumber(currentWearCost, 1)} VND/kWh.`);
+      }
       trainingReportWarnings.style.display = warnings.length ? "block" : "none";
       trainingReportWarnings.innerHTML = warnings.map((warning) => `<div>${escapeHtml(warning)}</div>`).join("");
     }
@@ -4779,6 +4815,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
 
     function updateTrainAlgoFields() {
       const algo = trainAlgo.value;
+      const reactiveInputs = algo === "ppo2" ? 17 : (algo === "grepro" ? 16 : 15);
+      const forecastInputs = algo === "ppo2" ? 17 : (algo === "grepro" ? 20 : 19);
+      trainObservation.options[0].textContent = `Reactive — ${reactiveInputs} inputs`;
+      trainObservation.options[1].textContent = `Forecast — ${forecastInputs} inputs`;
       document.querySelectorAll(".train-learning-field").forEach((item) => {
         item.style.display = ["ppo", "ppo2", "grepo", "grepro"].includes(algo) ? "inline-flex" : "none";
       });
@@ -4877,7 +4917,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             : algo === "grepro"
               ? `${trainGreproIters.value} GrePRO iterations; fixed SADRBC residual ${formatNumber(Number(trainGreproResidualLimit.value) * 100, 0)}%; deterministic forecast seed ${trainGreproForecastSeed.value}; 3→7→30 day curriculum; gamma ${trainGreproGamma.value}`
               : `${trainIters.value} GREPO iterations; gamma ${trainGrepoGamma.value}`;
-        const inputCount = brainMode === "fc" ? (algo === "grepro" ? 18 : 17) : (algo === "grepro" ? 14 : 13);
+        const inputCount = brainMode === "fc" ? (algo === "grepro" ? 20 : 19) : (algo === "grepro" ? 16 : 15);
         const brainLabel = `${brainMode === "fc" ? "Forecast" : "Reactive"} brain (${inputCount} inputs)`;
         trainPlan.textContent = `Checking required data... Plan: ${brainLabel}; device ${trainDevice.value}; train ${trainDays} days, validation ${valDays}, test ${testDays}; ${budget}; sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action); E/P ${trainEcap.value}/${trainPrated.value}.`;
         trainOracleStatusTimer = setTimeout(refreshTrainingOracleStatus, 250);

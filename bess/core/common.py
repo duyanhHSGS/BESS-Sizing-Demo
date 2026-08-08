@@ -124,6 +124,7 @@ def make_bess_config(base: SADRBCConfig, e_cap_kwh: float,
     return SADRBCConfig({
         "E_cap_kWh": e_cap_kwh,
         "P_rated_kW": p_rated_kw,
+        "battery_wear_cost_vnd_per_kwh": base.battery_wear_cost_vnd_per_kwh,
         "eta_ch": base.eta_ch,
         "eta_dis": base.eta_dis,
         "soc_min": base.SOC_min,
@@ -229,6 +230,29 @@ def score_month(p_grid_days: list[np.ndarray], cfg: SADRBCConfig,
         "demand_cost_vnd": demand,
         "total_cost_vnd": energy + demand,
         "pmax_month_kw": pmax,
+    }
+
+
+def score_operating_month(
+    p_grid_days: list[np.ndarray],
+    p_bess_days: list[np.ndarray],
+    cfg: SADRBCConfig,
+    days: list | None = None,
+) -> dict:
+    """Score utility cost plus the configured symmetric throughput wear cost."""
+    if len(p_grid_days) != len(p_bess_days):
+        raise ValueError("grid and battery-power day counts must match")
+    utility = score_month(p_grid_days, cfg, days=days)
+    throughput_kwh = sum(
+        float(np.sum(np.abs(np.asarray(values, dtype=np.float64))) * cfg.dt)
+        for values in p_bess_days
+    )
+    wear_cost_vnd = throughput_kwh * cfg.battery_wear_cost_vnd_per_kwh
+    return {
+        **utility,
+        "throughput_kwh": throughput_kwh,
+        "wear_cost_vnd": wear_cost_vnd,
+        "total_operating_cost_vnd": utility["total_cost_vnd"] + wear_cost_vnd,
     }
 
 
