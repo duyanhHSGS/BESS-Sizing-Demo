@@ -81,6 +81,11 @@ def _checkpoint_artifacts(path: Path) -> tuple[Path, Path]:
     )
 
 
+def _checkpoint_settings_artifact(path: Path) -> Path:
+    tag = path.stem.removeprefix("policy_")
+    return path.with_name(f"training_settings_{tag}.json")
+
+
 def _finite_float(value, field: str) -> float:
     number = float(value)
     if not math.isfinite(number):
@@ -176,9 +181,17 @@ def get_checkpoint_report(
     checkpoint = known[safe_name]
     checkpoint_path = checkpoint_dir.resolve() / safe_name
     curve_path, report_path = _checkpoint_artifacts(checkpoint_path)
+    settings_path = _checkpoint_settings_artifact(checkpoint_path)
     points, warnings = _load_curve(curve_path)
     saved_report, report_warnings = _load_report(report_path)
     warnings.extend(report_warnings)
+    run_settings, settings_warnings = _load_report(settings_path)
+    warnings.extend(settings_warnings)
+    if not settings_path.is_file():
+        warnings.append(
+            "Frozen launch settings are unavailable for this legacy run; "
+            "current UI values are not proof of its historical configuration."
+        )
     required_sampling = {
         "native_dt_minutes",
         "control_dt_minutes",
@@ -194,9 +207,11 @@ def get_checkpoint_report(
         "curve": points,
         "summary": _curve_summary(points),
         "training": saved_report,
+        "run_settings": run_settings,
         "artifacts": {
             "curve": curve_path.name if curve_path.is_file() else None,
             "report": report_path.name if report_path.is_file() else None,
+            "settings": settings_path.name if settings_path.is_file() else None,
         },
         "warnings": warnings,
     }

@@ -1521,7 +1521,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label>Checkpoint tag <input id="train-tag" size="22" placeholder="auto"></label>
           <button id="btn-train" class="primary" type="button">Start training</button>
           <button id="btn-train-stop" type="button" disabled>Stop</button>
-          <button id="btn-train-copy-settings" type="button">Copy run settings</button>
+          <button id="btn-train-copy-settings" type="button">Copy full run report</button>
         </div>
         <div id="train-plan" class="info">Loading datasets...</div>
         <pre id="train-log" class="log"></pre>
@@ -5162,10 +5162,119 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       };
     }
 
+    function humanReportLabel(key) {
+      return String(key)
+        .replace(/_/g, " ")
+        .replace(/\b\w/g, (letter) => letter.toUpperCase());
+    }
+
+    function humanReportScalar(value) {
+      if (value === null || value === undefined || value === "") return "Not recorded";
+      if (typeof value === "boolean") return value ? "Yes" : "No";
+      return String(value);
+    }
+
+    function appendHumanReport(lines, value, depth = 0) {
+      if (Array.isArray(value)) {
+        if (!value.length) {
+          lines.push("- None recorded");
+          return;
+        }
+        value.forEach((item, index) => {
+          if (item && typeof item === "object") {
+            lines.push(`${"#".repeat(Math.min(depth + 3, 6))} Item ${index + 1}`);
+            appendHumanReport(lines, item, depth + 1);
+          } else {
+            lines.push(`- ${humanReportScalar(item)}`);
+          }
+        });
+        return;
+      }
+      if (!value || typeof value !== "object") {
+        lines.push(humanReportScalar(value));
+        return;
+      }
+      const entries = Object.entries(value);
+      if (!entries.length) {
+        lines.push("- None recorded");
+        return;
+      }
+      entries.forEach(([key, item]) => {
+        const label = humanReportLabel(key);
+        if (item && typeof item === "object") {
+          lines.push("", `${"#".repeat(Math.min(depth + 3, 6))} ${label}`);
+          appendHumanReport(lines, item, depth + 1);
+        } else {
+          lines.push(`- ${label}: ${humanReportScalar(item)}`);
+        }
+      });
+    }
+
+    function buildFullTrainingReportText(payload) {
+      const checkpoint = payload.checkpoint || {};
+      const frozen = payload.run_settings || {};
+      const currentUi = buildTrainingSettingsSnapshot(buildTrainingRequest());
+      const lines = [
+        "# Sizing_Demo Training Run Report",
+        "",
+        `Generated: ${new Date().toISOString()}`,
+        `Checkpoint: ${checkpoint.name || selectedCheckpointName || "Not selected"}`,
+        `Algorithm: ${checkpoint.algo || payload.training?.algorithm || "Not recorded"}`,
+        "",
+        "## Evidence Notes",
+        frozen.version
+          ? "- Frozen launch settings below were saved when this run was launched."
+          : "- WARNING: This legacy run has no frozen launch-settings artifact.",
+        "- Saved Training Report is copied from the checkpoint's training_report JSON artifact.",
+        "- Checkpoint Metadata is copied from the saved policy checkpoint.",
+        "- Learning Curve contains the persisted validation rows, not reconstructed guesses.",
+      ];
+
+      lines.push("", "## Frozen Launch Settings");
+      if (frozen.version) {
+        appendHumanReport(lines, frozen);
+      } else {
+        lines.push("- Not available for this legacy run.");
+        lines.push("- The current UI snapshot is included at the end for reference only and must not be treated as historical fact.");
+      }
+
+      lines.push("", "## Saved Training Report");
+      appendHumanReport(lines, payload.training || {});
+      lines.push("", "## Checkpoint Metadata");
+      appendHumanReport(lines, checkpoint.meta || {});
+      lines.push("", "## Learning Curve Summary");
+      appendHumanReport(lines, payload.summary || {});
+      lines.push("", "## Complete Learning Curve");
+      appendHumanReport(lines, payload.curve || []);
+      lines.push("", "## Artifact Files");
+      appendHumanReport(lines, payload.artifacts || {});
+      lines.push("", "## Warnings");
+      appendHumanReport(lines, payload.warnings || []);
+
+      if (!frozen.version) {
+        lines.push("", "## Current UI Snapshot - Reference Only, Not Frozen Run Evidence");
+        appendHumanReport(lines, currentUi);
+      }
+      return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim() + "\n";
+    }
+
     async function copyTrainingRunSettings() {
       const snapshot = activeTrainingRunSettings
         || buildTrainingSettingsSnapshot(buildTrainingRequest());
-      const text = `Sizing_Demo Training Lab run settings\n\n${JSON.stringify(snapshot, null, 2)}`;
+      let text;
+      if (selectedCheckpointReport) {
+        text = buildFullTrainingReportText(selectedCheckpointReport);
+      } else {
+        const draftLines = [
+          "# Sizing_Demo Training Run Settings",
+          "",
+          "No saved checkpoint report is selected yet.",
+          "",
+          "## Current or Active Run Settings",
+        ];
+        appendHumanReport(draftLines, snapshot);
+        text = draftLines.join("\n").replace(/\n{3,}/g, "\n\n").trim() + "\n";
+      }
       const originalLabel = trainCopySettingsButton.textContent;
       try {
         if (navigator.clipboard && window.isSecureContext) {

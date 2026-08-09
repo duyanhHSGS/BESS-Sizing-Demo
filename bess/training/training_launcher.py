@@ -221,6 +221,34 @@ def write_training_config(parameters: dict, output_dir: Path = USER_DATA_DIR) ->
     return path
 
 
+def write_training_run_settings(
+    spec: dict,
+    payload: dict,
+    resolved_parameters: dict,
+    csv_path: Path,
+    config_path: Path,
+    output_dir: Path = CHECKPOINT_DIR,
+) -> Path:
+    """Freeze the exact launch inputs beside the checkpoint/report artifacts."""
+    output_dir = ensure_inside_base(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"training_settings_{spec['tag']}.json"
+    training_config = json.loads(config_path.read_text(encoding="utf-8"))
+    data = {
+        "version": 1,
+        "algorithm": spec["algo"],
+        "tag": spec["tag"],
+        "checkpoint": Path(spec["checkpoint"]).name,
+        "dataset_export": str(csv_path),
+        "training_request": payload,
+        "resolved_training_config": training_config,
+        "resolved_sizing_parameters": resolved_parameters,
+        "runner_command": spec["cmd"],
+    }
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return path
+
+
 def build_training_command(
     payload: dict,
     csv_path: Path,
@@ -516,8 +544,18 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
     )
     config_path = write_training_config(oracle_parameters, USER_DATA_DIR)
     spec = build_training_command(payload, csv_path, config_path, oracle_path)
+    settings_path = write_training_run_settings(
+        spec, payload, oracle_parameters, csv_path, config_path, CHECKPOINT_DIR
+    )
 
     env = os.environ.copy()
     env["SIZING_DEMO_CHECKPOINT_DIR"] = str(CHECKPOINT_DIR.resolve())
     job = manager.start_subprocess("train_" + spec["algo"], spec["cmd"], cwd=str(BASE_DIR), env=env)
-    return job, {"job_id": job.id, "n_days": n_days, "val_days": val_days, "test_days": test_days, **spec}
+    return job, {
+        "job_id": job.id,
+        "n_days": n_days,
+        "val_days": val_days,
+        "test_days": test_days,
+        "settings": str(settings_path),
+        **spec,
+    }
