@@ -324,6 +324,8 @@ def build_training_command(
             [
                 "--steps",
                 str(_int(payload, "steps", 400_000)),
+                "--seed",
+                str(_int(payload, "seed", 0)),
                 "--gamma",
                 str(gamma),
                 "--lambda",

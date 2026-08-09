@@ -12,7 +12,12 @@ from bess.evaluation.baselines import run_drl_policy, run_no_bess
 from bess.core.bess_env import BESSEnv
 from bess.evaluation.benchmark import _rolling_30_minute_average
 from bess.core.common import RESULTS_DIR, score_month
-from bess.agents.ppo_agent import PPOAgent, RolloutBuffer, resolve_ppo_device
+from bess.agents.ppo_agent import (
+    PPOAgent,
+    RolloutBuffer,
+    configure_ppo_determinism,
+    resolve_ppo_device,
+)
 from bess.core.scenario_gen import MonthData
 from bess.evaluation.oracle.oracle_cache import load_cached_training_grids
 from bess.training.training_common import (
@@ -55,6 +60,8 @@ def main() -> None:
         raise SystemExit("gamma must be finite and in (0, 1]")
     if not math.isfinite(args.lambda_value) or not 0.0 <= args.lambda_value <= 1.0:
         raise SystemExit("lambda must be finite and in [0, 1]")
+
+    configure_ppo_determinism(args.seed)
 
     days = load_training_days(args.csv, weather="csv")
     if args.val_days < 1 or args.test_days < 1:
@@ -132,6 +139,8 @@ def main() -> None:
         "billing_mode": billing,
         "device_requested": args.device,
         "device": learner_device,
+        "seed": args.seed,
+        "deterministic_training": True,
         "train_csv": str(args.csv),
         "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
     }

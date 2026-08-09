@@ -5,13 +5,36 @@ below the 500 ms edge cycle-time budget on a Raspberry Pi class CPU.
 """
 from __future__ import annotations
 
+import os
+import random
+
 import numpy as np
+
+# Required by deterministic CUDA matrix multiplication.  It must be set before
+# PPO creates a CUDA context; keeping it here also covers direct PPOAgent users.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import torch
 import torch.nn as nn
 
 from bess.core.settings import PPO_GAMMA, PPO_LAMBDA
 
 torch.set_num_threads(6)
+
+
+def configure_ppo_determinism(seed: int) -> None:
+    """Seed PPO randomness and reject nondeterministic PyTorch operations."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(True, warn_only=False)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    # Parallel floating-point reductions can change their summation order.
+    # PPO prioritizes reproducibility over learner throughput.
+    torch.set_num_threads(1)
 
 
 def _squashed_log_prob_from_latent(
@@ -104,6 +127,7 @@ class PPOAgent:
                  clip=0.2, epochs=8, minibatch=256, ent_coef=3e-3,
                  vf_coef=0.5, seed=0, device="auto"):
         torch.manual_seed(seed)
+        self.rng = np.random.default_rng(seed)
         self.device = torch.device(resolve_ppo_device(device))
         self.net = ActorCritic(obs_dim).to(self.device)
         self.opt = torch.optim.Adam(self.net.parameters(), lr=lr)
@@ -182,9 +206,8 @@ class PPOAgent:
         adv_t = torch.as_tensor(adv, device=self.device)
         ret_t = torch.as_tensor(ret, device=self.device)
 
-        idx = np.arange(n)
         for _ in range(self.epochs):
-            np.random.shuffle(idx)
+            idx = self.rng.permutation(n)
             for s in range(0, n, self.minibatch):
                 mb = torch.as_tensor(
                     idx[s:s + self.minibatch], dtype=torch.long,
