@@ -4,8 +4,9 @@
 # Eye 1 + Eye 2: What time of day is it?
 #   - Time is represented by TWO numbers (sin + cos) so midnight wraps around smoothly.
 #
-# Eye 3: How much electricity does the factory need from somewhere right now?
-#   - Net load = factory load minus solar, never below zero.
+# Eye 3: How much electricity does the factory need from the grid right now?
+#   - This file receives NET LOAD directly. PV does not exist as a separate input here.
+#   - Any PV effect must already be included in net_load_kw before it reaches this env.
 #
 # Eye 4: How full is the battery?
 #   - 0.0 = at minimum allowed SOC, 1.0 = at maximum allowed SOC.
@@ -36,11 +37,11 @@
 #   action +0.5 -> requested power +225 kW (discharge)
 #   action +1.0 -> requested power +450 kW (discharge)
 #
-# BIG JUICY TODO — PHYSICS POLICE DOES NOT EXIST YET:
-# This is only what the brain REQUESTS, not guaranteed actual battery power.
-# Later, add physical limits for SOC min/max, charge/discharge efficiency,
-# available energy, rated power behavior, timestep energy conversion, grid export,
-# and any other real battery constraints. DO NOT silently call requested power actual power.
+# PHYSICS POLICE V1:
+#   LAW 1: SOC may never leave [minimum_state_of_charge, maximum_state_of_charge].
+#          Requested battery power is clipped BEFORE physics so energy is not
+#          magically created/deleted by clipping SOC after an illegal action.
+#   LAW 2: No export. Discharge may never exceed the current non-negative net load.
 #
 # This file is a standalone BESS brain playground and is NOT wired into the project.
 # ============================================================
@@ -60,10 +61,9 @@ POWER_SCALE_KW = 1000.0
 
 
 def action_to_requested_battery_power_kw(action: float, battery_power_kw: float) -> float:
-    """Turn the brain's one action into a requested battery power in kW.
-
+    """Turn the brain's one action into requested battery power in kW.
     Negative = charge, zero = idle, positive = discharge.
-    This function deliberately does NOT apply battery physics yet.
+    The returned value is only a request; Physics Police must approve it.
     """
     # TODO: check at init.
     if battery_power_kw <= 0.0:
@@ -73,12 +73,79 @@ def action_to_requested_battery_power_kw(action: float, battery_power_kw: float)
     return clipped_action * float(battery_power_kw)
 
 
+def police_battery_power(
+    *,
+    requested_battery_power_kw: float,
+    net_load_kw: float,
+    state_of_charge: float,
+    minimum_state_of_charge: float,
+    maximum_state_of_charge: float,
+    battery_capacity_kwh: float,
+    timestep_hours: float,
+) -> tuple[float, float]:
+    """Apply the two Physics Police laws.
+    Returns ``(actual_battery_power_kw, next_state_of_charge)``.
+    Sign convention:
+      negative power = charge
+      positive power = discharge
+    V1 deliberately knows nothing about PV, tariffs, rewards, or strategy.
+    ``net_load_kw`` is already the final load signal supplied to this env.
+    """
+    if maximum_state_of_charge <= minimum_state_of_charge:
+        raise ValueError("maximum_state_of_charge must be greater than minimum_state_of_charge")
+    if battery_capacity_kwh <= 0.0:
+        raise ValueError("battery_capacity_kwh must be greater than 0")
+    if timestep_hours <= 0.0:
+        raise ValueError("timestep_hours must be greater than 0")
+
+    minimum_soc = float(minimum_state_of_charge)
+    maximum_soc = float(maximum_state_of_charge)
+    capacity_kwh = float(battery_capacity_kwh)
+    dt_hours = float(timestep_hours)
+
+    # If a caller hands us a slightly illegal starting SOC, put it back inside
+    # the fence before calculating how much energy is actually available.
+    current_soc = min(maximum_soc, max(minimum_soc, float(state_of_charge)))
+    requested_power_kw = float(requested_battery_power_kw)
+
+    if requested_power_kw > 0.0:
+        # LAW 1 — do not discharge below minimum SOC.
+        available_energy_kwh = (current_soc - minimum_soc) * capacity_kwh
+        maximum_soc_safe_discharge_kw = available_energy_kwh / dt_hours
+
+        # LAW 2 — no export. With no separate PV concept, discharge can only
+        # serve the already-computed positive net load.
+        maximum_no_export_discharge_kw = max(0.0, float(net_load_kw))
+
+        actual_power_kw = min(
+            requested_power_kw,
+            maximum_soc_safe_discharge_kw,
+            maximum_no_export_discharge_kw,
+        )
+
+    elif requested_power_kw < 0.0:
+        # LAW 1 — do not charge above maximum SOC.
+        available_room_kwh = (maximum_soc - current_soc) * capacity_kwh
+        maximum_soc_safe_charge_kw = available_room_kwh / dt_hours
+        actual_power_kw = -min(-requested_power_kw, maximum_soc_safe_charge_kw)
+
+    else:
+        actual_power_kw = 0.0
+
+    # Positive power discharges the battery; negative power charges it.
+    next_state_of_charge = current_soc - (actual_power_kw * dt_hours / capacity_kwh)
+
+    # Numerical seatbelt only. The power projection above is the real police.
+    next_state_of_charge = min(maximum_soc, max(minimum_soc, next_state_of_charge))
+
+    return actual_power_kw, next_state_of_charge
+
+
 def build_observation(
     *,
     timestep_index: int,
     steps_per_day: int,
-    load_kw: float,
-    pv_kw: float,
+    net_load_kw: float,
     state_of_charge: float,
     minimum_state_of_charge: float,
     maximum_state_of_charge: float,
@@ -102,10 +169,12 @@ def build_observation(
     time_sin = math.sin(time_angle)
     time_cos = math.cos(time_angle)
 
-    net_load_kw = max(float(load_kw) - float(pv_kw), 0.0)
+    # PV is already baked into this value before it enters brain_env.
+    # No separate load/PV arithmetic exists in this env.
+    grid_facing_net_load_kw = max(float(net_load_kw), 0.0)
 
     # TODO BIG JUICY TODO: net load currently uses the temporary fixed 1000 kW-style ruler above. Find a better site-aware normalization later.
-    normalized_net_load = net_load_kw / power_scale_kw
+    normalized_net_load = grid_facing_net_load_kw / power_scale_kw
 
     normalized_state_of_charge = (
         (float(state_of_charge) - float(minimum_state_of_charge))
@@ -113,7 +182,7 @@ def build_observation(
     )
     normalized_state_of_charge = min(1.0, max(0.0, normalized_state_of_charge))
 
-    # TODO: ent tariff divided by the biggest tariff in the tariff schedule. not log, later research how good/bad log is.
+    # TODO: current tariff divided by the biggest tariff in the tariff schedule. Not log; later research how good/bad log is.
     normalized_tariff = max(float(tariff_vnd_per_kwh), 0.0) / float(maximum_tariff_vnd_per_kwh)
 
     # TODO BIG JUICY TODO: monthly peak shares the same arbitrary temporary power ruler as net load. Replace this with something principled later.
