@@ -100,6 +100,11 @@ class ActorCritic(nn.Module):
         # the first checkpoint an always-charge policy.
         nn.init.zeros_(self.actor[-1].weight)
         nn.init.zeros_(self.actor[-1].bias)
+        # Reward-normalized BESS returns can be small at startup. A random
+        # value baseline would otherwise dominate the first GAE estimates and
+        # teach the actor from critic noise instead of physical outcomes.
+        nn.init.zeros_(self.critic[-1].weight)
+        nn.init.zeros_(self.critic[-1].bias)
         self.log_std = nn.Parameter(torch.full((1,), float(log_std_init)))
 
     def dist(self, obs):

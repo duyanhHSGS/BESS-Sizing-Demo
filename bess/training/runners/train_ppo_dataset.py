@@ -30,9 +30,9 @@ from bess.forecasting.weather_forecast import build_forecast_bundle, fit_attach_
 
 ROLLOUT_DAYS = 32
 LOG_EVERY_UPDATES = 1
-PPO_ACTOR_LR = 3e-5
+PPO_ACTOR_LR = 3e-4
 PPO_CRITIC_LR = 3e-4
-PPO_INIT_STD = 0.15
+PPO_INIT_STD = 0.60
 
 
 def main() -> None:
@@ -318,7 +318,6 @@ def main() -> None:
         perf["rollout"] += time.perf_counter() - rollout_started
         updates += 1
         update_started = time.perf_counter()
-        agent.anneal_lr(min(1.0, steps / max(1, args.steps)))
         last_value = 0.0 if done else agent.predict_value(obs)
         update_diagnostics = agent.update(buffer, last_value)
         perf["update"] += time.perf_counter() - update_started
