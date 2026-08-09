@@ -27,10 +27,17 @@ SPARSE DEMAND-CHARGE SHAPING:
   no longer produces huge spurious penalty spikes that destabilise the
   value function.
 
-POTENTIAL-BASED SOC SHAPING (Ng et al. 1999  preserves the optimal policy):
-  Phi(s) = usable stored energy * eta_dis * price_mid. The agent receives
-  gamma*Phi(s') - Phi(s) each step, which gives IMMEDIATE credit for
-  storing energy whose payoff (peak discharge) is otherwise ~68 steps away.
+DENSE INVENTORY-VALUE ARBITRAGE REWARD:
+  PPO should learn the factory dispatch pattern without hard-coded clock rules.
+  Battery energy is therefore assigned one constant internal inventory value
+  (VND per stored kWh) derived from cheap-charge and normal-discharge break-even
+  economics, including the configured symmetric wear cost.  Each native step
+  receives actual grid-energy savings plus the change in that inventory value.
+  This makes economically valid cheap charging and normal/peak discharging
+  immediately learnable while making non-cheap grid charging and cheap-period
+  discharging unattractive.  A terminal inventory settlement cancels the net
+  episode inventory change, so total episode reward still matches real energy
+  economics rather than paying the agent for merely ending with a fuller battery.
 
 COUNTERFACTUAL VARIANCE REDUCTION:
   The raw bill is dominated by the policy-independent no-BESS cost of the
@@ -75,7 +82,8 @@ class BESSEnv:
                  steps_per_day: int | None = None,
                  native_timestep_hours: float | None = None,
                  record_trajectory: bool = True,
-                 extra_observation_dimensions: int = 0):
+                 extra_observation_dimensions: int = 0,
+                 reward_mode: str = "legacy_soc_potential"):
         # Native timestep duration is the source of truth. It may represent
         # 15-minute, 1-minute, 0.5-minute, or other day-tiling data.
         configured_timestep_hours = float(getattr(config, "dt", 0.0))
@@ -118,6 +126,9 @@ class BESSEnv:
         )
         self.discount_factor = float(discount_factor)
         self.record_trajectory = bool(record_trajectory)
+        if reward_mode not in {"legacy_soc_potential", "factory_dispatch_v1"}:
+            raise ValueError(f"Unsupported BESS reward_mode: {reward_mode}")
+        self.reward_mode = reward_mode
         # Forecast mode accepts only externally prepared causal predictions.
         # Missing predictions are an error; future actuals are never used here.
         self.forecast_enabled = bool(forecast_enabled)
@@ -150,9 +161,21 @@ class BESSEnv:
         self._state_of_charge_loss_per_discharge_kw = self.native_timestep_hours / (config.eta_dis * config.E_cap)
         self._discharge_power_per_soc_fraction = config.E_cap * config.eta_dis / self.native_timestep_hours
         self._charge_power_per_soc_fraction = config.E_cap / (config.eta_ch * self.native_timestep_hours)
-        # Base stored-energy value used by the SOC shaping reward.
-        # The current tariff is multiplied in later inside step().
-        self._deliverable_energy_kwh_per_soc_fraction = config.E_cap * config.eta_dis
+        # Dense arbitrage teaching signal.  Pick one constant stored-energy
+        # shadow value between the cheap-charge and normal-discharge break-even
+        # values after symmetric throughput wear.  When cheap->normal cycling is
+        # genuinely profitable, both the charge leg and discharge leg therefore
+        # receive positive immediate reward; otherwise the math correctly refuses
+        # to pretend that an unprofitable cycle is good.
+        cheap_charge_break_even = (
+            config.price_off + self.degradation_cost_vnd_per_kwh
+        ) / config.eta_ch
+        normal_discharge_break_even = (
+            config.price_mid - self.degradation_cost_vnd_per_kwh
+        ) * config.eta_dis
+        self._inventory_value_vnd_per_stored_kwh = 0.5 * (
+            cheap_charge_break_even + normal_discharge_break_even
+        )
 
     def _reset_demand_meter_block(self) -> None:
         """Reset the current fixed 30-minute meter integration block."""
@@ -194,6 +217,7 @@ class BESSEnv:
         self.current_day_index = 0
         self.current_timestep_index = 0
         self.state_of_charge = float(initial_state_of_charge if initial_state_of_charge is not None else self.config.SOC_eod)
+        self._episode_initial_state_of_charge = self.state_of_charge
         self.running_monthly_peak_kw = self.initial_running_peak_kw    # running monthly 30-min peak (kW)
         self.previous_grid_import_kw = 0.0               # previous-step grid import (kW)
         self.no_bess_running_monthly_peak_kw = self.initial_running_peak_kw  # counterfactual no-BESS running peak
@@ -393,6 +417,7 @@ class BESSEnv:
         grid_import_kw = net_load_kw + grid_charge_kw - discharge_kw
 
         total_charge_kw = grid_charge_kw + pv_charge_kw
+        state_of_charge_before_native_step = self.state_of_charge
         self.state_of_charge = (
             self.state_of_charge
             + total_charge_kw * self._state_of_charge_gain_per_charge_kw
@@ -400,6 +425,11 @@ class BESSEnv:
         )
         # Numerical guard only; project_action already keeps SOC in bounds.
         self.state_of_charge = min(config.SOC_max, max(config.SOC_min, self.state_of_charge))
+        inventory_value_delta_vnd = (
+            (self.state_of_charge - state_of_charge_before_native_step)
+            * config.E_cap
+            * self._inventory_value_vnd_per_stored_kwh
+        )
 
         # --- actual electricity cost -----------------------------------
         electricity_cost_vnd = self.current_day_tariff[timestep_index] * grid_import_kw * self.native_timestep_hours
@@ -473,6 +503,7 @@ class BESSEnv:
             grid_import_kw,
             electricity_cost_vnd,
             battery_energy_cost_delta_vnd,
+            inventory_value_delta_vnd,
             demand_peak_cost_delta_vnd,
             battery_wear_cost_vnd,
             demand_peak_penalty_vnd,
@@ -487,12 +518,10 @@ class BESSEnv:
         every native row.
         """
         state_of_charge_before_action = self.state_of_charge
-        # Save the tariff seen when PPO made this decision. The native-step loop
-        # below may move time forward or even cross midnight.
         decision_tariff_vnd_per_kwh = self.current_day_tariff[self.current_timestep_index]
-
         total_electricity_cost_vnd = 0.0
         total_battery_energy_cost_delta_vnd = 0.0
+        total_inventory_value_delta_vnd = 0.0
         total_demand_peak_cost_delta_vnd = 0.0
         total_battery_wear_cost_vnd = 0.0
         total_demand_peak_penalty_vnd = 0.0
@@ -511,6 +540,7 @@ class BESSEnv:
                 grid_import_kw,
                 electricity_cost_vnd,
                 battery_energy_cost_delta_vnd,
+                inventory_value_delta_vnd,
                 demand_peak_cost_delta_vnd,
                 battery_wear_cost_vnd,
                 demand_peak_penalty_vnd,
@@ -522,6 +552,7 @@ class BESSEnv:
             sum_absolute_battery_power_kw += abs(self._last_battery_power_kw)
             total_electricity_cost_vnd += electricity_cost_vnd
             total_battery_energy_cost_delta_vnd += battery_energy_cost_delta_vnd
+            total_inventory_value_delta_vnd += inventory_value_delta_vnd
             total_demand_peak_cost_delta_vnd += demand_peak_cost_delta_vnd
             total_battery_wear_cost_vnd += battery_wear_cost_vnd
             total_demand_peak_penalty_vnd += demand_peak_penalty_vnd
@@ -530,24 +561,42 @@ class BESSEnv:
             if episode_done:
                 break
 
-        stored_energy_value_vnd_per_soc_fraction = self._deliverable_energy_kwh_per_soc_fraction * decision_tariff_vnd_per_kwh
-        stored_energy_value_before_vnd = (
-            state_of_charge_before_action - self.config.SOC_min
-        ) * stored_energy_value_vnd_per_soc_fraction
-        stored_energy_value_after_vnd = (
-            self.state_of_charge - self.config.SOC_min
-        ) * stored_energy_value_vnd_per_soc_fraction
-        state_of_charge_shaping_reward_vnd = (
-            self.discount_factor * stored_energy_value_after_vnd - stored_energy_value_before_vnd
-        )
+        terminal_inventory_settlement_vnd = 0.0
+        if self.reward_mode == "factory_dispatch_v1":
+            if episode_done:
+                # The dense inventory term only redistributes reward through time.
+                # Settle the episode-level SOC change so PPO cannot earn fake money
+                # merely by finishing with more stored energy than it started with.
+                terminal_inventory_settlement_vnd = -(
+                    (self.state_of_charge - self._episode_initial_state_of_charge)
+                    * self.config.E_cap
+                    * self._inventory_value_vnd_per_stored_kwh
+                )
+            reward_timing_credit_vnd = (
+                total_inventory_value_delta_vnd + terminal_inventory_settlement_vnd
+            )
+        else:
+            stored_energy_value_vnd_per_soc_fraction = (
+                self.config.E_cap
+                * self.config.eta_dis
+                * decision_tariff_vnd_per_kwh
+            )
+            stored_energy_value_before_vnd = (
+                state_of_charge_before_action - self.config.SOC_min
+            ) * stored_energy_value_vnd_per_soc_fraction
+            stored_energy_value_after_vnd = (
+                self.state_of_charge - self.config.SOC_min
+            ) * stored_energy_value_vnd_per_soc_fraction
+            reward_timing_credit_vnd = (
+                self.discount_factor * stored_energy_value_after_vnd
+                - stored_energy_value_before_vnd
+            )
 
         reward = (
-            -(
-                total_battery_energy_cost_delta_vnd
-                + total_demand_peak_cost_delta_vnd
-                + total_battery_wear_cost_vnd
-            )
-            + state_of_charge_shaping_reward_vnd
+            -total_battery_energy_cost_delta_vnd
+            - total_demand_peak_cost_delta_vnd
+            - total_battery_wear_cost_vnd
+            + reward_timing_credit_vnd
         ) / REWARD_SCALE_VND
 
         return next_observation, reward, episode_done, {
@@ -559,7 +608,13 @@ class BESSEnv:
             "deg_cost": total_battery_wear_cost_vnd,
             "peak_pen": total_demand_peak_penalty_vnd,
             "peak_pen_nb": total_no_bess_peak_penalty_vnd,
-            "shaping": state_of_charge_shaping_reward_vnd,
+            # Compatibility key retained for existing diagnostics.  In the new
+            # PPO factory reward it is the inventory timing credit; legacy users
+            # still receive the historical gamma/SOC potential value here.
+            "shaping": reward_timing_credit_vnd,
+            "inventory_delta": total_inventory_value_delta_vnd,
+            "inventory_terminal_settlement": terminal_inventory_settlement_vnd,
+            "inventory_value_vnd_per_stored_kwh": self._inventory_value_vnd_per_stored_kwh,
             "native_rows": native_samples_processed,
             "d_run": self.running_monthly_peak_kw,
             "throughput_kwh": battery_throughput_kwh,

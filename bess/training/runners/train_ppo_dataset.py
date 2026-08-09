@@ -148,6 +148,7 @@ def main() -> None:
         control_interval_minutes=args.control_dt_minutes,
         forecast_enabled=args.obs_variant == "fc",
         degradation_cost_vnd_per_kwh=battery_wear_cost,
+        reward_mode="factory_dispatch_v1",
     )
     learner_device = resolve_ppo_device(args.device)
     agent = PPOAgent(
@@ -165,6 +166,8 @@ def main() -> None:
         "obs_variant": args.obs_variant,
         "obs_dim": env.observation_dimensions,
         "battery_wear_cost": battery_wear_cost,
+        "reward_mode": env.reward_mode,
+        "inventory_value_vnd_per_stored_kwh": env._inventory_value_vnd_per_stored_kwh,
         "d_run_init_kw": d_run0,
         "gamma": gamma,
         "lambda": args.lambda_value,
@@ -212,7 +215,11 @@ def main() -> None:
             "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
         },
         "battery": {"e_cap_kwh": args.e_cap, "p_rated_kw": args.p_rated},
-        "economics": {"battery_wear_cost": battery_wear_cost},
+        "economics": {
+            "battery_wear_cost": battery_wear_cost,
+            "reward_mode": env.reward_mode,
+            "inventory_value_vnd_per_stored_kwh": env._inventory_value_vnd_per_stored_kwh,
+        },
         "training": {
             "requested_steps": args.steps,
             "seed": args.seed,
