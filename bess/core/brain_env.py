@@ -20,6 +20,28 @@
 #   - 1.0 = yes, 0.0 = no.
 #
 # TOTAL: 7 numbers go into the brain.
+#
+# WHAT THIS BESS BRAIN CAN DO — ONE BABY LEVER
+#
+# The brain outputs ONE action number from -1.0 to +1.0.
+#   -1.0 = ask for maximum charging
+#    0.0 = do nothing
+#   +1.0 = ask for maximum discharging
+#
+# Requested battery power = action * battery rated power.
+# Example with a 450 kW battery:
+#   action -1.0 -> requested power -450 kW (charge)
+#   action -0.5 -> requested power -225 kW (charge)
+#   action  0.0 -> requested power    0 kW (nap)
+#   action +0.5 -> requested power +225 kW (discharge)
+#   action +1.0 -> requested power +450 kW (discharge)
+#
+# BIG JUICY TODO — PHYSICS POLICE DOES NOT EXIST YET:
+# This is only what the brain REQUESTS, not guaranteed actual battery power.
+# Later, add physical limits for SOC min/max, charge/discharge efficiency,
+# available energy, rated power behavior, timestep energy conversion, grid export,
+# and any other real battery constraints. DO NOT silently call requested power actual power.
+#
 # This file is a standalone BESS brain playground and is NOT wired into the project.
 # ============================================================
 
@@ -29,9 +51,27 @@ import math
 
 
 OBSERVATION_DIM = 7
+ACTION_DIM = 1
+ACTION_MIN = -1.0
+ACTION_MAX = 1.0
 
 # TODO BIG JUICY TODO: 1000 kW is an arbitrary temporary ruler. Replace this with a normalization rule that is principled for the site/data and does not silently erase large values.
 POWER_SCALE_KW = 1000.0
+
+
+def action_to_requested_battery_power_kw(action: float, battery_power_kw: float) -> float:
+    """Turn the brain's one action into a requested battery power in kW.
+
+    Negative = charge, zero = idle, positive = discharge.
+    This function deliberately does NOT apply battery physics yet.
+    """
+    # TODO: check at init.
+    if battery_power_kw <= 0.0:
+        raise ValueError("battery_power_kw must be greater than 0")
+    # TODO: should this exist when learner use tanh?
+    clipped_action = min(ACTION_MAX, max(ACTION_MIN, float(action)))
+    return clipped_action * float(battery_power_kw)
+
 
 def build_observation(
     *,
