@@ -16,7 +16,7 @@ from bess.evaluation.benchmark import (
     _day_energy_cost,
     _demand_charge,
     _month_peaks,
-    _month_group_key,
+    _month_start_day,
     _rounded_series,
     _rolling_30_minute_average,
     _to_float,
@@ -39,10 +39,8 @@ from bess.core.common import (  # noqa: E402
     ensure_inside_directory,
     load_system_config,
     score_month,
-    score_operating_month,
 )
 from bess.core.timebase import dt_from_steps_per_day, steps_per_day_from_dt
-from bess.core.bess_env import normal_observation_compatibility_error
 from bess.agents.grepo_agent import GREPOAgent  # noqa: E402
 from bess.agents.grepro_agent import GREPROAgent  # noqa: E402
 from bess.agents.ppo_agent import PPOAgent  # noqa: E402
@@ -111,10 +109,6 @@ def build_dispatch_config(parameters: dict[str, Any], e_cap_kwh: float, p_rated_
         {
             "E_cap_kWh": e_cap_kwh,
             "P_rated_kW": p_rated_kw,
-            "battery_wear_cost_vnd_per_kwh": _to_float(
-                parameters.get("battery_wear_cost"),
-                base.battery_wear_cost_vnd_per_kwh,
-            ),
             "eta_ch": _to_float(parameters.get("charge_efficiency"), base.eta_ch),
             "eta_dis": _to_float(parameters.get("discharge_efficiency"), base.eta_dis),
             "soc_min": _to_float(parameters.get("minimum_soc"), base.SOC_min),
@@ -155,9 +149,6 @@ def load_policy(checkpoint_name: str, checkpoint_dir: Path = CHECKPOINT_DIR):
         raise DispatchRunWarning(f"{checkpoint_name}: GRPO is not implemented in this repo yet")
     if algo not in {"ppo", "ppo2", "grepo", "grepro", "pro"}:
         raise DispatchRunWarning(f"{checkpoint_name}: unsupported checkpoint algorithm {algo}")
-    observation_error = normal_observation_compatibility_error(algo, meta)
-    if observation_error:
-        raise DispatchRunWarning(f"{checkpoint_name}: {observation_error}")
     sampling_fields = {
         "native_dt_minutes",
         "control_dt_minutes",
@@ -170,19 +161,19 @@ def load_policy(checkpoint_name: str, checkpoint_dir: Path = CHECKPOINT_DIR):
         )
 
     if algo == "ppo":
-        obs_dim = int(meta["obs_dim"])
+        obs_dim = int(meta.get("obs_dim") or (17 if meta.get("obs_variant") == "fc" else 13))
         agent = PPOAgent(obs_dim=obs_dim)
     elif algo == "ppo2":
         obs_dim = int(meta.get("obs_dim") or 17)
         agent = PPO2InferenceAgent(obs_dim=obs_dim)
     elif algo == "pro":
-        obs_dim = int(meta["obs_dim"])
+        obs_dim = int(meta.get("obs_dim") or (17 if meta.get("obs_variant") == "fc" else 13))
         agent = PROAgent(obs_dim=obs_dim)
     else:
         import torch
 
         raw = torch.load(path, map_location="cpu")
-        obs_dim = int(raw.get("obs_dim") or meta["obs_dim"])
+        obs_dim = int(raw.get("obs_dim") or meta.get("obs_dim") or 13)
         agent_class = GREPROAgent if algo == "grepro" else GREPOAgent
         agent = agent_class(
             obs_dim=obs_dim,
@@ -283,19 +274,6 @@ def run_policy_dispatch(
     except ValueError as exc:
         raise DispatchRunWarning(f"{checkpoint_name}: {exc}") from exc
     cfg = build_dispatch_config(parameters, float(e_cap), float(p_rated))
-    learned_wear = meta.get("battery_wear_cost")
-    if learned_wear is not None:
-        try:
-            learned_wear_value = float(learned_wear)
-        except (TypeError, ValueError):
-            learned_wear_value = None
-        if learned_wear_value is not None and abs(
-            learned_wear_value - cfg.battery_wear_cost_vnd_per_kwh
-        ) > 1e-9:
-            warnings.append(
-                f"{checkpoint_name}: learned with battery wear {learned_wear_value:g} "
-                f"VND/kWh; current evaluation uses {cfg.battery_wear_cost_vnd_per_kwh:g} VND/kWh"
-            )
     month = month or dataset_to_month(selected_data_path(parameters))
     expected_native_dt = float(meta["native_dt_minutes"])
     actual_native_dt = cfg.dt * 60.0
@@ -325,9 +303,7 @@ def run_policy_dispatch(
             ),
         )
     else:
-        kpi = score_operating_month(
-            rollout["p_grid_days"], rollout["p_bess_days"], cfg, month.days
-        )
+        kpi = score_month(rollout["p_grid_days"], cfg, month.days)
     return {
         "policy": checkpoint_name,
         "algo": algo,
@@ -407,9 +383,7 @@ def run_policies(
                 },
                 "warnings": [],
                 "days": days,
-                "kpi": score_operating_month(
-                    rollout["p_grid_days"], rollout["p_bess_days"], cfg, month.days
-                ),
+                "kpi": score_month(rollout["p_grid_days"], cfg, month.days),
             }
             continue
         try:
@@ -456,21 +430,11 @@ def policy_result_to_days(
         days.append(day_row)
     month_peaks = _month_peaks(days, cfg.dt)
     for day_row in days:
-        month_peak = month_peaks.get(_month_group_key(day_row))
+        month_peak = month_peaks.get(_month_start_day(day_row["day_index"]))
         day_row["month_peak"] = month_peak
         day_row["demand_charge_vnd"] = round(_demand_charge(parameters, month_peak["value_kW"])) if month_peak else 0
+        day_row["wear_cost_note"] = "Policy bill excludes battery wear cost."
     _annotate_day_billing(days, parameters, cfg.dt)
-    for day_row, p_bess_values in zip(days, rollout["p_bess_days"]):
-        throughput_kwh = float(np.sum(np.abs(p_bess_values)) * cfg.dt)
-        wear_cost = throughput_kwh * cfg.battery_wear_cost_vnd_per_kwh
-        day_row["battery_throughput_kwh"] = round(throughput_kwh, 3)
-        day_row["wear_cost_vnd"] = round(wear_cost)
-        day_row["operating_bill_with_owner_peak_vnd"] = round(
-            day_row["bill_with_owner_peak_vnd"] + wear_cost
-        )
-        day_row["operating_bill_with_prorated_peak_vnd"] = round(
-            day_row["bill_with_prorated_peak_vnd"] + wear_cost
-        )
     return days
 
 

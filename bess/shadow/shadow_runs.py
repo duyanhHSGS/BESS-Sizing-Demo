@@ -72,9 +72,7 @@ def _conn() -> sqlite3.Connection:
             policy_mtd_peak_kw REAL NOT NULL,
             policy_soc_end_pct REAL,
             policy_violations INTEGER NOT NULL,
-            checkpoint_id TEXT NOT NULL,
-            sadrbc_wear_vnd REAL NOT NULL DEFAULT 0,
-            policy_wear_vnd REAL NOT NULL DEFAULT 0
+            checkpoint_id TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS shadow_telemetry (
             date TEXT PRIMARY KEY,
@@ -95,14 +93,6 @@ def _conn() -> sqlite3.Connection:
         );
         """
     )
-    existing_columns = {
-        row[1] for row in conn.execute("PRAGMA table_info(shadow_days)").fetchall()
-    }
-    for column in ("sadrbc_wear_vnd", "policy_wear_vnd"):
-        if column not in existing_columns:
-            conn.execute(
-                f"ALTER TABLE shadow_days ADD COLUMN {column} REAL NOT NULL DEFAULT 0"
-            )
     return conn
 
 
@@ -458,10 +448,6 @@ def _save_day(index, day, month, cfg, policy, sadrbc, checkpoint_id: str) -> Non
     no_bess_grid = np.maximum(0.0, day.load - day.pv)
     sadrbc_grid = np.maximum(0.0, np.asarray(sadrbc["p_grid_days"][index], dtype=float))
     policy_grid = np.maximum(0.0, np.asarray(policy["p_grid_days"][index], dtype=float))
-    sadrbc_power = np.asarray(sadrbc["p_bess_days"][index], dtype=float)
-    policy_power = np.asarray(policy["p_bess_days"][index], dtype=float)
-    sadrbc_wear = float(np.sum(np.abs(sadrbc_power)) * cfg.dt * cfg.battery_wear_cost_vnd_per_kwh)
-    policy_wear = float(np.sum(np.abs(policy_power)) * cfg.dt * cfg.battery_wear_cost_vnd_per_kwh)
     tariff = tariff_vector_day(cfg, day)
     policy_soc = np.asarray(policy["soc_days"][index], dtype=float)
     sadrbc_soc = np.asarray(sadrbc["soc_days"][index], dtype=float)
@@ -485,16 +471,10 @@ def _save_day(index, day, month, cfg, policy, sadrbc, checkpoint_id: str) -> Non
         float(policy_soc[-1] * 100.0),
         int(sum(violations.values())),
         checkpoint_id,
-        sadrbc_wear,
-        policy_wear,
     )
     with _conn() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO shadow_days "
-            "(date,status,day_type,load_kwh,pv_kwh,nobess_energy_vnd,nobess_day_peak_kw,nobess_mtd_peak_kw,"
-            "sadrbc_energy_vnd,sadrbc_day_peak_kw,sadrbc_mtd_peak_kw,sadrbc_soc_end_pct,"
-            "policy_energy_vnd,policy_day_peak_kw,policy_mtd_peak_kw,policy_soc_end_pct,policy_violations,checkpoint_id,"
-            "sadrbc_wear_vnd,policy_wear_vnd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO shadow_days VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             row,
         )
         trace = {
@@ -515,12 +495,8 @@ def _save_day(index, day, month, cfg, policy, sadrbc, checkpoint_id: str) -> Non
 def _save_skipped(iso: str, checkpoint_id: str, reason: str) -> None:
     with _conn() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO shadow_days "
-            "(date,status,day_type,load_kwh,pv_kwh,nobess_energy_vnd,nobess_day_peak_kw,nobess_mtd_peak_kw,"
-            "sadrbc_energy_vnd,sadrbc_day_peak_kw,sadrbc_mtd_peak_kw,sadrbc_soc_end_pct,"
-            "policy_energy_vnd,policy_day_peak_kw,policy_mtd_peak_kw,policy_soc_end_pct,policy_violations,checkpoint_id,"
-            "sadrbc_wear_vnd,policy_wear_vnd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (iso, "SKIPPED_MISSING_DATA", "?", 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 0, 0, None, 0, checkpoint_id, 0, 0),
+            "INSERT OR REPLACE INTO shadow_days VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (iso, "SKIPPED_MISSING_DATA", "?", 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 0, 0, None, 0, checkpoint_id),
         )
         conn.execute(
             "INSERT OR REPLACE INTO shadow_missing(date,reason) VALUES (?,?)",
@@ -608,12 +584,10 @@ def monthly_report() -> list[dict[str, Any]]:
             }
             for name, prefix in (("nobess", "nobess"), ("sadrbc", "sadrbc"), ("policy", "policy")):
                 energy = sum(row[f"{prefix}_energy_vnd"] for row in ok)
-                wear = 0.0 if name == "nobess" else sum(row[f"{prefix}_wear_vnd"] for row in ok)
                 peak = max(row[f"{prefix}_day_peak_kw"] for row in ok)
                 record[f"{name}_energy_vnd"] = round(energy)
-                record[f"{name}_wear_vnd"] = round(wear)
                 record[f"{name}_peak_kw"] = round(peak, 2)
-                record[f"{name}_bill_vnd"] = round(energy + cfg.T_cap * peak + wear)
+                record[f"{name}_bill_vnd"] = round(energy + cfg.T_cap * peak)
             record["policy_vs_nobess_vnd"] = record["nobess_bill_vnd"] - record["policy_bill_vnd"]
             record["policy_vs_sadrbc_vnd"] = record["sadrbc_bill_vnd"] - record["policy_bill_vnd"]
             record["policy_violations"] = sum(row["policy_violations"] for row in ok)

@@ -10,7 +10,7 @@ from bess.evaluation.benchmark import (
     _group_days,
     _load_rows,
     _month_peaks,
-    _month_group_key,
+    _month_start_day,
     _prices_for_day,
     _rounded_series,
     _rolling_30_minute_average,
@@ -52,9 +52,9 @@ def build_oracle_lp(parameters):
         return _no_battery_result(base_days, parameters, dt)
 
     month_results = []
-    month_keys = sorted({_month_group_key(day) for day in base_days})
-    for month_key in month_keys:
-        month_days = [day for day in base_days if _month_group_key(day) == month_key]
+    month_starts = sorted({_month_start_day(day["day_index"]) for day in base_days})
+    for month_start in month_starts:
+        month_days = [day for day in base_days if _month_start_day(day["day_index"]) == month_start]
         month_results.extend(
             _solve_month(
                 linprog,
@@ -311,7 +311,7 @@ def _build_summary(base_days, oracle_days, parameters, dt):
     oracle_saving = (before_energy + before_demand) - (after_energy + after_demand + wear_cost)
     seer_factor = _clamp(_to_float(parameters.get("billing_real_saving_factor"), 1.0), 0.0, 1.0)
     total_bill = after_energy + after_demand + wear_cost
-    month_count = len({_month_group_key(day) for day in base_days})
+    month_count = len({_month_start_day(day["day_index"]) for day in base_days})
     oracle_annual_saving = _annualized_monthly_saving(base_days, solved_days, parameters, dt)
     seer_annual_saving = max(0.0, oracle_annual_saving) * seer_factor
     sizing_economics = _sizing_economics(
@@ -376,10 +376,10 @@ def _sizing_economics(parameters, oracle_annual_saving, seer_annual_saving, orac
 
 def _annualized_monthly_saving(base_days, oracle_days, parameters, dt):
     oracle_by_day = {day["day_index"]: day for day in oracle_days if day.get("solved")}
-    month_keys = sorted({_month_group_key(day) for day in base_days})
+    month_starts = sorted({_month_start_day(day["day_index"]) for day in base_days})
     monthly_savings = []
-    for month_key in month_keys:
-        month_base = [day for day in base_days if _month_group_key(day) == month_key]
+    for month_start in month_starts:
+        month_base = [day for day in base_days if _month_start_day(day["day_index"]) == month_start]
         month_oracle = [
             oracle_by_day[day["day_index"]]
             for day in month_base
@@ -404,7 +404,7 @@ def _annualized_monthly_saving(base_days, oracle_days, parameters, dt):
 def _attach_month_peaks(days, parameters, dt):
     month_peaks = _month_peaks(days, dt)
     for day in days:
-        day["month_peak"] = month_peaks.get(_month_group_key(day))
+        day["month_peak"] = month_peaks.get(_month_start_day(day["day_index"]))
     _annotate_day_billing(days, parameters, dt)
 
 

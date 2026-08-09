@@ -15,7 +15,7 @@ import numpy as np
 
 from bess.evaluation.baselines import validate_dispatch_sampling
 from bess.core.bess_env import BESSEnv
-from bess.core.common import check_hard_constraints, score_operating_month, tariff_vector_day
+from bess.core.common import check_hard_constraints, score_month, tariff_vector_day
 from bess.dispatch.dispatch_runner import (
     DispatchRunWarning,
     build_dispatch_config,
@@ -102,11 +102,6 @@ class LiveRunSession:
             "sadrbc_v13": [],
             policy_name: [],
         }
-        self.powers: dict[str, list[np.ndarray]] = {
-            "no_bess": [],
-            "sadrbc_v13": [],
-            policy_name: [],
-        }
         self.day_log: list[dict[str, Any]] = []
         self.error: str | None = None
         self.auto_interval: float | None = None
@@ -122,7 +117,7 @@ class LiveRunSession:
         )
         return max(500.0, np.ceil(peak / 500.0) * 500.0)
 
-    def _advance_policy_day(self, day_index: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _advance_policy_day(self, day_index: int) -> tuple[np.ndarray, np.ndarray]:
         done = False
         while not done and self.env.current_day_index == day_index:
             if hasattr(self.agent, "predict_action"):
@@ -133,13 +128,11 @@ class LiveRunSession:
         return (
             np.asarray(self.env.grid_import_history[day_index], dtype=np.float64),
             np.asarray(self.env.state_of_charge_history[day_index], dtype=np.float64),
-            np.asarray(self.env.battery_power_history[day_index], dtype=np.float64),
         )
 
     def _method_kpi(self, method: str, cfg) -> dict[str, float]:
-        return score_operating_month(
+        return score_month(
             self.grids[method],
-            self.powers[method],
             cfg,
             self.month.days[: self.cursor + 1],
         )
@@ -147,18 +140,15 @@ class LiveRunSession:
     def _method_row(self, method: str, grid: np.ndarray, soc: np.ndarray | None, cfg) -> dict:
         tariff = tariff_vector_day(cfg, self.month.days[self.cursor])
         kpi = self._method_kpi(method, cfg)
-        day_wear = float(np.sum(np.abs(self.powers[method][-1])) * cfg.dt) * cfg.battery_wear_cost_vnd_per_kwh
         violations = 0
         if soc is not None:
             checks = check_hard_constraints([grid], [soc], cfg)
             violations = sum(checks.values())
         return {
             "day_energy_cost_vnd": round(float(np.sum(np.maximum(0.0, grid) * tariff) * cfg.dt)),
-            "mtd_total_vnd": round(float(kpi["total_operating_cost_vnd"])),
+            "mtd_total_vnd": round(float(kpi["total_cost_vnd"])),
             "mtd_energy_vnd": round(float(kpi["energy_cost_vnd"])),
             "mtd_demand_vnd": round(float(kpi["demand_cost_vnd"])),
-            "mtd_wear_vnd": round(float(kpi["wear_cost_vnd"])),
-            "day_wear_vnd": round(day_wear),
             "mtd_pmax_kw": round(float(kpi["pmax_month_kw"]), 2),
             "soc_end_pct": None if soc is None else round(float(soc[-1]) * 100.0, 2),
             "violation_days": int(violations),
@@ -176,16 +166,11 @@ class LiveRunSession:
 
             sadrbc_grid = self.sadrbc_rollout.p_grid_days[index]
             sadrbc_soc = self.sadrbc_rollout.soc_days[index]
-            policy_grid, policy_soc, policy_power = self._advance_policy_day(index)
+            policy_grid, policy_soc = self._advance_policy_day(index)
 
             self.grids["no_bess"].append(no_bess_grid)
             self.grids["sadrbc_v13"].append(sadrbc_grid)
             self.grids[self.policy_name].append(policy_grid)
-            self.powers["no_bess"].append(np.zeros_like(no_bess_grid))
-            self.powers["sadrbc_v13"].append(
-                np.asarray(self.sadrbc_rollout.p_bess_days[index], dtype=np.float64)
-            )
-            self.powers[self.policy_name].append(policy_power)
             entry = {
                 "day": index + 1,
                 "day_index": day.day_index,
@@ -256,14 +241,6 @@ class LiveRunSession:
                 "cheap_windows": self.parameters.get("billing_windows_cheap", ""),
                 "expensive_windows": self.parameters.get("billing_windows_expensive", ""),
                 "sunday_no_peak": bool(self.parameters.get("billing_sunday")),
-            },
-            "wear_economics": {
-                "learned_vnd_per_kwh": self.meta.get("battery_wear_cost"),
-                "evaluation_vnd_per_kwh": self.policy_cfg.battery_wear_cost_vnd_per_kwh,
-                "mismatch": self.meta.get("battery_wear_cost") is not None and abs(
-                    float(self.meta["battery_wear_cost"])
-                    - self.policy_cfg.battery_wear_cost_vnd_per_kwh
-                ) > 1e-9,
             },
             "methods": ["no_bess", "sadrbc_v13", self.policy_name],
             "method_labels": {

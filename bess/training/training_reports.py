@@ -20,19 +20,6 @@ CURVE_FIELDS = [
     "active_gate",
     "zero_export_violation_days",
     "soc_violation_days",
-    "approx_kl",
-    "clip_fraction",
-    "ppo_epochs_run",
-    "policy_loss",
-    "value_loss",
-    "entropy",
-    "log_std",
-    "actor_grad_norm",
-    "critic_grad_norm",
-    "adv_raw_std",
-    "explained_variance",
-    "learning_rate",
-    "final_soc_forced_charge_kwh",
 ]
 
 

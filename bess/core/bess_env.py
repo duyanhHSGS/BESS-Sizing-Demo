@@ -1,21 +1,18 @@
 """bess.core.bess_env.py  CMDP environment for reactive or real-forecast BESS dispatch.
 
 Design follows the two-layer framework in CoSoLyThuyet_DRL_BESS_Sizing.html
-(Hu et al. 2026): the 15-input variant sees real-time measurements and the
-state of the current fixed 30-minute demand meter block. The 19-input variant
-adds four externally prepared, causal look-ahead
+(Hu et al. 2026): the 13-input variant sees real-time measurements only.
+The 17-input variant adds four externally prepared, causal look-ahead
 predictions. Both output one continuous action in [-1, 1].
 
-HARD-CONSTRAINT SAFETY / OPERATION PROJECTION (never learned, always enforced):
+HARD-CONSTRAINT SAFETY PROJECTION (never learned, always enforced):
   * zero export : discharge is capped at the net load, so
                   grid[t] = eff_load + cg - d >= 0 for ANY policy output.
   * SOC bounds  : charge/discharge are capped by the energy head-room in
                   [SOC_min, SOC_max] at the current step.
   * P_rated     : |p_bess| <= P_rated on the AC side.
-  * final SOC   : only the minimum price-blind intervention is applied when a
-                  requested action would make required_final_soc unreachable
-                  by the current billing/episode boundary.
-The projection contains feasibility rules only; tariff economics stay learned.
+The RL problem is therefore unconstrained for the learner; the projection
+makes the 4 critical scenarios in CLAUDE.md structurally satisfiable.
 
 SPARSE DEMAND-CHARGE SHAPING:
   The monthly demand charge T_cap * max_b D_b (D = fixed, clock-aligned
@@ -31,10 +28,9 @@ SPARSE DEMAND-CHARGE SHAPING:
   value function.
 
 POTENTIAL-BASED SOC SHAPING (Ng et al. 1999  preserves the optimal policy):
-  Phi(s) = usable stored energy * eta_dis * price_mid. The fixed mid-tariff
-  reference intentionally does not follow the instantaneous TOU price. The
-  agent receives gamma*Phi(s') - Phi(s) each step, which gives immediate credit
-  for stored energy without cancelling the real cheap/normal/expensive signal.
+  Phi(s) = usable stored energy * eta_dis * price_mid. The agent receives
+  gamma*Phi(s') - Phi(s) each step, which gives IMMEDIATE credit for
+  storing energy whose payoff (peak discharge) is otherwise ~68 steps away.
 
 COUNTERFACTUAL VARIANCE REDUCTION:
   The raw bill is dominated by the policy-independent no-BESS cost of the
@@ -48,76 +44,29 @@ COUNTERFACTUAL VARIANCE REDUCTION:
   but shrinks advantage variance by an order of magnitude.
 
 ACTION PROJECTION:
-  The environment enforces feasibility only: SOC bounds, rated power, zero
-  export, and reachability of required_final_soc. Demand/tariff economics are
-  learned from the actual reward instead of being hard-coded into the action.
+  The environment enforces physical feasibility only: SOC bounds, rated power,
+  and zero export. Demand economics are learned from the actual fixed 30-minute
+  meter-block reward instead of being hard-coded as a per-sample peak guard.
 """
 from __future__ import annotations
 
-import calendar
-from datetime import date
-
 import numpy as np
 
-from bess.core.common import billing_month_key, tariff_vector, validate_control_interval_minutes
+from bess.core.common import tariff_vector, validate_control_interval_minutes
 from bess.core.scenario_gen import MonthData
 from bess.core.settings import PPO_GAMMA
 from bess.core.timebase import demand_window_steps, dt_from_steps_per_day, steps_per_day_from_dt
 
-REACTIVE_OBSERVATION_DIM = 15
-FORECAST_OBSERVATION_DIM = 19             # forecast-informed variant (+4 features)
-NORMAL_OBSERVATION_SCHEMA = "bess_meter_aware_v3"
-MIN_REWARD_SCALE_VND = 1.0
-
-
-def normal_observation_compatibility_error(algo: str, meta: dict) -> str | None:
-    """Return why a normal checkpoint cannot use the current BESSEnv contract."""
-    if str(algo).lower() == "ppo2":
-        return None
-    if str(algo).lower() not in {"ppo", "grepo", "grepro", "pro"}:
-        return None
-    if meta.get("observation_schema") != NORMAL_OBSERVATION_SCHEMA:
-        return (
-            f"legacy observation schema; expected {NORMAL_OBSERVATION_SCHEMA}. "
-            "Retrain before deployment"
-        )
-    expected = FORECAST_OBSERVATION_DIM if meta.get("obs_variant") == "fc" else REACTIVE_OBSERVATION_DIM
-    if meta.get("controller") == "sadrbc_residual":
-        expected += 1
-    try:
-        actual = int(meta.get("obs_dim"))
-    except (TypeError, ValueError):
-        return "checkpoint is missing a valid obs_dim; retrain before deployment"
-    if actual != expected:
-        return f"checkpoint obs_dim={actual}, current contract requires {expected}; retrain before deployment"
-    try:
-        learned_wear = float(meta.get("battery_wear_cost"))
-    except (TypeError, ValueError):
-        return "checkpoint is missing a valid battery_wear_cost; retrain before deployment"
-    if not np.isfinite(learned_wear) or learned_wear < 0.0:
-        return "checkpoint battery_wear_cost must be finite and non-negative; retrain before deployment"
-    if str(algo).lower() == "ppo":
-        deployment_acceptance = meta.get("deployment_acceptance_passed")
-        if deployment_acceptance is not True:
-            if deployment_acceptance is False or meta.get("economic_acceptance_passed") is False:
-                return "checkpoint failed held-out economic acceptance; retrain before deployment"
-            return "checkpoint has not completed held-out economic acceptance; deployment is blocked"
-        test_saving = meta.get("test_saving_pct")
-        if test_saving is not None:
-            try:
-                test_saving = float(test_saving)
-            except (TypeError, ValueError):
-                return "checkpoint has invalid test_saving_pct; retrain before deployment"
-            if not np.isfinite(test_saving) or test_saving <= 0.0:
-                return "checkpoint does not beat No-BESS on held-out test economics; retrain before deployment"
-    return None
+REACTIVE_OBSERVATION_DIM = 13
+FORECAST_OBSERVATION_DIM = 17             # forecast-informed variant (+4 features)
+REWARD_SCALE_VND = 1e6          # rewards in millions of VND
 
 
 class BESSEnv:
     """Month-long episode using the selected data resolution."""
 
     def __init__(self, config, reference_power_kw: float = 500.0,
-                 degradation_cost_vnd_per_kwh: float | None = None,
+                 degradation_cost_vnd_per_kwh: float = 50.0,
                  initial_peak_fraction_of_reference: float = 0.6,
                  initial_running_peak_kw: float | None = None,
                  discount_factor: float = PPO_GAMMA,
@@ -158,16 +107,7 @@ class BESSEnv:
         self.samples_per_demand_block = demand_window_steps(self.native_timestep_hours)
         self.config = config
         self.reference_power_kw = float(reference_power_kw)
-        resolved_wear_cost = (
-            getattr(config, "battery_wear_cost_vnd_per_kwh", None)
-            if degradation_cost_vnd_per_kwh is None
-            else degradation_cost_vnd_per_kwh
-        )
-        if resolved_wear_cost is None:
-            raise ValueError("BESS config must provide battery wear cost in VND/kWh")
-        self.degradation_cost_vnd_per_kwh = float(resolved_wear_cost)
-        if not np.isfinite(self.degradation_cost_vnd_per_kwh) or self.degradation_cost_vnd_per_kwh < 0.0:
-            raise ValueError("battery wear cost must be finite and >= 0")
+        self.degradation_cost_vnd_per_kwh = float(degradation_cost_vnd_per_kwh)
 
         # Start the shaping peak below the site's realistic optimum so the agent
         # actually receives a learning signal when it creates a new monthly peak.
@@ -200,8 +140,6 @@ class BESSEnv:
         self.state_of_charge_history: list[np.ndarray] = []
         self.battery_power_history: list[np.ndarray] = []
         self._static_observation_cache: np.ndarray | None = None
-        self._billing_horizon_last_day_index: list[int] = []
-        self._last_final_soc_forced_charge_kw = 0.0
         self._refresh_physics_coefficients()
 
     def _refresh_physics_coefficients(self) -> None:
@@ -212,54 +150,9 @@ class BESSEnv:
         self._state_of_charge_loss_per_discharge_kw = self.native_timestep_hours / (config.eta_dis * config.E_cap)
         self._discharge_power_per_soc_fraction = config.E_cap * config.eta_dis / self.native_timestep_hours
         self._charge_power_per_soc_fraction = config.E_cap / (config.eta_ch * self.native_timestep_hours)
-        # Normalize rewards by the site's own economic scale instead of a fixed
-        # one-million-VND divisor. Demand-charge increments can otherwise be
-        # tens of millions of VND in one sparse step, forcing the unnormalised
-        # critic to chase targets two orders of magnitude larger than ordinary
-        # energy/wear rewards. Positive reward scaling does not change the
-        # economic optimum; it only conditions the learner numerically.
-        self.reward_scale_vnd = max(
-            MIN_REWARD_SCALE_VND,
-            self.reference_power_kw * max(0.0, float(config.T_cap)),
-            self.reference_power_kw * float(config.price_peak) * self.native_timestep_hours,
-        )
-        # Base deliverable-energy quantity used by the fixed-price SOC potential.
+        # Base stored-energy value used by the SOC shaping reward.
+        # The current tariff is multiplied in later inside step().
         self._deliverable_energy_kwh_per_soc_fraction = config.E_cap * config.eta_dis
-
-    def _build_billing_horizon_boundaries(self) -> None:
-        """Precompute the last available day for each contiguous billing month."""
-        days = self.month_data.days if self.month_data is not None else []
-        self._billing_horizon_last_day_index = [0] * len(days)
-        if not days:
-            return
-        last_index = len(days) - 1
-        self._billing_horizon_last_day_index[last_index] = last_index
-        next_key = billing_month_key(days[last_index])
-        for day_index in range(last_index - 1, -1, -1):
-            key = billing_month_key(days[day_index])
-            if key != next_key:
-                last_index = day_index
-                next_key = key
-            self._billing_horizon_last_day_index[day_index] = last_index
-
-    def _minimum_soc_after_current_native_step(self) -> float:
-        """Reachability floor that guarantees the configured final SOC remains possible."""
-        if not self._billing_horizon_last_day_index:
-            return self.config.SOC_min
-        last_day_index = self._billing_horizon_last_day_index[self.current_day_index]
-        future_native_steps = (
-            self.steps_per_day - self.current_timestep_index - 1
-            + (last_day_index - self.current_day_index) * self.steps_per_day
-        )
-        maximum_future_soc_gain = (
-            future_native_steps
-            * self.config.P_rated_nominal
-            * self._state_of_charge_gain_per_charge_kw
-        )
-        return max(
-            self.config.SOC_min,
-            self.config.SOC_eod - maximum_future_soc_gain,
-        )
 
     def _reset_demand_meter_block(self) -> None:
         """Reset the current fixed 30-minute meter integration block."""
@@ -314,11 +207,7 @@ class BESSEnv:
             self.state_of_charge_history = []
             self.battery_power_history = []
         self._reset_demand_meter_block()
-        self._build_billing_horizon_boundaries()
         self._month_progress_per_day = 1.0 / max(1, len(month_data.days))
-        self._current_billing_month_key = (
-            billing_month_key(month_data.days[0]) if month_data.days else None
-        )
         if self.record_trajectory:
             self.state_of_charge_history[0][0] = self.state_of_charge
         self._set_current_day_tariff()
@@ -362,7 +251,7 @@ class BESSEnv:
         observation_cache = np.empty((self.steps_per_day, self.observation_dimensions), dtype=np.float32)
         inverse_reference_power = self._inverse_reference_power
         working_day_flag = 1.0 if current_day.day_type == "working" else 0.0
-        month_progress = self._billing_month_progress(current_day)
+        month_progress = self.current_day_index * self._month_progress_per_day
         time_until_tariff_change, time_since_tariff_change = self._compute_tariff_transition_fractions()
         for timestep_index in range(self.steps_per_day):
             load_kw = current_day.load[timestep_index]
@@ -393,28 +282,9 @@ class BESSEnv:
             # jumped 0.99->0.0 exactly at midnight -- the boundary where the
             # cheap off-peak window begins.
             observation_cache[timestep_index, 12] = time_since_tariff_change[timestep_index]
-            sample_inside_demand_block = timestep_index % self.samples_per_demand_block
-            observation_cache[timestep_index, 13] = (
-                sample_inside_demand_block / (self.samples_per_demand_block - 1)
-                if self.samples_per_demand_block > 1
-                else 0.0
-            )
-            observation_cache[timestep_index, 14] = 0.0
             if self.forecast_enabled:
-                observation_cache[timestep_index, 15:19] = self._get_forecast_features(timestep_index)
+                observation_cache[timestep_index, 13:17] = self._get_forecast_features(timestep_index)
         self._static_observation_cache = observation_cache
-
-    def _billing_month_progress(self, day) -> float:
-        """Calendar-month progress when dated; episode-position fallback otherwise."""
-        date_iso = getattr(day, "date_iso", None)
-        if date_iso:
-            try:
-                parsed = date.fromisoformat(str(date_iso))
-                days_in_month = calendar.monthrange(parsed.year, parsed.month)[1]
-                return (parsed.day - 1) / days_in_month
-            except ValueError:
-                pass
-        return self.current_day_index * self._month_progress_per_day
 
     def _compute_tariff_transition_fractions(self):
         """Per-step (steps-until-next-tariff-change, steps-since-last-change),
@@ -453,11 +323,6 @@ class BESSEnv:
         observation[5] = self.state_of_charge
         observation[8] = self.running_monthly_peak_kw * self._inverse_reference_power
         observation[9] = self.previous_grid_import_kw * self._inverse_reference_power
-        observation[14] = (
-            self._demand_block_grid_import_sum_kw
-            / self.samples_per_demand_block
-            * self._inverse_reference_power
-        )
         self._fill_extra_observation_features(observation, timestep_index)
         return observation
 
@@ -477,39 +342,11 @@ class BESSEnv:
         requested_battery_power_kw = (
             float(np.clip(action, -1.0, 1.0)) * config.P_rated_nominal
         )
-        self._last_final_soc_forced_charge_kw = 0.0
-        minimum_soc_after_step = self._minimum_soc_after_current_native_step()
-        minimum_charge_power_kw = max(
-            0.0,
-            (minimum_soc_after_step - self.state_of_charge)
-            * self._charge_power_per_soc_fraction,
-        )
-        requested_charge_power_kw = max(0.0, -requested_battery_power_kw)
-        if minimum_charge_power_kw > requested_charge_power_kw + 1e-9:
-            # The UI's required_final_soc is an operational feasibility
-            # constraint, not a tariff heuristic. Force only the minimum charge
-            # needed now so the target remains physically reachable later.
-            available_charge_power_kw = max(
-                0.0,
-                (config.SOC_max - self.state_of_charge) * self._charge_power_per_soc_fraction,
-            )
-            forced_total_charge_kw = min(
-                minimum_charge_power_kw,
-                config.P_rated_nominal,
-                available_charge_power_kw,
-            )
-            pv_charge_kw = min(forced_total_charge_kw, pv_surplus_kw)
-            grid_charge_kw = forced_total_charge_kw - pv_charge_kw
-            self._last_final_soc_forced_charge_kw = max(
-                0.0, forced_total_charge_kw - requested_charge_power_kw
-            )
-            return 0.0, grid_charge_kw, pv_charge_kw
 
         if requested_battery_power_kw >= 0.0:  # positive action = discharge
             available_discharge_power_kw = max(
                 0.0,
-                (self.state_of_charge - minimum_soc_after_step)
-                * self._discharge_power_per_soc_fraction,
+                (self.state_of_charge - config.SOC_min) * self._discharge_power_per_soc_fraction,
             )
             discharge_kw = min(
                 requested_battery_power_kw,
@@ -524,7 +361,7 @@ class BESSEnv:
             (config.SOC_max - self.state_of_charge) * self._charge_power_per_soc_fraction,
         )
         requested_charge_power_kw = min(
-            requested_charge_power_kw,
+            -requested_battery_power_kw,
             config.P_rated_nominal,
             available_charge_power_kw,
         )
@@ -625,15 +462,6 @@ class BESSEnv:
             else:
                 if self.record_trajectory:
                     self.state_of_charge_history[self.current_day_index][0] = self.state_of_charge
-                next_billing_month_key = billing_month_key(
-                    self.month_data.days[self.current_day_index]
-                )
-                if next_billing_month_key != self._current_billing_month_key:
-                    # Demand charges restart at each real calendar-month boundary.
-                    # SOC remains physically continuous across months.
-                    self.running_monthly_peak_kw = self.initial_running_peak_kw
-                    self.no_bess_running_monthly_peak_kw = self.initial_running_peak_kw
-                    self._current_billing_month_key = next_billing_month_key
                 self._set_current_day_tariff()
                 self._validate_current_day_forecast()
                 self._build_static_observation_cache()
@@ -659,6 +487,9 @@ class BESSEnv:
         every native row.
         """
         state_of_charge_before_action = self.state_of_charge
+        # Save the tariff seen when PPO made this decision. The native-step loop
+        # below may move time forward or even cross midnight.
+        decision_tariff_vnd_per_kwh = self.current_day_tariff[self.current_timestep_index]
 
         total_electricity_cost_vnd = 0.0
         total_battery_energy_cost_delta_vnd = 0.0
@@ -672,7 +503,6 @@ class BESSEnv:
         native_samples_processed = 0
         battery_throughput_kwh = 0.0
         sum_absolute_battery_power_kw = 0.0
-        final_soc_forced_charge_kwh = 0.0
 
         for _ in range(self.native_samples_per_action):
             (
@@ -690,9 +520,6 @@ class BESSEnv:
             native_samples_processed += 1
             battery_throughput_kwh += abs(self._last_battery_power_kw) * self.native_timestep_hours
             sum_absolute_battery_power_kw += abs(self._last_battery_power_kw)
-            final_soc_forced_charge_kwh += (
-                self._last_final_soc_forced_charge_kw * self.native_timestep_hours
-            )
             total_electricity_cost_vnd += electricity_cost_vnd
             total_battery_energy_cost_delta_vnd += battery_energy_cost_delta_vnd
             total_demand_peak_cost_delta_vnd += demand_peak_cost_delta_vnd
@@ -703,18 +530,11 @@ class BESSEnv:
             if episode_done:
                 break
 
-        # Use one fixed mid-tariff reference for Phi(s). The potential is meant
-        # to make stored energy visible to the learner, not to cancel the actual
-        # cheap/normal/expensive energy-price differences already present in the
-        # monetary reward. A tariff-dependent potential compressed those price
-        # differences and injected large action-independent jumps at TOU changes.
-        stored_energy_value_vnd_per_soc_fraction = (
-            self._deliverable_energy_kwh_per_soc_fraction * self.config.price_mid
-        )
+        stored_energy_value_vnd_per_soc_fraction = self._deliverable_energy_kwh_per_soc_fraction * decision_tariff_vnd_per_kwh
         stored_energy_value_before_vnd = (
             state_of_charge_before_action - self.config.SOC_min
         ) * stored_energy_value_vnd_per_soc_fraction
-        stored_energy_value_after_vnd = 0.0 if episode_done else (
+        stored_energy_value_after_vnd = (
             self.state_of_charge - self.config.SOC_min
         ) * stored_energy_value_vnd_per_soc_fraction
         state_of_charge_shaping_reward_vnd = (
@@ -728,7 +548,7 @@ class BESSEnv:
                 + total_battery_wear_cost_vnd
             )
             + state_of_charge_shaping_reward_vnd
-        ) / self.reward_scale_vnd
+        ) / REWARD_SCALE_VND
 
         return next_observation, reward, episode_done, {
             # Keep these public info keys unchanged so other code does not break.
@@ -743,9 +563,7 @@ class BESSEnv:
             "native_rows": native_samples_processed,
             "d_run": self.running_monthly_peak_kw,
             "throughput_kwh": battery_throughput_kwh,
-            "final_soc_forced_charge_kwh": final_soc_forced_charge_kwh,
             "mean_abs_p_bess_kw": (
                 sum_absolute_battery_power_kw / max(1, native_samples_processed)
             ),
-            "reward_scale_vnd": self.reward_scale_vnd,
         }

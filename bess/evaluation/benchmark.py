@@ -6,7 +6,6 @@ from bess.paths import PROJECT_ROOT
 
 import numpy as np
 
-from bess.core.common import billing_month_key
 from bess.core.timebase import demand_window_steps, fixed_demand_block_averages, fixed_demand_windows
 
 
@@ -62,7 +61,7 @@ def build_benchmark(parameters):
     )
     month_peaks = _month_peaks(days, dt)
     for day in days:
-        day["month_peak"] = month_peaks.get(_month_group_key(day))
+        day["month_peak"] = month_peaks.get(_month_start_day(day["day_index"]))
     _annotate_day_billing(days, parameters, dt)
 
     monthly_peak = max(
@@ -218,11 +217,11 @@ def _demand_charge(parameters, peak_grid_kW):
 def _annotate_day_billing(days, parameters, dt):
     month_counts = {}
     for day in days:
-        month_key = _month_group_key(day)
-        month_counts[month_key] = month_counts.get(month_key, 0) + 1
+        month_start = _month_start_day(day["day_index"])
+        month_counts[month_start] = month_counts.get(month_start, 0) + 1
 
     for day in days:
-        month_key = _month_group_key(day)
+        month_start = _month_start_day(day["day_index"])
         month_peak = day.get("month_peak")
         monthly_demand = _demand_charge(parameters, month_peak["value_kW"]) if month_peak else 0.0
         full_peak_on_owner = (
@@ -230,7 +229,7 @@ def _annotate_day_billing(days, parameters, dt):
             if month_peak and day["day_index"] == month_peak.get("day_index")
             else 0.0
         )
-        prorated_peak = monthly_demand / max(1, month_counts.get(month_key, 1))
+        prorated_peak = monthly_demand / max(1, month_counts.get(month_start, 1))
         energy_bill = _day_energy_cost(day, parameters, dt)
         day["energy_bill_vnd"] = round(energy_bill)
         day["peak_bill_owner_vnd"] = round(full_peak_on_owner)
@@ -328,22 +327,13 @@ def _month_peaks(days, dt):
     if not days:
         return {}
 
-    bounds = {}
-    for day in days:
-        key = _month_group_key(day)
-        day_index = int(day["day_index"])
-        if key not in bounds:
-            bounds[key] = [day_index, day_index]
-        else:
-            bounds[key][0] = min(bounds[key][0], day_index)
-            bounds[key][1] = max(bounds[key][1], day_index)
-
+    last_day_index = days[-1]["day_index"]
     peaks = {}
     for day in days:
-        key = _month_group_key(day)
-        month_start, month_end = bounds[key]
+        month_start = _month_start_day(day["day_index"])
+        month_end = min(month_start + 29, last_day_index)
         best = peaks.setdefault(
-            key,
+            month_start,
             {
                 "value_kW": 0.0,
                 "day_index": None,
@@ -351,9 +341,9 @@ def _month_peaks(days, dt):
                 "time": "00:00",
                 "month_start_day_index": month_start,
                 "month_end_day_index": month_end,
-                "calendar_month": key[1] if key[0] == "calendar" else None,
             },
         )
+        best["month_end_day_index"] = month_end
         for step, value in enumerate(day["rolling_grid"]):
             if value > best["value_kW"]:
                 best.update(
@@ -367,13 +357,7 @@ def _month_peaks(days, dt):
     return peaks
 
 
-def _month_group_key(day):
-    """Compatibility wrapper around the shared canonical billing-month key."""
-    return billing_month_key(day)
-
-
 def _month_start_day(day_index):
-    """Legacy undated-data fallback: group sequential day indexes in blocks of 30."""
     return ((day_index - 1) // 30) * 30 + 1
 
 

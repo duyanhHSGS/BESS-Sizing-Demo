@@ -27,7 +27,6 @@ def _system_default_config():
     return {
         "E_cap_kWh": battery["E_cap_kWh"],
         "P_rated_kW": battery["P_rated_kW"],
-        "battery_wear_cost_vnd_per_kwh": battery["battery_wear_cost_vnd_per_kwh"],
         "eta_ch": battery["eta_ch"],
         "eta_dis": battery["eta_dis"],
         "soc_min": battery["soc_min"],
@@ -73,9 +72,6 @@ class SADRBCConfig:
         # BESS
         self.E_cap   = float(cfg['E_cap_kWh'])
         self.P_rated_nominal = float(cfg['P_rated_kW'])
-        self.battery_wear_cost_vnd_per_kwh = float(cfg['battery_wear_cost_vnd_per_kwh'])
-        if not math.isfinite(self.battery_wear_cost_vnd_per_kwh) or self.battery_wear_cost_vnd_per_kwh < 0.0:
-            raise ValueError("battery wear cost must be finite and >= 0")
         self.eta_ch  = float(cfg['eta_ch'])
         self.eta_dis = float(cfg['eta_dis'])
         self.eta_RT  = self.eta_ch * self.eta_dis

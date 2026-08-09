@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 import torch
 
-from bess.agents.ppo_agent import PPOAgent, _compute_gae, _squashed_log_prob_from_latent
+from bess.agents.ppo_agent import PPOAgent, _squashed_log_prob_from_latent
 
 
 class PPOSquashedActionTests(unittest.TestCase):
@@ -27,20 +27,6 @@ class PPOSquashedActionTests(unittest.TestCase):
         self.assertAlmostEqual(action, math.tanh(2.0), places=6)
         self.assertLess(action, 0.999)
 
-    def test_training_can_use_smaller_actor_lr_and_exploration_std(self):
-        agent = PPOAgent(
-            obs_dim=3,
-            seed=2,
-            device="cpu",
-            actor_lr=3e-5,
-            critic_lr=3e-4,
-            log_std_init=math.log(0.15),
-        )
-        self.assertAlmostEqual(agent.opt.param_groups[0]["lr"], 3e-5, places=12)
-        self.assertAlmostEqual(agent.opt.param_groups[1]["lr"], 3e-4, places=12)
-        self.assertAlmostEqual(float(agent.net.log_std.exp().item()), 0.15, places=6)
-        self.assertAlmostEqual(float(agent.collector_net.log_std.exp().item()), 0.15, places=6)
-
     def test_action_and_log_probability_use_the_same_pre_tanh_sample(self):
         agent = PPOAgent(obs_dim=3, seed=7, device="cpu")
         observation = np.asarray([0.2, -0.3, 0.4], dtype=np.float32)
@@ -59,27 +45,6 @@ class PPOSquashedActionTests(unittest.TestCase):
         self.assertLessEqual(action, 1.0)
         self.assertAlmostEqual(action, math.tanh(latent), places=6)
         self.assertAlmostEqual(log_probability, float(expected_log_probability.item()), places=6)
-
-    def test_gae_does_not_bootstrap_or_leak_across_done_transition(self):
-        rewards = np.asarray([0.0, 1.0, 0.0], dtype=np.float32)
-        values = np.asarray([10.0, 20.0, 999.0], dtype=np.float32)
-        dones = np.asarray([0.0, 1.0, 0.0], dtype=np.float32)
-
-        advantages = _compute_gae(
-            rewards,
-            values,
-            dones,
-            last_value=123.0,
-            gamma=1.0,
-            lam=1.0,
-        )
-
-        # Transition 1 terminates its episode, so value[2] belongs to a fresh
-        # episode and must never affect transitions 0 or 1.
-        self.assertAlmostEqual(float(advantages[1]), 1.0 - 20.0, places=6)
-        self.assertAlmostEqual(float(advantages[0]), 1.0 - 10.0, places=6)
-        # The final non-terminal transition still bootstraps from last_value.
-        self.assertAlmostEqual(float(advantages[2]), 123.0 - 999.0, places=6)
 
 
 if __name__ == "__main__":

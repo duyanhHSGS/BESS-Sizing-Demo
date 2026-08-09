@@ -40,7 +40,6 @@ SYSTEM_CONFIG = {
     "BESS": {
         "E_cap_kWh": float(DEFAULT_PARAMETERS["battery_capacity_kWh"]),
         "P_rated_kW": float(DEFAULT_PARAMETERS["battery_power_limit_kW"]),
-        "battery_wear_cost_vnd_per_kwh": float(DEFAULT_PARAMETERS["battery_wear_cost"]),
         "eta_ch": float(DEFAULT_PARAMETERS["charge_efficiency"]),
         "eta_dis": float(DEFAULT_PARAMETERS["discharge_efficiency"]),
         "soc_min": float(DEFAULT_PARAMETERS["minimum_soc"]),
@@ -73,11 +72,8 @@ SYSTEM_CONFIG = {
     },
 }
 
-# PPO optimizes a finite-horizon monetary bill, so its default discount is 1.0:
-# one VND tomorrow is still one VND in the utility bill. PPO_GAMMA is also used
-# by potential-based SOC shaping, which then telescopes without economically
-# discounting later peak savings.
-PPO_GAMMA = 1.0
+# PPO training defaults. PPO_GAMMA is also used by potential-based SOC shaping.
+PPO_GAMMA = 0.995
 PPO_LAMBDA = 0.97
 PRO_GAMMA = 0.995
 GREPO_GAMMA = 0.995

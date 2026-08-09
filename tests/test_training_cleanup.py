@@ -53,7 +53,6 @@ class SharedTrainingHelpersTests(unittest.TestCase):
             "minimum_soc": 0.10,
             "maximum_soc": 0.90,
             "required_final_soc": 0.50,
-            "battery_wear_cost": 500.0,
         }
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "training_config.json"
@@ -71,7 +70,6 @@ class SharedTrainingHelpersTests(unittest.TestCase):
         self.assertEqual(len(cfg.W2), 60)
         self.assertEqual(cfg.OFF_PEAK_END_STEP, 60)
         self.assertEqual(cfg.T_cap, 0.0)
-        self.assertEqual(cfg.battery_wear_cost_vnd_per_kwh, 500.0)
 
 
 class PPO2LauncherTests(unittest.TestCase):

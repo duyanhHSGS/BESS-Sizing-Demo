@@ -12,7 +12,6 @@ from bess.paths import PROJECT_ROOT
 import bess.evaluation.oracle.oracle_cache as oracle_cache
 from bess.evaluation.benchmark import detect_dt_hours
 from bess.core.common import ensure_inside_directory, validate_control_interval_minutes
-from bess.core.bess_env import NORMAL_OBSERVATION_SCHEMA
 from bess.core.settings import GREPO_GAMMA, GREPRO_GAMMA, PPO_GAMMA, PPO_LAMBDA, PPO2_GAMMA, PPO2_LAM_ENERGY, PPO2_LAM_PEAK, PRO_GAMMA
 from bess.training.training_datasets import (
     DatasetError,
@@ -192,9 +191,8 @@ def _training_tag(
     explicit = sanitize_tag(payload.get("tag", ""))
     if explicit:
         return explicit
-    schema_suffix = "" if algo == "ppo2" else f"_{NORMAL_OBSERVATION_SCHEMA}"
     return sanitize_tag(
-        f"{algo}_{dataset_id}_{obs_variant}_{e_cap:.0f}kwh_{p_rated:.0f}kw_dt{control_dt_minutes}m{schema_suffix}"
+        f"{algo}_{dataset_id}_{obs_variant}_{e_cap:.0f}kwh_{p_rated:.0f}kw_dt{control_dt_minutes}m"
     )
 
 

@@ -12,16 +12,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from bess.agents.ppo_agent import (
-    LOG_STD_MAX,
-    LOG_STD_MIN,
-    PPOAgent,
-    RolloutBuffer,
-    _compute_gae,
-    _sample_squashed,
-    _squashed_log_prob_from_latent,
-)
-from bess.core.settings import PPO_LAMBDA, PRO_GAMMA
+from bess.agents.ppo_agent import PPOAgent, RolloutBuffer
+from bess.core.settings import PPO_GAMMA, PPO_LAMBDA
 
 
 class PROBuffer(RolloutBuffer):
@@ -31,9 +23,9 @@ class PROBuffer(RolloutBuffer):
         super().__init__(size, obs_dim)
         self.a_oracle = np.zeros((size, 1), np.float32)
 
-    def add(self, o, a, lp, r, v, d, latent, a_oracle=0.0):
+    def add(self, o, a, lp, r, v, d, a_oracle=0.0):
         index = self.ptr
-        super().add(o, a, lp, r, v, d, latent)
+        super().add(o, a, lp, r, v, d)
         self.a_oracle[index] = a_oracle
 
     def clear(self):
@@ -49,7 +41,7 @@ class PROAgent(PPOAgent):
         oracle_coef: float = 1.0,
         oracle_coef_decay: float = 0.0,
         lr=3e-4,
-        gamma=PRO_GAMMA,
+        gamma=PPO_GAMMA,
         lam=PPO_LAMBDA,
         clip=0.2,
         epochs=8,
@@ -76,48 +68,41 @@ class PROAgent(PPOAgent):
         self.oracle_coef_decay = float(oracle_coef_decay)
 
     def update(self, buf: PROBuffer, last_val: float) -> dict:
-        """Run exact squashed-PPO updates plus Oracle-action imitation."""
+        """Run PPO updates with an additional Oracle-action MSE loss."""
         n = buf.ptr
-        adv = _compute_gae(
-            buf.rew[:n],
-            buf.val[:n],
-            buf.done[:n],
-            last_val,
-            self.gamma,
-            self.lam,
-        )
+        adv = np.zeros(n, np.float32)
+        gae = 0.0
+        next_val, next_nonterm = last_val, 1.0
+        for i in reversed(range(n)):
+            delta = (
+                buf.rew[i]
+                + self.gamma * next_val * next_nonterm
+                - buf.val[i]
+            )
+            gae = delta + self.gamma * self.lam * next_nonterm * gae
+            adv[i] = gae
+            next_val = buf.val[i]
+            next_nonterm = 1.0 - buf.done[i]
 
         ret = adv + buf.val[:n]
-        adv_raw_std = float(adv.std())
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-        value_variance = float(np.var(ret))
-        explained_variance = (
-            0.0
-            if value_variance < 1e-12
-            else float(1.0 - np.var(ret - buf.val[:n]) / value_variance)
-        )
-
         obs = torch.as_tensor(buf.obs[:n], device=self.device)
-        latent = torch.as_tensor(buf.latent[:n], device=self.device)
+        act = torch.as_tensor(buf.act[:n], device=self.device)
         logp_old = torch.as_tensor(buf.logp[:n], device=self.device)
         adv_t = torch.as_tensor(adv, device=self.device)
         ret_t = torch.as_tensor(ret, device=self.device)
         oracle_t = torch.as_tensor(buf.a_oracle[:n], device=self.device)
 
         indices = np.arange(n)
-        policy_losses = []
-        value_losses = []
-        entropies = []
-        oracle_losses = []
-        clip_fractions = []
-        actor_grad_norms = []
-        critic_grad_norms = []
-        approx_kl = 0.0
-        epochs_run = self.epochs
-
-        for epoch in range(self.epochs):
-            self._rng.shuffle(indices)
-            kl_batches = []
+        totals = {
+            "pi_loss": 0.0,
+            "vf_loss": 0.0,
+            "ent": 0.0,
+            "oracle_loss": 0.0,
+        }
+        update_count = 0
+        for _ in range(self.epochs):
+            np.random.shuffle(indices)
             for start in range(0, n, self.minibatch):
                 batch = torch.as_tensor(
                     indices[start:start + self.minibatch],
@@ -125,15 +110,8 @@ class PROAgent(PPOAgent):
                     device=self.device,
                 )
                 dist = self.net.dist(obs[batch])
-                logp = _squashed_log_prob_from_latent(dist, latent[batch])
-                log_ratio = logp - logp_old[batch]
-                ratio = torch.exp(log_ratio)
-                with torch.no_grad():
-                    kl_batches.append(float(((ratio - 1.0) - log_ratio).mean()))
-                    clip_fractions.append(
-                        float((torch.abs(ratio - 1.0) > self.clip).float().mean())
-                    )
-
+                logp = dist.log_prob(act[batch]).sum(-1)
+                ratio = torch.exp(logp - logp_old[batch])
                 unclipped = ratio * adv_t[batch]
                 clipped = torch.clamp(
                     ratio, 1 - self.clip, 1 + self.clip
@@ -142,10 +120,7 @@ class PROAgent(PPOAgent):
                 vf_loss = (
                     (self.net.value(obs[batch]) - ret_t[batch]) ** 2
                 ).mean()
-                _, entropy_log_probability, _ = _sample_squashed(
-                    dist, deterministic=False
-                )
-                entropy = -entropy_log_probability.mean()
+                entropy = dist.entropy().sum(-1).mean()
                 actor_mean = torch.tanh(self.net.actor(obs[batch]))
                 oracle_loss = ((actor_mean - oracle_t[batch]) ** 2).mean()
                 loss = (
@@ -157,25 +132,14 @@ class PROAgent(PPOAgent):
 
                 self.opt.zero_grad(set_to_none=True)
                 loss.backward()
-                actor_grad_norms.append(
-                    float(nn.utils.clip_grad_norm_(self._actor_parameters, 0.5))
-                )
-                critic_grad_norms.append(
-                    float(nn.utils.clip_grad_norm_(self._critic_parameters, 0.5))
-                )
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.opt.step()
-                with torch.no_grad():
-                    self.net.log_std.clamp_(LOG_STD_MIN, LOG_STD_MAX)
 
-                policy_losses.append(float(pi_loss.detach()))
-                value_losses.append(float(vf_loss.detach()))
-                entropies.append(float(entropy.detach()))
-                oracle_losses.append(float(oracle_loss.detach()))
-
-            approx_kl = float(np.mean(kl_batches)) if kl_batches else 0.0
-            if approx_kl > 1.5 * self.target_kl:
-                epochs_run = epoch + 1
-                break
+                totals["pi_loss"] += pi_loss.detach().item()
+                totals["vf_loss"] += vf_loss.detach().item()
+                totals["ent"] += entropy.detach().item()
+                totals["oracle_loss"] += oracle_loss.detach().item()
+                update_count += 1
 
         current_oracle_coef = self.oracle_coef
         if self.oracle_coef_decay > 0.0 and self.oracle_coef > 0.0:
@@ -183,25 +147,12 @@ class PROAgent(PPOAgent):
                 0.0, self.oracle_coef - self.oracle_coef_decay
             )
 
-        self.diagnostics = {
-            "pi_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,
-            "vf_loss": float(np.mean(value_losses)) if value_losses else 0.0,
-            "ent": float(np.mean(entropies)) if entropies else 0.0,
-            "oracle_loss": float(np.mean(oracle_losses)) if oracle_losses else 0.0,
-            "oracle_coef": current_oracle_coef,
-            "approx_kl": approx_kl,
-            "clip_fraction": float(np.mean(clip_fractions)) if clip_fractions else 0.0,
-            "epochs_run": epochs_run,
-            "log_std": float(self.net.log_std.item()),
-            "actor_grad_norm": float(np.mean(actor_grad_norms)) if actor_grad_norms else 0.0,
-            "critic_grad_norm": float(np.mean(critic_grad_norms)) if critic_grad_norms else 0.0,
-            "adv_raw_std": adv_raw_std,
-            "explained_variance": explained_variance,
-            "learning_rate": float(self.opt.param_groups[0]["lr"]),
-        }
         self._sync_collector()
         buf.clear()
-        return dict(self.diagnostics)
+        denominator = max(1, update_count)
+        return {
+            key: value / denominator for key, value in totals.items()
+        } | {"oracle_coef": current_oracle_coef}
 
     def save(self, path):
         state = {

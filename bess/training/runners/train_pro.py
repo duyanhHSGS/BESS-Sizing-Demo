@@ -23,22 +23,16 @@ from pathlib import Path
 
 import numpy as np
 
-from bess.core.common import RESULTS_DIR, score_month, score_operating_month
+from bess.core.common import RESULTS_DIR, score_month
 from bess.evaluation.benchmark import _rolling_30_minute_average
 from bess.core.scenario_gen import MonthData, DayData
-from bess.core.bess_env import BESSEnv, NORMAL_OBSERVATION_SCHEMA
+from bess.core.bess_env import BESSEnv
 from bess.agents.pro_agent import PROAgent, PROBuffer
 from bess.evaluation.baselines import run_no_bess, run_drl_policy
 from bess.evaluation.oracle.oracle_cache import load_cached_training_grids
-from bess.evaluation.policy_diagnostics import monthly_policy_diagnostics
-from bess.training.training_common import (
-    build_training_bess_config,
-    heldout_calendar_split,
-    load_training_days,
-    score_cached_oracle,
-)
+from bess.training.training_common import build_training_bess_config, load_training_days
 from bess.training.training_reports import write_curve, write_report
-from bess.core.settings import PRO_GAMMA
+from bess.core.settings import PPO_GAMMA
 from bess.forecasting.weather_forecast import build_forecast_bundle, fit_attach_forecasts
 
 VAL_EVERY = 10
@@ -96,7 +90,7 @@ def main():
                     help="Linear decay per update subtracted from oracle_coef "
                          "(default 0 = constant weight). "
                          "e.g. 0.002 reaches zero after 500 updates.")
-    ap.add_argument("--gamma", type=float, default=PRO_GAMMA)
+    ap.add_argument("--gamma", type=float, default=PPO_GAMMA)
     ap.add_argument("--device", choices=("auto", "cpu", "cuda"),
                     default="auto",
                     help="Learner device; rollout stays on CPU.")
@@ -128,12 +122,11 @@ def main():
 
     if args.val_days < 1 or args.test_days < 1:
         raise SystemExit("Validation days and test days must both be at least 1")
-    try:
-        train_days, val_days, test_days, split_meta = heldout_calendar_split(
-            csv_days, args.val_days, args.test_days
+    split_days = args.val_days + args.test_days
+    if len(csv_days) <= split_days:
+        raise SystemExit(
+            f"CSV has {len(csv_days)} days; need more than {split_days}"
         )
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
 
     peak = max(float(d.load.max()) for d in csv_days)
     p_ref = math.ceil(peak / 500.0) * 500.0
@@ -141,9 +134,10 @@ def main():
         max(_rolling_30_minute_average(
             np.maximum(0, d.load - d.pv), cfg.dt
         ), default=0.0)
-        for d in train_days
+        for d in csv_days[:-split_days]
     ]
     d_run0 = 0.5 * float(np.mean(peaks))
+    train_days = csv_days[:-split_days]
 
     # --- forecast model (optional) -----------------------------------------
     forecast_model = None
@@ -161,7 +155,8 @@ def main():
     all_train_indexes = [int(d.day_index) for d in train_days]
     oracle_lookup = _build_oracle_lookup(args.oracle_cache, all_train_indexes)
 
-    val_month = MonthData(days=val_days, source="csv_val")
+    val_month = MonthData(source="csv_val")
+    val_month.days = csv_days[-split_days:-args.test_days]
     tag = args.tag or f"pro_{cfg.E_cap:.0f}kwh_{cfg.P_rated_nominal:.0f}kw"
 
     # --- environment & agent -----------------------------------------------
@@ -172,7 +167,6 @@ def main():
         control_interval_minutes=args.control_dt_minutes,
         forecast_enabled=args.obs_variant == "fc",
         record_trajectory=False,
-        degradation_cost_vnd_per_kwh=cfg.battery_wear_cost_vnd_per_kwh,
     )
     control_probe = make_env()
     native_steps = len(train_days[0].load)
@@ -195,8 +189,6 @@ def main():
         "gamma": args.gamma,
         "obs_variant": args.obs_variant,
         "obs_dim": control_probe.observation_dimensions,
-        "battery_wear_cost": cfg.battery_wear_cost_vnd_per_kwh,
-        "observation_schema": NORMAL_OBSERVATION_SCHEMA,
         "native_dt_minutes": cfg.dt * 60.0,
         "control_dt_minutes": args.control_dt_minutes,
         "oracle_coef": args.oracle_coef,
@@ -217,13 +209,12 @@ def main():
     val_base = score_month(
         run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_month.days
     )["total_cost_vnd"]
-    val_oracle_result = score_cached_oracle(
-        args.oracle_cache,
-        [day.day_index for day in val_month.days],
-        cfg,
-        val_month.days,
+    oracle_grids = load_cached_training_grids(
+        args.oracle_cache, [day.day_index for day in val_month.days]
     )
-    val_oracle = val_oracle_result["total_operating_cost_vnd"]
+    val_oracle = score_month(
+        oracle_grids, cfg, days=val_month.days
+    )["total_cost_vnd"]
 
     curve_path = RESULTS_DIR / f"training_curve_{tag}.csv"
     report_path = RESULTS_DIR / f"training_report_{tag}.json"
@@ -231,21 +222,22 @@ def main():
         "version": 1,
         "status": "running",
         "algorithm": "pro",
-        "observation_schema": NORMAL_OBSERVATION_SCHEMA,
-        "obs_dim": control_probe.observation_dimensions,
-        "battery_wear_cost": cfg.battery_wear_cost_vnd_per_kwh,
-        "economics": {"battery_wear_cost": cfg.battery_wear_cost_vnd_per_kwh},
         "tag": tag,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "dataset": {
             "source": str(args.csv),
             "total_days": len(csv_days),
             "train_days": len(train_days),
-            "validation_days": len(val_days),
-            "test_days": len(test_days),
-            "validation_range": [val_days[0].date_iso, val_days[-1].date_iso],
-            "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
-            "split": split_meta,
+            "validation_days": len(val_month.days),
+            "test_days": args.test_days,
+            "validation_range": [
+                val_month.days[0].date_iso,
+                val_month.days[-1].date_iso,
+            ],
+            "test_range": [
+                csv_days[-args.test_days].date_iso,
+                csv_days[-1].date_iso,
+            ],
         },
         "battery": {"e_cap_kwh": cfg.E_cap, "p_rated_kw": cfg.P_rated_nominal},
         "training": {
@@ -332,29 +324,21 @@ def main():
         else:
             d_run_init = float(rng.uniform(0.5, 0.9) * p_ref)
         env.initial_running_peak_kw = d_run_init
-        obs = env.reset(episode, initial_state_of_charge=soc_init)
+        obs = env.reset(episode, soc_init=soc_init)
         done = False
         decision_idx = 0
         buf.clear()
         while not done:
-            current_obs = obs
-            a, logp, latent, v = agent.act_with_latent(
-                current_obs, deterministic=False
-            )
+            a, logp, v = agent.act(obs, deterministic=False)
             a_oracle = float(oracle_actions[decision_idx])
             obs, reward, done, info = env.step(a)
             native_rows = int(info.get("native_rows", 1))
-            # Store the state that produced this exact squashed action/log-prob.
-            buf.add(
-                current_obs,
-                np.array([a], dtype=np.float32),
-                logp,
-                reward,
-                v,
-                1.0 if done else 0.0,
-                latent,
-                a_oracle,
-            )
+            # Only store one entry per decision; step() handles sub-stepping
+            buf.add(obs if not done else np.zeros_like(obs),
+                    np.array([a], dtype=np.float32),
+                    logp, reward, v,
+                    1.0 if done else 0.0,
+                    a_oracle)
             decision_idx += 1
             steps += 1
             perf["_native_rows"] += native_rows
@@ -386,9 +370,9 @@ def main():
         perf["validation_seconds"] += time.perf_counter() - validation_started
 
         scoring_started = time.perf_counter()
-        val_cost = score_operating_month(
-            res["p_grid_days"], res["p_bess_days"], cfg, days=val_month.days
-        )["total_operating_cost_vnd"]
+        val_cost = score_month(
+            res["p_grid_days"], cfg, days=val_month.days
+        )["total_cost_vnd"]
         gap = (val_cost - val_oracle) / val_oracle * 100
         sav = (val_base - val_cost) / val_base * 100
         perf["scoring_seconds"] += time.perf_counter() - scoring_started
@@ -437,6 +421,7 @@ def main():
             )
 
     # --- final test --------------------------------------------------------
+    test_days = csv_days[-args.test_days:]
     test_month = MonthData(days=test_days, source="csv_test")
     best_agent = PROAgent(
         control_probe.observation_dimensions,
@@ -446,24 +431,24 @@ def main():
         device=args.device,
     )
     best_agent.load(RESULTS_DIR / f"policy_{tag}.pt")
-    val_result = run_drl_policy(val_month, cfg, best_agent, p_ref_kw=p_ref)
     test_result = run_drl_policy(test_month, cfg, best_agent, p_ref_kw=p_ref)
-    test_policy = score_operating_month(
-        test_result["p_grid_days"], test_result["p_bess_days"], cfg, days=test_days
+    test_policy = score_month(
+        test_result["p_grid_days"], cfg, days=test_days
     )
     test_no_bess = score_month(
         run_no_bess(test_month, cfg)["p_grid_days"], cfg, days=test_days
     )
-    test_oracle = score_cached_oracle(
-        args.oracle_cache, [day.day_index for day in test_days], cfg, test_days
+    test_oracle_grids = load_cached_training_grids(
+        args.oracle_cache, [day.day_index for day in test_days]
     )
+    test_oracle = score_month(test_oracle_grids, cfg, days=test_days)
     test_saving = (
-        (test_no_bess["total_cost_vnd"] - test_policy["total_operating_cost_vnd"])
+        (test_no_bess["total_cost_vnd"] - test_policy["total_cost_vnd"])
         / test_no_bess["total_cost_vnd"] * 100
     )
     test_oracle_gap = (
-        (test_policy["total_operating_cost_vnd"] - test_oracle["total_operating_cost_vnd"])
-        / test_oracle["total_operating_cost_vnd"] * 100
+        (test_policy["total_cost_vnd"] - test_oracle["total_cost_vnd"])
+        / test_oracle["total_cost_vnd"] * 100
     )
     best_agent.meta = {
         **best_agent.meta,
@@ -477,25 +462,14 @@ def main():
     report["status"] = "complete"
     report["completed_at"] = datetime.now(timezone.utc).isoformat()
     report["runtime"] = _runtime_snapshot(perf)
-    report["diagnostics"] = {
-        "validation_months": monthly_policy_diagnostics(
-            val_month, val_result, cfg, oracle_days=val_oracle_result["days"],
-            initial_running_peak_kw=d_run0 or 0.0,
-        ),
-        "test_months": monthly_policy_diagnostics(
-            test_month, test_result, cfg, oracle_days=test_oracle["days"],
-            initial_running_peak_kw=d_run0 or 0.0,
-        ),
-    }
     report["test"] = {
-        "policy_cost_vnd": test_policy["total_operating_cost_vnd"],
+        "policy_cost_vnd": test_policy["total_cost_vnd"],
         "no_bess_vnd": test_no_bess["total_cost_vnd"],
-        "oracle_vnd": test_oracle["total_operating_cost_vnd"],
+        "oracle_vnd": test_oracle["total_cost_vnd"],
         "saving_pct": test_saving,
         "oracle_gap_pct": test_oracle_gap,
         "energy_cost_vnd": test_policy["energy_cost_vnd"],
         "demand_cost_vnd": test_policy["demand_cost_vnd"],
-        "wear_cost_vnd": test_policy["wear_cost_vnd"],
         "peak_kw": test_policy["pmax_month_kw"],
     }
     io_started = time.perf_counter()
@@ -504,9 +478,9 @@ def main():
     perf["checkpoint_report_io_seconds"] += time.perf_counter() - io_started
     print(
         f"[pro] TEST {test_days[0].date_iso}->{test_days[-1].date_iso}: "
-        f"{test_policy['total_operating_cost_vnd']/1e6:.1f}M vs no-BESS "
+        f"{test_policy['total_cost_vnd']/1e6:.1f}M vs no-BESS "
         f"{test_no_bess['total_cost_vnd']/1e6:.1f}M -> saving {test_saving:.2f}% | "
-        f"oracle {test_oracle['total_operating_cost_vnd']/1e6:.1f}M -> gap {test_oracle_gap:.2f}% | "
+        f"oracle {test_oracle['total_cost_vnd']/1e6:.1f}M -> gap {test_oracle_gap:.2f}% | "
         f"peak {test_policy['pmax_month_kw']:.1f} kW",
         flush=True,
     )

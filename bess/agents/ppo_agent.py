@@ -13,9 +13,6 @@ from bess.core.settings import PPO_GAMMA, PPO_LAMBDA
 
 torch.set_num_threads(6)
 
-LOG_STD_MIN = -5.0
-LOG_STD_MAX = 2.0
-
 
 def _squashed_log_prob_from_latent(
     distribution: torch.distributions.Normal,
@@ -42,31 +39,6 @@ def _sample_squashed(
     return action, log_probability, latent
 
 
-def _compute_gae(
-    rewards: np.ndarray,
-    values: np.ndarray,
-    dones: np.ndarray,
-    last_value: float,
-    gamma: float,
-    lam: float,
-) -> np.ndarray:
-    """Compute GAE without ever bootstrapping across an episode boundary."""
-    n = len(rewards)
-    advantages = np.zeros(n, np.float32)
-    gae = 0.0
-    for index in reversed(range(n)):
-        nonterminal = 1.0 - float(dones[index])
-        next_value = float(last_value) if index == n - 1 else float(values[index + 1])
-        delta = (
-            float(rewards[index])
-            + gamma * next_value * nonterminal
-            - float(values[index])
-        )
-        gae = delta + gamma * lam * nonterminal * gae
-        advantages[index] = gae
-    return advantages
-
-
 def resolve_ppo_device(device: str = "auto") -> str:
     requested = str(device).lower()
     if requested not in {"auto", "cpu", "cuda"}:
@@ -91,21 +63,11 @@ def _mlp(inp, out, hidden=64):
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim: int, log_std_init: float = -0.5):
+    def __init__(self, obs_dim: int):
         super().__init__()
         self.actor = _mlp(obs_dim, 1)
         self.critic = _mlp(obs_dim, 1)
-        # Start deterministic deployment at physical idle. Exploration still
-        # comes from log_std, but random final-layer bias can no longer make
-        # the first checkpoint an always-charge policy.
-        nn.init.zeros_(self.actor[-1].weight)
-        nn.init.zeros_(self.actor[-1].bias)
-        # Reward-normalized BESS returns can be small at startup. A random
-        # value baseline would otherwise dominate the first GAE estimates and
-        # teach the actor from critic noise instead of physical outcomes.
-        nn.init.zeros_(self.critic[-1].weight)
-        nn.init.zeros_(self.critic[-1].bias)
-        self.log_std = nn.Parameter(torch.full((1,), float(log_std_init)))
+        self.log_std = nn.Parameter(torch.full((1,), -0.5))
 
     def dist(self, obs):
         mean = self.actor(obs)
@@ -140,40 +102,21 @@ class RolloutBuffer:
 class PPOAgent:
     def __init__(self, obs_dim: int, lr=3e-4, gamma=PPO_GAMMA, lam=PPO_LAMBDA,
                  clip=0.2, epochs=8, minibatch=256, ent_coef=3e-3,
-                 vf_coef=0.5, target_kl=0.01, seed=0, device="auto",
-                 actor_lr: float | None = None, critic_lr: float | None = None,
-                 log_std_init: float = -0.5):
+                 vf_coef=0.5, seed=0, device="auto"):
         torch.manual_seed(seed)
-        self._rng = np.random.default_rng(seed)
         self.device = torch.device(resolve_ppo_device(device))
-        resolved_actor_lr = float(lr if actor_lr is None else actor_lr)
-        resolved_critic_lr = float(lr if critic_lr is None else critic_lr)
-        self.actor_lr = resolved_actor_lr
-        self.critic_lr = resolved_critic_lr
-        self.log_std_init = float(log_std_init)
-        self.net = ActorCritic(obs_dim, log_std_init=self.log_std_init).to(self.device)
-        self._actor_parameters = list(self.net.actor.parameters()) + [self.net.log_std]
-        self._critic_parameters = list(self.net.critic.parameters())
-        self.opt = torch.optim.Adam([
-            {"params": self._actor_parameters, "lr": resolved_actor_lr},
-            {"params": self._critic_parameters, "lr": resolved_critic_lr},
-        ])
-        self._base_lrs = [resolved_actor_lr, resolved_critic_lr]
+        self.net = ActorCritic(obs_dim).to(self.device)
+        self.opt = torch.optim.Adam(self.net.parameters(), lr=lr)
         # Keep tiny step-by-step environment inference on CPU. Only large PPO
         # minibatches cross to CUDA, avoiding thousands of tiny PCIe transfers.
         with torch.random.fork_rng(devices=[]):
-            self.collector_net = ActorCritic(
-                obs_dim,
-                log_std_init=self.log_std_init,
-            ).cpu()
+            self.collector_net = ActorCritic(obs_dim).cpu()
         self._sync_collector()
         self.gamma, self.lam, self.clip = gamma, lam, clip
         self.epochs, self.minibatch = epochs, minibatch
         self.ent_coef, self.vf_coef = ent_coef, vf_coef
-        self.target_kl = float(target_kl)
         self.meta = {}          # deployment context (p_ref_kw, obs_variant)
         self.forecast_bundle = None
-        self.diagnostics = {}
 
     @torch.inference_mode()
     def _sync_collector(self):
@@ -183,13 +126,6 @@ class PPOAgent:
         }
         self.collector_net.load_state_dict(state)
         self.collector_net.eval()
-
-    # ------------------------------------------------------------------
-    def anneal_lr(self, progress: float) -> None:
-        """Linearly decay learning rates as training progress moves 0 -> 1."""
-        decay = max(0.0, 1.0 - float(progress))
-        for group, base_lr in zip(self.opt.param_groups, self._base_lrs, strict=True):
-            group["lr"] = base_lr * decay
 
     # ------------------------------------------------------------------
     @torch.inference_mode()
@@ -225,33 +161,20 @@ class PPOAgent:
         action = torch.tanh(self.collector_net.actor(o))
         return float(action.item())
 
-    @torch.inference_mode()
-    def predict_value(self, obs: np.ndarray) -> float:
-        """Critic-only bootstrap value without sampling and perturbing policy RNG."""
-        o = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
-        return float(self.collector_net.value(o).item())
-
     # ------------------------------------------------------------------
     def update(self, buf: RolloutBuffer, last_val: float):
         n = buf.ptr
-        adv = _compute_gae(
-            buf.rew[:n],
-            buf.val[:n],
-            buf.done[:n],
-            last_val,
-            self.gamma,
-            self.lam,
-        )
+        adv = np.zeros(n, np.float32)
+        gae = 0.0
+        next_val, next_nonterm = last_val, 1.0
+        for i in reversed(range(n)):
+            delta = buf.rew[i] + self.gamma * next_val * next_nonterm - buf.val[i]
+            gae = delta + self.gamma * self.lam * next_nonterm * gae
+            adv[i] = gae
+            next_val = buf.val[i]
+            next_nonterm = 1.0 - buf.done[i]
         ret = adv + buf.val[:n]
-        adv_raw_std = float(adv.std())
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-
-        value_variance = float(np.var(ret))
-        explained_variance = (
-            0.0
-            if value_variance < 1e-12
-            else float(1.0 - np.var(ret - buf.val[:n]) / value_variance)
-        )
 
         obs = torch.as_tensor(buf.obs[:n], device=self.device)
         latent = torch.as_tensor(buf.latent[:n], device=self.device)
@@ -260,17 +183,8 @@ class PPOAgent:
         ret_t = torch.as_tensor(ret, device=self.device)
 
         idx = np.arange(n)
-        approx_kl = 0.0
-        stop_epoch = self.epochs
-        policy_losses = []
-        value_losses = []
-        entropies = []
-        clip_fractions = []
-        actor_grad_norms = []
-        critic_grad_norms = []
-        for epoch in range(self.epochs):
-            self._rng.shuffle(idx)
-            kl_batches = []
+        for _ in range(self.epochs):
+            np.random.shuffle(idx)
             for s in range(0, n, self.minibatch):
                 mb = torch.as_tensor(
                     idx[s:s + self.minibatch], dtype=torch.long,
@@ -278,13 +192,7 @@ class PPOAgent:
                 )
                 dist = self.net.dist(obs[mb])
                 logp = _squashed_log_prob_from_latent(dist, latent[mb])
-                log_ratio = logp - logp_old[mb]
-                ratio = torch.exp(log_ratio)
-                with torch.no_grad():
-                    kl_batches.append(float(((ratio - 1.0) - log_ratio).mean()))
-                    clip_fractions.append(
-                        float((torch.abs(ratio - 1.0) > self.clip).float().mean())
-                    )
+                ratio = torch.exp(logp - logp_old[mb])
                 surr1 = ratio * adv_t[mb]
                 surr2 = torch.clamp(ratio, 1 - self.clip, 1 + self.clip) * adv_t[mb]
                 pi_loss = -torch.min(surr1, surr2).mean()
@@ -297,42 +205,10 @@ class PPOAgent:
                 loss = pi_loss + self.vf_coef * v_loss - self.ent_coef * ent
                 self.opt.zero_grad()
                 loss.backward()
-                # Actor and critic do not share a trunk. Clip them separately so
-                # a large sparse demand-charge value error cannot crush the actor
-                # gradient merely by dominating one global gradient norm.
-                actor_grad_norms.append(float(nn.utils.clip_grad_norm_(self._actor_parameters, 0.5)))
-                critic_grad_norms.append(float(nn.utils.clip_grad_norm_(self._critic_parameters, 0.5)))
+                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.opt.step()
-                with torch.no_grad():
-                    self.net.log_std.clamp_(LOG_STD_MIN, LOG_STD_MAX)
-                policy_losses.append(float(pi_loss.detach()))
-                value_losses.append(float(v_loss.detach()))
-                entropies.append(float(ent.detach()))
-
-            approx_kl = float(np.mean(kl_batches)) if kl_batches else 0.0
-            if approx_kl > 1.5 * self.target_kl:
-                stop_epoch = epoch + 1
-                break
-
-        self.diagnostics = {
-            "approx_kl": approx_kl,
-            "clip_fraction": float(np.mean(clip_fractions)) if clip_fractions else 0.0,
-            "epochs_run": stop_epoch,
-            "policy_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,
-            "value_loss": float(np.mean(value_losses)) if value_losses else 0.0,
-            "entropy": float(np.mean(entropies)) if entropies else 0.0,
-            "log_std": float(self.net.log_std.item()),
-            "actor_grad_norm": float(np.mean(actor_grad_norms)) if actor_grad_norms else 0.0,
-            "critic_grad_norm": float(np.mean(critic_grad_norms)) if critic_grad_norms else 0.0,
-            "adv_raw_std": adv_raw_std,
-            "explained_variance": explained_variance,
-            "learning_rate": float(self.opt.param_groups[0]["lr"]),
-            "actor_learning_rate": float(self.opt.param_groups[0]["lr"]),
-            "critic_learning_rate": float(self.opt.param_groups[1]["lr"]),
-        }
         self._sync_collector()
         buf.ptr = 0
-        return dict(self.diagnostics)
 
     # ------------------------------------------------------------------
     # self.meta carries deployment context (e.g. p_ref_kw the observation

@@ -34,11 +34,11 @@ def _case(minutes=15):
 class GREPOInferenceAndMathTests(unittest.TestCase):
     def test_observation_and_network_contracts_are_unchanged(self):
         agent = GREPOAgent(REACTIVE_OBSERVATION_DIM, device="cpu")
-        self.assertEqual(REACTIVE_OBSERVATION_DIM, 15)
-        self.assertEqual(agent.actor[0].in_features, 15)
+        self.assertEqual(REACTIVE_OBSERVATION_DIM, 13)
+        self.assertEqual(agent.actor[0].in_features, 13)
         self.assertEqual(agent.actor[0].out_features, 256)
         self.assertEqual(agent.actor[2].out_features, 128)
-        self.assertEqual(agent.critic[0].in_features, 15)
+        self.assertEqual(agent.critic[0].in_features, 13)
 
     def test_predict_action_matches_deterministic_act(self):
         agent = GREPOAgent(REACTIVE_OBSERVATION_DIM, seed=7, device="cpu")
@@ -112,7 +112,7 @@ class GREPOCollectorParityTests(unittest.TestCase):
         )
         for actual, expected in zip(optimized, scalar):
             np.testing.assert_allclose(
-                actual, expected, rtol=0.0, atol=1e-5
+                actual, expected, rtol=0.0, atol=5e-6
             )
         for actual_env, expected_env in zip(
             agent._group_envs, agent._scalar_reference_envs
@@ -121,13 +121,13 @@ class GREPOCollectorParityTests(unittest.TestCase):
             self.assertAlmostEqual(
                 actual_env.running_monthly_peak_kw,
                 expected_env.running_monthly_peak_kw,
-                delta=1e-5,
+                delta=5e-6,
             )
             np.testing.assert_allclose(
                 actual_env.grid_import_history[0],
                 expected_env.grid_import_history[0],
                 rtol=0.0,
-                atol=1e-4,
+                atol=5e-5,
             )
 
     def test_logging_disabled_preserves_physics_and_rewards(self):
