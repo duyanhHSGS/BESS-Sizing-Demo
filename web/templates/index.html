@@ -872,7 +872,7 @@
           </label>
           <label><span class="field-name">Detected dt (h)<span class="hint" tabindex="0"
                 data-tip="Detected automatically from the selected CSV: dt = 24 hours divided by the number of steps in a normal day.">?</span></span><input
-              class="detected-input" type="number" id="tf-dt" name="dt" step="0.000001" value="{{ dt }}" readonly
+              class="detected-input" type="number" id="tf-dt" name="dt" step="any" value="{{ dt }}" readonly
               aria-readonly="true"></label>
           <button class="primary" type="submit" name="form_action" value="save">Apply CSV</button>
         </div>
@@ -889,18 +889,18 @@
         <div class="row">
           <label><span class="field-name">Battery capacity (kWh)<span class="hint" tabindex="0"
                 data-tip="BatteryCapacity: how much energy the battery can store. A bigger kWh value is like a bigger backpack for saving energy.">?</span></span><input
-              type="number" id="tf-bcap" name="battery_capacity_kWh" value="{{ battery_capacity_kWh }}"></label>
+              type="number" id="tf-bcap" name="battery_capacity_kWh" step="any" value="{{ battery_capacity_kWh }}"></label>
           <label><span class="field-name">Battery power limit (kW)<span class="hint" tabindex="0"
                 data-tip="BatteryPowerLimit: how fast the battery can charge or discharge. kW is the speed, not the storage size.">?</span></span><input
-              type="number" id="tf-bpow" name="battery_power_limit_kW" step="0.5" min="0"
+              type="number" id="tf-bpow" name="battery_power_limit_kW" step="any"
               value="{{ battery_power_limit_kW }}"></label>
           <label><span class="field-name">Charge efficiency<span class="hint" tabindex="0"
                 data-tip="ChargeEfficiency: the fraction of charging energy that actually gets stored. 0.95 means 95% stays and 5% is lost.">?</span></span><input
-              type="number" id="tf-cheff" name="charge_efficiency" step="0.01" min="0" max="1"
+              type="number" id="tf-cheff" name="charge_efficiency" step="any"
               value="{{ charge_efficiency }}"></label>
           <label><span class="field-name">Discharge efficiency<span class="hint" tabindex="0"
                 data-tip="DischargeEfficiency: the fraction of stored energy that comes back out usefully. 0.95 means 95% reaches the load.">?</span></span><input
-              type="number" id="tf-deff" name="discharge_efficiency" step="0.01" min="0" max="1"
+              type="number" id="tf-deff" name="discharge_efficiency" step="any"
               value="{{ discharge_efficiency }}"></label>
           <button id="btn-custom-battery" class="primary" type="submit" name="form_action" value="save">Save this custom
             battery</button>
@@ -923,19 +923,19 @@
         <div class="row">
           <label><span class="field-name">Battery wear cost (VND/kWh throughput)<span class="hint" tabindex="0"
                 data-tip="BatteryWearCost: a small cost for each kWh moved through the battery, representing battery aging from use.">?</span></span><input
-              type="number" id="tf-wear" name="battery_wear_cost" step="1" min="0"
+              type="number" id="tf-wear" name="battery_wear_cost" step="any"
               value="{{ battery_wear_cost }}"></label>
           <label><span class="field-name">Minimum SOC<span class="hint" tabindex="0"
                 data-tip="MinimumSOC: the lowest allowed battery fill level. 0.10 means the battery should not go below 10% full.">?</span></span><input
-              type="number" id="tf-minsoc" name="minimum_soc" step="0.01" min="0" max="1"
+              type="number" id="tf-minsoc" name="minimum_soc" step="any"
               value="{{ minimum_soc }}"></label>
           <label><span class="field-name">Maximum SOC<span class="hint" tabindex="0"
                 data-tip="MaximumSOC: the highest allowed battery fill level. 0.90 means stop charging around 90% full.">?</span></span><input
-              type="number" id="tf-maxsoc" name="maximum_soc" step="0.01" min="0" max="1"
+              type="number" id="tf-maxsoc" name="maximum_soc" step="any"
               value="{{ maximum_soc }}"></label>
           <label><span class="field-name">Required final SOC<span class="hint" tabindex="0"
                 data-tip="RequiredFinalSOC: the minimum battery fill level wanted at the end of the simulated day or horizon.">?</span></span><input
-              type="number" id="tf-finalsoc" name="required_final_soc" step="0.01" min="0" max="1"
+              type="number" id="tf-finalsoc" name="required_final_soc" step="any"
               value="{{ required_final_soc }}"></label>
         </div>
         <div class="info">Load(t) and PV(t) come from the selected CSV columns P_load_kW and P_pv_kW. The detected dt
@@ -968,16 +968,16 @@
         <div class="row">
           <label><span class="field-name">Expensive-hour price (VND/kWh)<span class="hint" tabindex="0"
                 data-tip="EnergyPrice(t) during costly hours. The bill multiplies this price by grid kWh used in those time windows.">?</span></span><input
-              type="number" id="tf-peak" name="billing_expensive" step="10" value="{{ billing_expensive }}"></label>
+              type="number" id="tf-peak" name="billing_expensive" step="any" value="{{ billing_expensive }}"></label>
           <label><span class="field-name">Normal-hour price (VND/kWh)<span class="hint" tabindex="0"
                 data-tip="EnergyPrice(t) during regular hours, used when the time is not cheap or expensive.">?</span></span><input
-              type="number" id="tf-mid" name="billing_normal" step="10" value="{{ billing_normal }}"></label>
+              type="number" id="tf-mid" name="billing_normal" step="any" value="{{ billing_normal }}"></label>
           <label><span class="field-name">Cheap-hour price (VND/kWh)<span class="hint" tabindex="0"
                 data-tip="EnergyPrice(t) during cheap hours. A battery may charge here so it can discharge later.">?</span></span><input
-              type="number" id="tf-off" name="billing_cheap" step="10" value="{{ billing_cheap }}"></label>
+              type="number" id="tf-off" name="billing_cheap" step="any" value="{{ billing_cheap }}"></label>
           <label><span class="field-name">Monthly peak fee (VND/kW/month)<span class="hint" tabindex="0"
                 data-tip="DemandChargeRate: extra monthly charge based on the highest grid demand peak. Lowering this peak is peak shaving.">?</span></span><input
-              type="number" id="tf-tcap" name="billing_peak_penalty" value="{{ billing_peak_penalty }}"></label>
+              type="number" id="tf-tcap" name="billing_peak_penalty" step="any" value="{{ billing_peak_penalty }}"></label>
         </div>
         <div class="row">
           <label><span class="field-name">Expensive-hour windows<span class="hint" tabindex="0"
@@ -992,33 +992,33 @@
         <div class="tariff-visual-controls" aria-label="Daily chart tariff band appearance">
           <label><span class="field-name">Cheap band color</span><input type="color" id="tariff-cheap-color" value="#34d399"></label>
           <label><span class="field-name">Expensive band color</span><input type="color" id="tariff-expensive-color" value="#f87171"></label>
-          <label><span class="field-name">Band strength</span><input type="range" id="tariff-band-strength" min="4" max="30" step="1" value="12"></label>
+          <label><span class="field-name">Band strength</span><input type="number" id="tariff-band-strength" step="any" value="12"></label>
           <output class="tariff-strength-value" id="tariff-strength-value" for="tariff-band-strength">12%</output>
           <small>Chart-only preference saved in this browser; billing math is unchanged.</small>
         </div>
         <div class="row">
           <label><span class="field-name">Battery cell price (VND/kWh)<span class="hint" tabindex="0"
                 data-tip="Capital cost for battery energy capacity. Bigger BatteryCapacity increases this part of project cost.">?</span></span><input
-              type="number" id="tf-ckwh" name="billing_battery_per_kWh" step="100000"
+              type="number" id="tf-ckwh" name="billing_battery_per_kWh" step="any"
               value="{{ billing_battery_per_kWh }}"></label>
           <label><span class="field-name">Inverter/PCS price (VND/kW)<span class="hint" tabindex="0"
                 data-tip="Capital cost for battery power capability. Bigger BatteryPowerLimit increases this part of project cost.">?</span></span><input
-              type="number" id="tf-ckw" name="billing_battery_per_kW" step="100000"
+              type="number" id="tf-ckw" name="billing_battery_per_kW" step="any"
               value="{{ billing_battery_per_kW }}"></label>
           <label><span class="field-name">Yearly maintenance (%)<span class="hint" tabindex="0"
                 data-tip="Yearly upkeep cost as a fraction of battery investment. 0.02 means 2% per year.">?</span></span><input
-              type="number" id="tf-opex" name="billing_yearly_maintain_percentage" step="0.005"
+              type="number" id="tf-opex" name="billing_yearly_maintain_percentage" step="any"
               value="{{ billing_yearly_maintain_percentage }}"></label>
           <label><span class="field-name">Discount rate<span class="hint" tabindex="0"
                 data-tip="Makes future savings count less than money today. 0.08 means an 8% yearly discount rate.">?</span></span><input
-              type="number" id="tf-disc" name="billing_discount_rate" step="0.01"
+              type="number" id="tf-disc" name="billing_discount_rate" step="any"
               value="{{ billing_discount_rate }}"></label>
           <label><span class="field-name">Project years<span class="hint" tabindex="0"
                 data-tip="How many years to evaluate battery costs and savings over.">?</span></span><input
-              type="number" id="tf-years" name="billing_years" step="1" value="{{ billing_years }}"></label>
+              type="number" id="tf-years" name="billing_years" step="any" value="{{ billing_years }}"></label>
           <label><span class="field-name">Real-world savings factor<span class="hint" tabindex="0"
                 data-tip="Reduces ideal oracle savings into realistic expected savings. 0.60 means count 60% of the perfect result.">?</span></span><input
-              type="number" id="tf-real" name="billing_real_saving_factor" step="0.05" min="0.1" max="1"
+              type="number" id="tf-real" name="billing_real_saving_factor" step="any"
               value="{{ billing_real_saving_factor }}"></label>
           <button id="btn-tf-save" class="primary" type="submit" name="form_action" value="save">Save bill and finance
             inputs</button>
@@ -1521,6 +1521,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label>Checkpoint tag <input id="train-tag" size="22" placeholder="auto"></label>
           <button id="btn-train" class="primary" type="button">Start training</button>
           <button id="btn-train-stop" type="button" disabled>Stop</button>
+          <button id="btn-train-copy-settings" type="button">Copy run settings</button>
         </div>
         <div id="train-plan" class="info">Loading datasets...</div>
         <pre id="train-log" class="log"></pre>
@@ -1880,6 +1881,16 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
   </main>
 
   <script>
+    // Numeric inputs are intentionally unrestricted in the UI. Backend/domain
+    // validation still reports values that cannot form a meaningful scenario.
+    document.querySelectorAll('input[type="number"], input[type="range"]').forEach((input) => {
+      input.type = "number";
+      input.removeAttribute("min");
+      input.removeAttribute("max");
+      input.removeAttribute("required");
+      input.step = "any";
+    });
+
     const benchmark = {{ benchmark | tojson }};
     const oracle = {{ oracle | tojson }};
     const candidateOracles = {{ candidate_oracles | tojson }};
@@ -4555,6 +4566,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const trainLog = document.getElementById("train-log");
     const trainButton = document.getElementById("btn-train");
     const trainStopButton = document.getElementById("btn-train-stop");
+    const trainCopySettingsButton = document.getElementById("btn-train-copy-settings");
     const checkpointTableBody = document.getElementById("checkpoint-table-body");
     const trainChart = document.getElementById("train-chart");
     const trainChartCtx = trainChart.getContext("2d");
@@ -4569,6 +4581,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     let selectedCheckpointName = null;
     let selectedCheckpointReport = null;
     let trainCurveMetric = "bill";
+    let activeTrainingRunSettings = null;
     let trainOracleStatusRequest = 0;
     let trainOracleStatusTimer = null;
 
@@ -5041,6 +5054,144 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       events.onerror = () => events.close();
     }
 
+    function buildTrainingRequest() {
+      return {
+        dataset_id: trainDataset.value,
+        algo: trainAlgo.value,
+        battery_wear_cost: Number(document.getElementById("tf-wear").value),
+        obs_variant: trainObservation.value,
+        device: trainDevice.value,
+        e_cap_kwh: Number(trainEcap.value),
+        p_rated_kw: Number(trainPrated.value),
+        val_days: Number(trainValDays.value),
+        test_days: Number(trainTestDays.value),
+        steps: Number(trainSteps.value),
+        gamma: Number(trainGamma.value),
+        lambda: Number(trainLambda.value),
+        iters: Number(trainIters.value),
+        group: Number(trainGroup.value),
+        beta: Number(trainBeta.value),
+        std: Number(trainStd.value),
+        grepo_gamma: Number(trainGrepoGamma.value),
+        grepro_iters: Number(trainGreproIters.value),
+        grepro_group: Number(trainGreproGroup.value),
+        grepro_beta: Number(trainGreproBeta.value),
+        grepro_std: Number(trainGreproStd.value),
+        grepro_gamma: Number(trainGreproGamma.value),
+        grepro_residual_limit: Number(trainGreproResidualLimit.value),
+        grepro_forecast_seed: Number(trainGreproForecastSeed.value),
+        grepro_forecast_load_sigma: Number(trainGreproLoadSigma.value),
+        grepro_forecast_pv_sigma: Number(trainGreproPvSigma.value),
+        pro_iters: Number(trainProIters.value),
+        pro_oracle_coef: Number(trainProOracleCoef.value),
+        pro_oracle_decay: Number(trainProOracleDecay.value),
+        pro_gamma: Number(trainProGamma.value),
+        ppo2_steps: Number(document.getElementById("train-ppo2-steps").value),
+        ppo2_seed: Number(document.getElementById("train-ppo2-seed").value),
+        ppo2_seeds: document.getElementById("train-ppo2-seeds").value.trim(),
+        ppo2_gamma: Number(document.getElementById("train-ppo2-gamma").value),
+        ppo2_lam_energy: Number(document.getElementById("train-ppo2-lam-energy").value),
+        ppo2_lam_peak: document.getElementById("train-ppo2-lam-peak").value.trim(),
+        ppo2_rollout: Number(document.getElementById("train-ppo2-rollout").value),
+        ppo2_eval_every: Number(document.getElementById("train-ppo2-eval-every").value),
+        ppo2_min_month_coverage: Number(document.getElementById("train-ppo2-min-month-coverage").value),
+        ppo2_val_months: Number(document.getElementById("train-ppo2-val-months").value),
+        ppo2_test_months: Number(document.getElementById("train-ppo2-test-months").value),
+        ppo2_actor_lr: Number(document.getElementById("train-ppo2-actor-lr").value),
+        ppo2_critic_lr: Number(document.getElementById("train-ppo2-critic-lr").value),
+        ppo2_init_std: Number(document.getElementById("train-ppo2-init-std").value),
+        ppo2_clip_penalty: Number(document.getElementById("train-ppo2-clip-penalty").value),
+        ppo2_bc_epochs: Number(document.getElementById("train-ppo2-bc-epochs").value),
+        ppo2_clip: Number(document.getElementById("train-ppo2-clip").value),
+        ppo2_epochs: Number(document.getElementById("train-ppo2-epochs").value),
+        ppo2_minibatch: Number(document.getElementById("train-ppo2-minibatch").value),
+        ppo2_ent_coef: Number(document.getElementById("train-ppo2-ent-coef").value),
+        ppo2_vf_coef: Number(document.getElementById("train-ppo2-vf-coef").value),
+        ppo2_target_kl: Number(document.getElementById("train-ppo2-target-kl").value),
+        ppo2_shaping_margin: Number(document.getElementById("train-ppo2-shaping-margin").value),
+        ppo2_aug_load_sigma: Number(document.getElementById("train-ppo2-aug-load-sigma").value),
+        ppo2_aug_pv_sigma: Number(document.getElementById("train-ppo2-aug-pv-sigma").value),
+        ppo2_aug_rho_load: Number(document.getElementById("train-ppo2-aug-rho-load").value),
+        ppo2_aug_rho_pv: Number(document.getElementById("train-ppo2-aug-rho-pv").value),
+        ppo2_bc_lr: Number(document.getElementById("train-ppo2-bc-lr").value),
+        ppo2_bc_minibatch: Number(document.getElementById("train-ppo2-bc-minibatch").value),
+        ppo2_bc_action_clip: Number(document.getElementById("train-ppo2-bc-action-clip").value),
+        ppo2_torch_threads: Number(document.getElementById("train-ppo2-torch-threads").value),
+        control_dt_minutes: selectedControlDt(),
+        tag: trainTag.value.trim(),
+      };
+    }
+
+    function buildTrainingSettingsSnapshot(trainingRequest, run = {}) {
+      const sizingForm = document.querySelector("#tab-sizing-demo form");
+      const sizingSettings = {};
+      if (sizingForm) {
+        for (const [name, value] of new FormData(sizingForm).entries()) {
+          if (Object.prototype.hasOwnProperty.call(sizingSettings, name)) {
+            sizingSettings[name] = Array.isArray(sizingSettings[name])
+              ? [...sizingSettings[name], value]
+              : [sizingSettings[name], value];
+          } else {
+            sizingSettings[name] = value;
+          }
+        }
+      }
+      const selectedDataset = trainDataset.selectedOptions[0];
+      return {
+        schema: "sizing_demo_training_run_settings_v1",
+        captured_at: new Date().toISOString(),
+        run_state: run.run_state || "draft_current_ui",
+        job_id: run.job_id || null,
+        checkpoint: run.checkpoint || null,
+        launch_response: run.launch_response || null,
+        reporting_notes: [
+          "training_request is the exact JSON payload sent to /api/training/start",
+          "inactive-algorithm fields remain in the request but are ignored by the selected runner",
+          "sizing_ui_settings are frozen from the visible Sizing Demo form at capture time",
+        ],
+        training_request: trainingRequest,
+        derived_context: {
+          dataset_label: selectedDataset ? selectedDataset.textContent.trim() : null,
+          dataset_metadata: selectedDataset ? { ...selectedDataset.dataset } : {},
+          native_dt_minutes: selectedNativeDt(),
+          control_dt_minutes: selectedControlDt(),
+          native_rows_per_action: selectedControlDt() / selectedNativeDt(),
+          displayed_plan: trainPlan.textContent.trim(),
+        },
+        sizing_ui_settings: sizingSettings,
+      };
+    }
+
+    async function copyTrainingRunSettings() {
+      const snapshot = activeTrainingRunSettings
+        || buildTrainingSettingsSnapshot(buildTrainingRequest());
+      const text = `Sizing_Demo Training Lab run settings\n\n${JSON.stringify(snapshot, null, 2)}`;
+      const originalLabel = trainCopySettingsButton.textContent;
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const textarea = document.createElement("textarea");
+          textarea.value = text;
+          textarea.style.position = "fixed";
+          textarea.style.opacity = "0";
+          document.body.appendChild(textarea);
+          textarea.select();
+          if (!document.execCommand("copy")) {
+            throw new Error("browser rejected clipboard copy");
+          }
+          textarea.remove();
+        }
+        trainCopySettingsButton.textContent = "Copied!";
+      } catch (error) {
+        trainLog.textContent += `COPY ERROR: ${error.message}\n`;
+        trainCopySettingsButton.textContent = "Copy failed";
+      }
+      window.setTimeout(() => {
+        trainCopySettingsButton.textContent = originalLabel;
+      }, 1600);
+    }
+
     async function startTraining() {
       trainLog.textContent = "";
       trainPoints = [];
@@ -5051,76 +5202,23 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       });
       drawTrainCurve();
       try {
+        const trainingRequest = buildTrainingRequest();
+        const pendingRunSettings = buildTrainingSettingsSnapshot(trainingRequest, {
+          run_state: "launching",
+        });
         const payload = await trainingApi("/api/training/start", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            dataset_id: trainDataset.value,
-            algo: trainAlgo.value,
-            battery_wear_cost: Number(document.getElementById("tf-wear").value),
-            obs_variant: trainObservation.value,
-            device: trainDevice.value,
-            e_cap_kwh: Number(trainEcap.value),
-            p_rated_kw: Number(trainPrated.value),
-            val_days: Number(trainValDays.value),
-            test_days: Number(trainTestDays.value),
-            steps: Number(trainSteps.value),
-            gamma: Number(trainGamma.value),
-            lambda: Number(trainLambda.value),
-            iters: Number(trainIters.value),
-            group: Number(trainGroup.value),
-            beta: Number(trainBeta.value),
-            std: Number(trainStd.value),
-            grepo_gamma: Number(trainGrepoGamma.value),
-            grepro_iters: Number(trainGreproIters.value),
-            grepro_group: Number(trainGreproGroup.value),
-            grepro_beta: Number(trainGreproBeta.value),
-            grepro_std: Number(trainGreproStd.value),
-            grepro_gamma: Number(trainGreproGamma.value),
-            grepro_residual_limit: Number(trainGreproResidualLimit.value),
-            grepro_forecast_seed: Number(trainGreproForecastSeed.value),
-            grepro_forecast_load_sigma: Number(trainGreproLoadSigma.value),
-            grepro_forecast_pv_sigma: Number(trainGreproPvSigma.value),
-            pro_iters: Number(trainProIters.value),
-            pro_oracle_coef: Number(trainProOracleCoef.value),
-            pro_oracle_decay: Number(trainProOracleDecay.value),
-            pro_gamma: Number(trainProGamma.value),
-            ppo2_steps: Number(document.getElementById("train-ppo2-steps").value),
-            ppo2_seed: Number(document.getElementById("train-ppo2-seed").value),
-            ppo2_seeds: document.getElementById("train-ppo2-seeds").value.trim(),
-            ppo2_gamma: Number(document.getElementById("train-ppo2-gamma").value),
-            ppo2_lam_energy: Number(document.getElementById("train-ppo2-lam-energy").value),
-            ppo2_lam_peak: document.getElementById("train-ppo2-lam-peak").value.trim(),
-            ppo2_rollout: Number(document.getElementById("train-ppo2-rollout").value),
-            ppo2_eval_every: Number(document.getElementById("train-ppo2-eval-every").value),
-            ppo2_min_month_coverage: Number(document.getElementById("train-ppo2-min-month-coverage").value),
-            ppo2_val_months: Number(document.getElementById("train-ppo2-val-months").value),
-            ppo2_test_months: Number(document.getElementById("train-ppo2-test-months").value),
-            ppo2_actor_lr: Number(document.getElementById("train-ppo2-actor-lr").value),
-            ppo2_critic_lr: Number(document.getElementById("train-ppo2-critic-lr").value),
-            ppo2_init_std: Number(document.getElementById("train-ppo2-init-std").value),
-            ppo2_clip_penalty: Number(document.getElementById("train-ppo2-clip-penalty").value),
-            ppo2_bc_epochs: Number(document.getElementById("train-ppo2-bc-epochs").value),
-            ppo2_clip: Number(document.getElementById("train-ppo2-clip").value),
-            ppo2_epochs: Number(document.getElementById("train-ppo2-epochs").value),
-            ppo2_minibatch: Number(document.getElementById("train-ppo2-minibatch").value),
-            ppo2_ent_coef: Number(document.getElementById("train-ppo2-ent-coef").value),
-            ppo2_vf_coef: Number(document.getElementById("train-ppo2-vf-coef").value),
-            ppo2_target_kl: Number(document.getElementById("train-ppo2-target-kl").value),
-            ppo2_shaping_margin: Number(document.getElementById("train-ppo2-shaping-margin").value),
-            ppo2_aug_load_sigma: Number(document.getElementById("train-ppo2-aug-load-sigma").value),
-            ppo2_aug_pv_sigma: Number(document.getElementById("train-ppo2-aug-pv-sigma").value),
-            ppo2_aug_rho_load: Number(document.getElementById("train-ppo2-aug-rho-load").value),
-            ppo2_aug_rho_pv: Number(document.getElementById("train-ppo2-aug-rho-pv").value),
-            ppo2_bc_lr: Number(document.getElementById("train-ppo2-bc-lr").value),
-            ppo2_bc_minibatch: Number(document.getElementById("train-ppo2-bc-minibatch").value),
-            ppo2_bc_action_clip: Number(document.getElementById("train-ppo2-bc-action-clip").value),
-            ppo2_torch_threads: Number(document.getElementById("train-ppo2-torch-threads").value),
-            control_dt_minutes: selectedControlDt(),
-            tag: trainTag.value.trim(),
-          }),
+          body: JSON.stringify(trainingRequest),
         });
         trainJobId = payload.job_id;
+        activeTrainingRunSettings = {
+          ...pendingRunSettings,
+          run_state: "launched",
+          job_id: payload.job_id,
+          checkpoint: payload.checkpoint,
+          launch_response: payload,
+        };
         activeTrainingCheckpointName = String(payload.checkpoint).split(/[\\/]/).pop();
         selectedCheckpointName = activeTrainingCheckpointName;
         trainButton.disabled = true;
@@ -5157,6 +5255,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     document.querySelectorAll(".train-ppo2-field input").forEach((input) => input.addEventListener("input", updateTrainPlan));
     trainButton.addEventListener("click", startTraining);
     trainStopButton.addEventListener("click", stopTraining);
+    trainCopySettingsButton.addEventListener("click", copyTrainingRunSettings);
     checkpointTableBody.addEventListener("click", (event) => {
       const row = event.target.closest("[data-checkpoint]");
       if (row) selectTrainingCheckpoint(row.dataset.checkpoint);
