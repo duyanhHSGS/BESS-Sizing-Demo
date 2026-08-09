@@ -4901,6 +4901,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           dataset_id: trainDataset.value,
+          algo: trainAlgo.value,
+          battery_wear_cost: Number(document.getElementById("tf-wear").value),
           e_cap_kwh: Number(trainEcap.value),
           p_rated_kw: Number(trainPrated.value),
           control_dt_minutes: selectedControlDt(),
@@ -5055,6 +5057,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           body: JSON.stringify({
             dataset_id: trainDataset.value,
             algo: trainAlgo.value,
+            battery_wear_cost: Number(document.getElementById("tf-wear").value),
             obs_variant: trainObservation.value,
             device: trainDevice.value,
             e_cap_kwh: Number(trainEcap.value),

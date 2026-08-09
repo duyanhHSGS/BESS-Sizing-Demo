@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import time
 from datetime import date, datetime, timezone
@@ -33,6 +34,37 @@ from bess.forecasting.weather_forecast import build_forecast_bundle, fit_attach_
 
 ROLLOUT_DAYS = 32
 LOG_EVERY_UPDATES = 1
+
+
+def _load_ui_wear_cost(training_config_path: str | Path) -> float:
+    config = json.loads(Path(training_config_path).read_text(encoding="utf-8"))
+    if "battery_wear_cost" not in config:
+        raise SystemExit("PPO training config requires UI battery_wear_cost")
+    wear_cost = float(config["battery_wear_cost"])
+    if not math.isfinite(wear_cost) or wear_cost < 0.0:
+        raise SystemExit("UI battery_wear_cost must be finite and >= 0")
+    return wear_cost
+
+
+def _score_ppo_operating_month(
+    p_grid_days: list[np.ndarray],
+    p_bess_days: list[np.ndarray],
+    cfg,
+    wear_cost_vnd_per_kwh: float,
+    days: list,
+) -> dict:
+    utility = score_month(p_grid_days, cfg, days=days)
+    throughput_kwh = sum(
+        float(np.sum(np.abs(np.asarray(day, dtype=np.float64))) * cfg.dt)
+        for day in p_bess_days
+    )
+    wear_cost_vnd = throughput_kwh * wear_cost_vnd_per_kwh
+    return {
+        **utility,
+        "throughput_kwh": throughput_kwh,
+        "wear_cost_vnd": wear_cost_vnd,
+        "total_operating_cost_vnd": utility["total_cost_vnd"] + wear_cost_vnd,
+    }
 
 
 def main() -> None:
@@ -99,6 +131,7 @@ def main() -> None:
         args.training_config,
         default_billing=args.billing,
     )
+    battery_wear_cost = _load_ui_wear_cost(args.training_config)
 
     tag = args.tag or f"ds_{args.e_cap:.0f}kwh_{args.p_rated:.0f}kw"
     if billing == "tou" and not tag.endswith("_tou"):
@@ -114,6 +147,7 @@ def main() -> None:
         discount_factor=gamma,
         control_interval_minutes=args.control_dt_minutes,
         forecast_enabled=args.obs_variant == "fc",
+        degradation_cost_vnd_per_kwh=battery_wear_cost,
     )
     learner_device = resolve_ppo_device(args.device)
     agent = PPOAgent(
@@ -130,6 +164,7 @@ def main() -> None:
         "p_rated_kw": args.p_rated,
         "obs_variant": args.obs_variant,
         "obs_dim": env.observation_dimensions,
+        "battery_wear_cost": battery_wear_cost,
         "d_run_init_kw": d_run0,
         "gamma": gamma,
         "lambda": args.lambda_value,
@@ -177,6 +212,7 @@ def main() -> None:
             "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
         },
         "battery": {"e_cap_kwh": args.e_cap, "p_rated_kw": args.p_rated},
+        "economics": {"battery_wear_cost": battery_wear_cost},
         "training": {
             "requested_steps": args.steps,
             "seed": args.seed,
@@ -200,6 +236,7 @@ def main() -> None:
         f"[train-ds] {len(days)} days | train {len(train_days)} / "
         f"val {len(val_days)} / test {len(test_days)} | "
         f"gamma {gamma:g} | lambda {args.lambda_value:g} | "
+        f"UI wear {battery_wear_cost:g} VND/kWh | "
         f"learner {learner_device} (requested {args.device}) | "
         f"native dt {csv_dt * 60:g}m | control dt {env.control_interval_minutes:g}m | "
         f"p_ref {p_ref:.0f} | val no-BESS {val_base/1e6:.0f}M, oracle {val_oracle/1e6:.0f}M",
@@ -284,7 +321,10 @@ def main() -> None:
         result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
         perf["validation"] += time.perf_counter() - validation_started
         scoring_started = time.perf_counter()
-        val_cost = score_month(result["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
+        val_cost = _score_ppo_operating_month(
+            result["p_grid_days"], result["p_bess_days"], cfg,
+            battery_wear_cost, val_days,
+        )["total_operating_cost_vnd"]
         perf["scoring"] += time.perf_counter() - scoring_started
         saving = (val_base - val_cost) / val_base * 100
         gap = (val_cost - val_oracle) / val_oracle * 100
@@ -320,7 +360,10 @@ def main() -> None:
 
     if not curve:
         result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
-        val_cost = score_month(result["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
+        val_cost = _score_ppo_operating_month(
+            result["p_grid_days"], result["p_bess_days"], cfg,
+            battery_wear_cost, val_days,
+        )["total_operating_cost_vnd"]
         saving = (val_base - val_cost) / val_base * 100
         gap = (val_cost - val_oracle) / val_oracle * 100
         curve.append({"steps": steps, "val_cost_vnd": val_cost, "oracle_gap_pct": gap, "saving_vs_nobess_pct": saving})
@@ -339,7 +382,11 @@ def main() -> None:
     best_agent = PPOAgent(env.observation_dimensions, device=learner_device)
     best_agent.load(RESULTS_DIR / f"policy_{tag}.pt")
     result = run_drl_policy(test_month, cfg, best_agent, p_ref_kw=p_ref)
-    test_cost = score_month(result["p_grid_days"], cfg, days=test_days)["total_cost_vnd"]
+    test_operating = _score_ppo_operating_month(
+        result["p_grid_days"], result["p_bess_days"], cfg,
+        battery_wear_cost, test_days,
+    )
+    test_cost = test_operating["total_operating_cost_vnd"]
     no_bess_cost = score_month(run_no_bess(test_month, cfg)["p_grid_days"], cfg, days=test_days)["total_cost_vnd"]
     test_saving = (no_bess_cost - test_cost) / no_bess_cost * 100
     best_agent.meta = {**agent.meta, "test_saving_pct": round(test_saving, 2), "trained": date.today().isoformat()}
@@ -350,6 +397,8 @@ def main() -> None:
         "policy_cost_vnd": test_cost,
         "no_bess_vnd": no_bess_cost,
         "saving_pct": test_saving,
+        "wear_cost_vnd": test_operating["wear_cost_vnd"],
+        "throughput_kwh": test_operating["throughput_kwh"],
     }
     write_report(report_path, report)
     print(

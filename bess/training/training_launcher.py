@@ -462,13 +462,19 @@ def training_oracle_parameters(payload: dict, parameters: dict) -> tuple[Path, d
         raise DatasetError("missing dataset_id")
     source = get_dataset_path(dataset_id)
     _control_dt_minutes(payload, source)
-    return source, {
+    oracle_parameters = {
         **parameters,
         "selected_data_csv": source.name,
         "dt": str(detect_dt_hours(source)),
         "battery_capacity_kWh": str(_float(payload, "e_cap_kwh")),
         "battery_power_limit_kW": str(_float(payload, "p_rated_kw")),
     }
+    if str(payload.get("algo", "")).lower() == "ppo":
+        wear_cost = _float(payload, "battery_wear_cost")
+        if not math.isfinite(wear_cost) or wear_cost < 0.0:
+            raise TrainingLaunchError("PPO battery_wear_cost must be finite and >= 0")
+        oracle_parameters["battery_wear_cost"] = str(wear_cost)
+    return source, oracle_parameters
 
 
 def training_oracle_status(payload: dict, parameters: dict) -> dict:
