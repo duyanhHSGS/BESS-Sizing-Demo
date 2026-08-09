@@ -30,6 +30,9 @@ from bess.forecasting.weather_forecast import build_forecast_bundle, fit_attach_
 
 ROLLOUT_DAYS = 32
 LOG_EVERY_UPDATES = 1
+PPO_ACTOR_LR = 3e-5
+PPO_CRITIC_LR = 3e-4
+PPO_INIT_STD = 0.15
 
 
 def main() -> None:
@@ -52,11 +55,20 @@ def main() -> None:
     parser.add_argument("--weather-data", default="")
     parser.add_argument("--forecast-artifact", default="")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--actor-lr", type=float, default=PPO_ACTOR_LR)
+    parser.add_argument("--critic-lr", type=float, default=PPO_CRITIC_LR)
+    parser.add_argument("--init-std", type=float, default=PPO_INIT_STD)
     args = parser.parse_args()
     if not math.isfinite(args.gamma) or not 0.0 < args.gamma <= 1.0:
         raise SystemExit("gamma must be finite and in (0, 1]")
     if not math.isfinite(args.lambda_value) or not 0.0 <= args.lambda_value <= 1.0:
         raise SystemExit("lambda must be finite and in [0, 1]")
+    if not math.isfinite(args.actor_lr) or args.actor_lr <= 0.0:
+        raise SystemExit("actor-lr must be finite and > 0")
+    if not math.isfinite(args.critic_lr) or args.critic_lr <= 0.0:
+        raise SystemExit("critic-lr must be finite and > 0")
+    if not math.isfinite(args.init_std) or args.init_std <= 0.0:
+        raise SystemExit("init-std must be finite and > 0")
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     days = load_training_days(args.csv, weather="csv")
@@ -116,6 +128,9 @@ def main() -> None:
         lam=args.lambda_value,
         seed=args.seed,
         device=learner_device,
+        actor_lr=args.actor_lr,
+        critic_lr=args.critic_lr,
+        log_std_init=math.log(args.init_std),
     )
     assert env.discount_factor == agent.gamma
     agent.meta = {
@@ -135,6 +150,10 @@ def main() -> None:
         "billing_mode": billing,
         "device_requested": args.device,
         "device": learner_device,
+        "actor_learning_rate": args.actor_lr,
+        "critic_learning_rate": args.critic_lr,
+        "initial_action_std": args.init_std,
+        "reward_scale_vnd": env.reward_scale_vnd,
         "train_csv": str(args.csv),
         "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
     }
@@ -187,6 +206,10 @@ def main() -> None:
             "native_steps_per_action": env.native_samples_per_action,
             "device_requested": args.device,
             "device": learner_device,
+            "actor_learning_rate": args.actor_lr,
+            "critic_learning_rate": args.critic_lr,
+            "initial_action_std": args.init_std,
+            "reward_scale_vnd": env.reward_scale_vnd,
         },
         "billing_mode": billing,
         "p_ref_kw": p_ref,
@@ -200,6 +223,8 @@ def main() -> None:
         f"val {len(val_days)} / test {len(test_days)} | "
         f"gamma {gamma:g} | lambda {args.lambda_value:g} | "
         f"learner {learner_device} (requested {args.device}) | "
+        f"actor lr {args.actor_lr:g} | critic lr {args.critic_lr:g} | init std {args.init_std:g} | "
+        f"reward scale {env.reward_scale_vnd/1e6:.1f}M VND | "
         f"native dt {csv_dt * 60:g}m | control dt {env.control_interval_minutes:g}m | "
         f"p_ref {p_ref:.0f} | val no-BESS {val_base/1e6:.0f}M, oracle {val_oracle/1e6:.0f}M",
         flush=True,

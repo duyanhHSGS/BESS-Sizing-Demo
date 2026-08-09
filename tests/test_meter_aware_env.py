@@ -110,6 +110,17 @@ class MeterObservationTests(unittest.TestCase):
             "test_saving_pct": -0.1,
         }))
 
+    def test_reward_scale_uses_site_economic_magnitude(self):
+        cfg, _ = _case(15.0)
+        env = BESSEnv(cfg, reference_power_kw=1000.0)
+        expected = max(
+            1.0,
+            1000.0 * cfg.T_cap,
+            1000.0 * cfg.price_peak * cfg.dt,
+        )
+        self.assertAlmostEqual(env.reward_scale_vnd, expected, places=6)
+        self.assertGreater(env.reward_scale_vnd, 1e6)
+
     def test_wear_cost_is_exact_and_non_negative(self):
         cfg, month = _case(15.0)
         cfg.battery_wear_cost_vnd_per_kwh = 500.0

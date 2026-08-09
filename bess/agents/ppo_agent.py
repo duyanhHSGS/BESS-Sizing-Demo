@@ -91,7 +91,7 @@ def _mlp(inp, out, hidden=64):
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim: int):
+    def __init__(self, obs_dim: int, log_std_init: float = -0.5):
         super().__init__()
         self.actor = _mlp(obs_dim, 1)
         self.critic = _mlp(obs_dim, 1)
@@ -100,7 +100,7 @@ class ActorCritic(nn.Module):
         # the first checkpoint an always-charge policy.
         nn.init.zeros_(self.actor[-1].weight)
         nn.init.zeros_(self.actor[-1].bias)
-        self.log_std = nn.Parameter(torch.full((1,), -0.5))
+        self.log_std = nn.Parameter(torch.full((1,), float(log_std_init)))
 
     def dist(self, obs):
         mean = self.actor(obs)
@@ -135,22 +135,32 @@ class RolloutBuffer:
 class PPOAgent:
     def __init__(self, obs_dim: int, lr=3e-4, gamma=PPO_GAMMA, lam=PPO_LAMBDA,
                  clip=0.2, epochs=8, minibatch=256, ent_coef=3e-3,
-                 vf_coef=0.5, target_kl=0.01, seed=0, device="auto"):
+                 vf_coef=0.5, target_kl=0.01, seed=0, device="auto",
+                 actor_lr: float | None = None, critic_lr: float | None = None,
+                 log_std_init: float = -0.5):
         torch.manual_seed(seed)
         self._rng = np.random.default_rng(seed)
         self.device = torch.device(resolve_ppo_device(device))
-        self.net = ActorCritic(obs_dim).to(self.device)
+        resolved_actor_lr = float(lr if actor_lr is None else actor_lr)
+        resolved_critic_lr = float(lr if critic_lr is None else critic_lr)
+        self.actor_lr = resolved_actor_lr
+        self.critic_lr = resolved_critic_lr
+        self.log_std_init = float(log_std_init)
+        self.net = ActorCritic(obs_dim, log_std_init=self.log_std_init).to(self.device)
         self._actor_parameters = list(self.net.actor.parameters()) + [self.net.log_std]
         self._critic_parameters = list(self.net.critic.parameters())
         self.opt = torch.optim.Adam([
-            {"params": self._actor_parameters, "lr": lr},
-            {"params": self._critic_parameters, "lr": lr},
+            {"params": self._actor_parameters, "lr": resolved_actor_lr},
+            {"params": self._critic_parameters, "lr": resolved_critic_lr},
         ])
-        self._base_lrs = [float(lr), float(lr)]
+        self._base_lrs = [resolved_actor_lr, resolved_critic_lr]
         # Keep tiny step-by-step environment inference on CPU. Only large PPO
         # minibatches cross to CUDA, avoiding thousands of tiny PCIe transfers.
         with torch.random.fork_rng(devices=[]):
-            self.collector_net = ActorCritic(obs_dim).cpu()
+            self.collector_net = ActorCritic(
+                obs_dim,
+                log_std_init=self.log_std_init,
+            ).cpu()
         self._sync_collector()
         self.gamma, self.lam, self.clip = gamma, lam, clip
         self.epochs, self.minibatch = epochs, minibatch
@@ -312,6 +322,8 @@ class PPOAgent:
             "adv_raw_std": adv_raw_std,
             "explained_variance": explained_variance,
             "learning_rate": float(self.opt.param_groups[0]["lr"]),
+            "actor_learning_rate": float(self.opt.param_groups[0]["lr"]),
+            "critic_learning_rate": float(self.opt.param_groups[1]["lr"]),
         }
         self._sync_collector()
         buf.ptr = 0

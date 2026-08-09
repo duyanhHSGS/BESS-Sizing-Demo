@@ -67,7 +67,7 @@ from bess.core.timebase import demand_window_steps, dt_from_steps_per_day, steps
 REACTIVE_OBSERVATION_DIM = 15
 FORECAST_OBSERVATION_DIM = 19             # forecast-informed variant (+4 features)
 NORMAL_OBSERVATION_SCHEMA = "bess_meter_aware_v3"
-REWARD_SCALE_VND = 1e6          # rewards in millions of VND
+MIN_REWARD_SCALE_VND = 1.0
 
 
 def normal_observation_compatibility_error(algo: str, meta: dict) -> str | None:
@@ -212,6 +212,17 @@ class BESSEnv:
         self._state_of_charge_loss_per_discharge_kw = self.native_timestep_hours / (config.eta_dis * config.E_cap)
         self._discharge_power_per_soc_fraction = config.E_cap * config.eta_dis / self.native_timestep_hours
         self._charge_power_per_soc_fraction = config.E_cap / (config.eta_ch * self.native_timestep_hours)
+        # Normalize rewards by the site's own economic scale instead of a fixed
+        # one-million-VND divisor. Demand-charge increments can otherwise be
+        # tens of millions of VND in one sparse step, forcing the unnormalised
+        # critic to chase targets two orders of magnitude larger than ordinary
+        # energy/wear rewards. Positive reward scaling does not change the
+        # economic optimum; it only conditions the learner numerically.
+        self.reward_scale_vnd = max(
+            MIN_REWARD_SCALE_VND,
+            self.reference_power_kw * max(0.0, float(config.T_cap)),
+            self.reference_power_kw * float(config.price_peak) * self.native_timestep_hours,
+        )
         # Base deliverable-energy quantity used by the fixed-price SOC potential.
         self._deliverable_energy_kwh_per_soc_fraction = config.E_cap * config.eta_dis
 
@@ -717,7 +728,7 @@ class BESSEnv:
                 + total_battery_wear_cost_vnd
             )
             + state_of_charge_shaping_reward_vnd
-        ) / REWARD_SCALE_VND
+        ) / self.reward_scale_vnd
 
         return next_observation, reward, episode_done, {
             # Keep these public info keys unchanged so other code does not break.
@@ -736,4 +747,5 @@ class BESSEnv:
             "mean_abs_p_bess_kw": (
                 sum_absolute_battery_power_kw / max(1, native_samples_processed)
             ),
+            "reward_scale_vnd": self.reward_scale_vnd,
         }
