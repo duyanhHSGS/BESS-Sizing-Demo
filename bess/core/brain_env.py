@@ -85,7 +85,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 OBSERVATION_DIM = 7
@@ -801,6 +801,399 @@ def calculate_month_operating_cost_from_history(
         battery_wear_cost_vnd=battery_wear_cost_vnd,
         operating_cost_vnd=operating_cost_vnd,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class BessWorldStepResult:
+    """One timestep in the real world where the battery exists."""
+
+    timestep_index: int
+    physics: PhysicsStepResult
+    meter: ElectricityMeterStepResult
+    cost: OperatingCostStepResult
+
+
+@dataclass(slots=True)
+class BessWorld:
+    """Stateful battery universe: battery physics -> meter -> shared accountant."""
+
+    state_of_charge: float
+    minimum_state_of_charge: float
+    maximum_state_of_charge: float
+    battery_capacity_kwh: float
+    battery_power_kw: float
+    timestep_hours: float
+    charge_efficiency: float
+    discharge_efficiency: float
+    demand_charge_vnd_per_kw: float
+    battery_wear_vnd_per_kwh: float
+    meter_state: ElectricityMeterState = field(
+        default_factory=ElectricityMeterState,
+        init=False,
+    )
+    timestep_index: int = field(default=0, init=False)
+    total_electricity_energy_cost_vnd: float = field(default=0.0, init=False)
+    total_demand_cost_vnd: float = field(default=0.0, init=False)
+    total_battery_wear_cost_vnd: float = field(default=0.0, init=False)
+
+    def __post_init__(self) -> None:
+        values = (
+            self.state_of_charge,
+            self.minimum_state_of_charge,
+            self.maximum_state_of_charge,
+            self.battery_capacity_kwh,
+            self.battery_power_kw,
+            self.timestep_hours,
+            self.charge_efficiency,
+            self.discharge_efficiency,
+            self.demand_charge_vnd_per_kw,
+            self.battery_wear_vnd_per_kwh,
+        )
+        if not all(math.isfinite(float(value)) for value in values):
+            raise ValueError("BessWorld configuration values must all be finite")
+        if self.battery_power_kw <= 0.0:
+            raise ValueError("battery_power_kw must be greater than 0")
+        if self.demand_charge_vnd_per_kw < 0.0:
+            raise ValueError("demand_charge_vnd_per_kw must not be negative")
+        if self.battery_wear_vnd_per_kwh < 0.0:
+            raise ValueError("battery_wear_vnd_per_kwh must not be negative")
+
+        # Reuse the existing laws as validators instead of inventing a second set of rules.
+        _validate_meter_timestep(self.timestep_hours)
+        police_battery_power(
+            requested_battery_power_kw=0.0,
+            state_of_charge=self.state_of_charge,
+            minimum_state_of_charge=self.minimum_state_of_charge,
+            maximum_state_of_charge=self.maximum_state_of_charge,
+            battery_capacity_kwh=self.battery_capacity_kwh,
+            timestep_hours=self.timestep_hours,
+        )
+        battery_power_to_outside_power_kw(
+            battery_power_kw=0.0,
+            charge_efficiency=self.charge_efficiency,
+            discharge_efficiency=self.discharge_efficiency,
+        )
+
+    @property
+    def total_operating_cost_vnd(self) -> float:
+        return (
+            self.total_electricity_energy_cost_vnd
+            + self.total_demand_cost_vnd
+            + self.total_battery_wear_cost_vnd
+        )
+
+    def step(
+        self,
+        *,
+        action: float,
+        net_load_kw: float,
+        tariff_vnd_per_kwh: float,
+    ) -> BessWorldStepResult:
+        """Advance the battery universe exactly once, committing only after validation."""
+        action_value = float(action)
+        if not math.isfinite(action_value):
+            raise ValueError("action must be finite")
+
+        physics = run_physics_step(
+            action=action_value,
+            net_load_kw=net_load_kw,
+            state_of_charge=self.state_of_charge,
+            minimum_state_of_charge=self.minimum_state_of_charge,
+            maximum_state_of_charge=self.maximum_state_of_charge,
+            battery_capacity_kwh=self.battery_capacity_kwh,
+            battery_power_kw=self.battery_power_kw,
+            timestep_hours=self.timestep_hours,
+            charge_efficiency=self.charge_efficiency,
+            discharge_efficiency=self.discharge_efficiency,
+        )
+        meter = run_electricity_meter_step(
+            grid_import_kw=physics.grid_import_kw,
+            timestep_hours=self.timestep_hours,
+            meter_state=self.meter_state,
+        )
+        cost = calculate_operating_cost_step(
+            grid_energy_kwh=meter.sample_energy_kwh,
+            battery_throughput_kwh=physics.battery_throughput_kwh,
+            previous_monthly_peak_kw=meter.previous_monthly_peak_kw,
+            monthly_peak_kw=meter.monthly_peak_kw,
+            tariff_vnd_per_kwh=tariff_vnd_per_kwh,
+            demand_charge_vnd_per_kw=self.demand_charge_vnd_per_kw,
+            battery_wear_vnd_per_kwh=self.battery_wear_vnd_per_kwh,
+        )
+
+        result = BessWorldStepResult(
+            timestep_index=self.timestep_index,
+            physics=physics,
+            meter=meter,
+            cost=cost,
+        )
+
+        # Commit only after physics, metering, and money all produced valid results.
+        self.state_of_charge = physics.next_soc
+        self.meter_state = meter.next_state
+        self.total_electricity_energy_cost_vnd += cost.electricity_energy_cost_vnd
+        self.total_demand_cost_vnd += cost.demand_cost_vnd
+        self.total_battery_wear_cost_vnd += cost.battery_wear_cost_vnd
+        self.timestep_index += 1
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class RawWorldStepResult:
+    """One timestep in the ghost world where the battery does not exist."""
+
+    timestep_index: int
+    grid_import_kw: float
+    meter: ElectricityMeterStepResult
+    cost: OperatingCostStepResult
+
+
+@dataclass(slots=True)
+class RawWorld:
+    """No-battery ghost universe: raw factory net load -> meter -> shared accountant."""
+
+    timestep_hours: float
+    demand_charge_vnd_per_kw: float
+    meter_state: ElectricityMeterState = field(
+        default_factory=ElectricityMeterState,
+        init=False,
+    )
+    timestep_index: int = field(default=0, init=False)
+    total_electricity_energy_cost_vnd: float = field(default=0.0, init=False)
+    total_demand_cost_vnd: float = field(default=0.0, init=False)
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(float(self.demand_charge_vnd_per_kw)):
+            raise ValueError("demand_charge_vnd_per_kw must be finite")
+        if self.demand_charge_vnd_per_kw < 0.0:
+            raise ValueError("demand_charge_vnd_per_kw must not be negative")
+        _validate_meter_timestep(self.timestep_hours)
+
+    @property
+    def total_operating_cost_vnd(self) -> float:
+        return self.total_electricity_energy_cost_vnd + self.total_demand_cost_vnd
+
+    def step(
+        self,
+        *,
+        net_load_kw: float,
+        tariff_vnd_per_kwh: float,
+    ) -> RawWorldStepResult:
+        """Advance the no-battery universe exactly once."""
+        prepared_net_load_kw = float(net_load_kw)
+        if not math.isfinite(prepared_net_load_kw):
+            raise ValueError("net_load_kw must be finite")
+
+        # Ghost-world physics has exactly one fact: without a battery, the grid sees
+        # the non-negative prepared factory net load. There is no SOC or efficiency here.
+        grid_import_kw = max(prepared_net_load_kw, 0.0)
+        meter = run_electricity_meter_step(
+            grid_import_kw=grid_import_kw,
+            timestep_hours=self.timestep_hours,
+            meter_state=self.meter_state,
+        )
+        cost = calculate_operating_cost_step(
+            grid_energy_kwh=meter.sample_energy_kwh,
+            battery_throughput_kwh=0.0,
+            previous_monthly_peak_kw=meter.previous_monthly_peak_kw,
+            monthly_peak_kw=meter.monthly_peak_kw,
+            tariff_vnd_per_kwh=tariff_vnd_per_kwh,
+            demand_charge_vnd_per_kw=self.demand_charge_vnd_per_kw,
+            battery_wear_vnd_per_kwh=0.0,
+        )
+
+        result = RawWorldStepResult(
+            timestep_index=self.timestep_index,
+            grid_import_kw=grid_import_kw,
+            meter=meter,
+            cost=cost,
+        )
+
+        self.meter_state = meter.next_state
+        self.total_electricity_energy_cost_vnd += cost.electricity_energy_cost_vnd
+        self.total_demand_cost_vnd += cost.demand_cost_vnd
+        self.timestep_index += 1
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class BrainStepResult:
+    """Bundled answer from the two synchronized universes for one factory timestep."""
+
+    timestep_index: int
+    bess: BessWorldStepResult
+    raw: RawWorldStepResult
+    electricity_energy_savings_vnd: float
+    demand_savings_vnd: float
+    battery_wear_cost_vnd: float
+    net_battery_savings_vnd: float
+    cumulative_electricity_energy_savings_vnd: float
+    cumulative_demand_savings_vnd: float
+    cumulative_battery_wear_cost_vnd: float
+    cumulative_net_battery_savings_vnd: float
+
+
+class BrainEnv:
+    """Boss of the standalone environment: advance BESS and no-battery worlds together."""
+
+    def __init__(
+        self,
+        *,
+        initial_state_of_charge: float,
+        minimum_state_of_charge: float,
+        maximum_state_of_charge: float,
+        battery_capacity_kwh: float,
+        battery_power_kw: float,
+        timestep_hours: float,
+        charge_efficiency: float,
+        discharge_efficiency: float,
+        demand_charge_vnd_per_kw: float,
+        battery_wear_vnd_per_kwh: float,
+    ) -> None:
+        self.bess_world = BessWorld(
+            state_of_charge=initial_state_of_charge,
+            minimum_state_of_charge=minimum_state_of_charge,
+            maximum_state_of_charge=maximum_state_of_charge,
+            battery_capacity_kwh=battery_capacity_kwh,
+            battery_power_kw=battery_power_kw,
+            timestep_hours=timestep_hours,
+            charge_efficiency=charge_efficiency,
+            discharge_efficiency=discharge_efficiency,
+            demand_charge_vnd_per_kw=demand_charge_vnd_per_kw,
+            battery_wear_vnd_per_kwh=battery_wear_vnd_per_kwh,
+        )
+        self.raw_world = RawWorld(
+            timestep_hours=timestep_hours,
+            demand_charge_vnd_per_kw=demand_charge_vnd_per_kw,
+        )
+
+    @property
+    def electricity_energy_savings_vnd(self) -> float:
+        return (
+            self.raw_world.total_electricity_energy_cost_vnd
+            - self.bess_world.total_electricity_energy_cost_vnd
+        )
+
+    @property
+    def demand_savings_vnd(self) -> float:
+        return self.raw_world.total_demand_cost_vnd - self.bess_world.total_demand_cost_vnd
+
+    @property
+    def battery_wear_cost_vnd(self) -> float:
+        return self.bess_world.total_battery_wear_cost_vnd
+
+    @property
+    def net_battery_savings_vnd(self) -> float:
+        return self.raw_world.total_operating_cost_vnd - self.bess_world.total_operating_cost_vnd
+
+    def step(
+        self,
+        *,
+        action: float,
+        net_load_kw: float,
+        tariff_vnd_per_kwh: float,
+    ) -> BrainStepResult:
+        """Advance both worlds once and report exactly what the battery changed economically."""
+        if self.bess_world.timestep_index != self.raw_world.timestep_index:
+            raise RuntimeError("BessWorld and RawWorld timestep indexes must stay in lockstep")
+
+        action_value = float(action)
+        net_load_value = float(net_load_kw)
+        tariff_value = float(tariff_vnd_per_kwh)
+        if not all(math.isfinite(value) for value in (action_value, net_load_value, tariff_value)):
+            raise ValueError("BrainEnv step inputs must all be finite")
+        if tariff_value < 0.0:
+            raise ValueError("tariff_vnd_per_kwh must not be negative")
+
+        timestep_index = self.bess_world.timestep_index
+
+        # BESS goes first. With the shared inputs validated and RawWorld configuration
+        # fixed at construction, any BESS failure happens before the ghost world mutates.
+        bess_snapshot = (
+            self.bess_world.state_of_charge,
+            self.bess_world.meter_state,
+            self.bess_world.timestep_index,
+            self.bess_world.total_electricity_energy_cost_vnd,
+            self.bess_world.total_demand_cost_vnd,
+            self.bess_world.total_battery_wear_cost_vnd,
+        )
+        bess_result = self.bess_world.step(
+            action=action_value,
+            net_load_kw=net_load_value,
+            tariff_vnd_per_kwh=tariff_value,
+        )
+        try:
+            raw_result = self.raw_world.step(
+                net_load_kw=net_load_value,
+                tariff_vnd_per_kwh=tariff_value,
+            )
+        except Exception:
+            (
+                self.bess_world.state_of_charge,
+                self.bess_world.meter_state,
+                self.bess_world.timestep_index,
+                self.bess_world.total_electricity_energy_cost_vnd,
+                self.bess_world.total_demand_cost_vnd,
+                self.bess_world.total_battery_wear_cost_vnd,
+            ) = bess_snapshot
+            raise
+
+        if self.bess_world.timestep_index != self.raw_world.timestep_index:
+            raise RuntimeError("BessWorld and RawWorld advanced out of lockstep")
+        if (
+            raw_result.cost.battery_throughput_kwh != 0.0
+            or raw_result.cost.battery_wear_cost_vnd != 0.0
+        ):
+            raise RuntimeError("RawWorld must never contain battery throughput or battery wear")
+
+        electricity_energy_savings_vnd = (
+            raw_result.cost.electricity_energy_cost_vnd
+            - bess_result.cost.electricity_energy_cost_vnd
+        )
+        demand_savings_vnd = raw_result.cost.demand_cost_vnd - bess_result.cost.demand_cost_vnd
+        battery_wear_cost_vnd = bess_result.cost.battery_wear_cost_vnd
+        net_battery_savings_vnd = (
+            raw_result.cost.operating_cost_vnd - bess_result.cost.operating_cost_vnd
+        )
+
+        reconstructed_net_savings_vnd = (
+            electricity_energy_savings_vnd + demand_savings_vnd - battery_wear_cost_vnd
+        )
+        if not math.isclose(
+            net_battery_savings_vnd,
+            reconstructed_net_savings_vnd,
+            rel_tol=1e-12,
+            abs_tol=1e-9,
+        ):
+            raise RuntimeError("Battery savings accounting invariant failed")
+
+        cumulative_net_savings_vnd = self.net_battery_savings_vnd
+        reconstructed_cumulative_net_savings_vnd = (
+            self.electricity_energy_savings_vnd
+            + self.demand_savings_vnd
+            - self.battery_wear_cost_vnd
+        )
+        if not math.isclose(
+            cumulative_net_savings_vnd,
+            reconstructed_cumulative_net_savings_vnd,
+            rel_tol=1e-12,
+            abs_tol=1e-9,
+        ):
+            raise RuntimeError("Cumulative battery savings accounting invariant failed")
+
+        return BrainStepResult(
+            timestep_index=timestep_index,
+            bess=bess_result,
+            raw=raw_result,
+            electricity_energy_savings_vnd=electricity_energy_savings_vnd,
+            demand_savings_vnd=demand_savings_vnd,
+            battery_wear_cost_vnd=battery_wear_cost_vnd,
+            net_battery_savings_vnd=net_battery_savings_vnd,
+            cumulative_electricity_energy_savings_vnd=self.electricity_energy_savings_vnd,
+            cumulative_demand_savings_vnd=self.demand_savings_vnd,
+            cumulative_battery_wear_cost_vnd=self.battery_wear_cost_vnd,
+            cumulative_net_battery_savings_vnd=cumulative_net_savings_vnd,
+        )
 
 
 def build_observation(
