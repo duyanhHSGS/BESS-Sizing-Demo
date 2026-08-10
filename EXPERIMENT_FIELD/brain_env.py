@@ -92,6 +92,7 @@ OBSERVATION_DIM = 7
 ACTION_DIM = 1
 ACTION_MIN = -1.0
 ACTION_MAX = 1.0
+BrainObservation = tuple[float, float, float, float, float, float, float]
 
 # TODO BIG JUICY TODO: 1000 kW is an arbitrary temporary ruler. Replace this with a normalization rule that is principled for the site/data and does not silently erase large values.
 POWER_SCALE_KW = 1000.0
@@ -1018,7 +1019,7 @@ class RawWorld:
 
 @dataclass(frozen=True, slots=True)
 class BrainStepResult:
-    """Bundled answer from the two synchronized universes for one factory timestep."""
+    """Bundled accounting truth from the two synchronized universes for one timestep."""
 
     timestep_index: int
     bess: BessWorldStepResult
@@ -1031,6 +1032,86 @@ class BrainStepResult:
     cumulative_demand_savings_vnd: float
     cumulative_battery_wear_cost_vnd: float
     cumulative_net_battery_savings_vnd: float
+
+
+@dataclass(frozen=True, slots=True)
+class BrainTimestepInput:
+    """Exogenous facts for one environment timestep. The brain cannot change these."""
+
+    net_load_kw: float
+    tariff_vnd_per_kwh: float
+    is_working_day: bool
+
+    def __post_init__(self) -> None:
+        net_load_kw = float(self.net_load_kw)
+        tariff_vnd_per_kwh = float(self.tariff_vnd_per_kwh)
+        if not math.isfinite(net_load_kw) or not math.isfinite(tariff_vnd_per_kwh):
+            raise ValueError("Brain timestep net load and tariff must be finite")
+        if tariff_vnd_per_kwh < 0.0:
+            raise ValueError("Brain timestep tariff_vnd_per_kwh must not be negative")
+        if type(self.is_working_day) is not bool:
+            raise TypeError("Brain timestep is_working_day must be a bool")
+
+        object.__setattr__(self, "net_load_kw", net_load_kw)
+        object.__setattr__(self, "tariff_vnd_per_kwh", tariff_vnd_per_kwh)
+
+
+@dataclass(frozen=True, slots=True)
+class BrainEpisode:
+    """One standalone billing-month episode owned completely by BrainEnv."""
+
+    timesteps: tuple[BrainTimestepInput, ...]
+    steps_per_day: int
+    power_scale_kw: float = POWER_SCALE_KW
+
+    def __post_init__(self) -> None:
+        timesteps = tuple(self.timesteps)
+        if not timesteps:
+            raise ValueError("BrainEpisode must contain at least one timestep")
+        if any(not isinstance(step, BrainTimestepInput) for step in timesteps):
+            raise TypeError("BrainEpisode.timesteps must contain only BrainTimestepInput values")
+        if isinstance(self.steps_per_day, bool) or not isinstance(self.steps_per_day, int):
+            raise TypeError("BrainEpisode.steps_per_day must be an integer")
+        if self.steps_per_day <= 0:
+            raise ValueError("BrainEpisode.steps_per_day must be greater than 0")
+
+        power_scale_kw = float(self.power_scale_kw)
+        if not math.isfinite(power_scale_kw) or power_scale_kw <= 0.0:
+            raise ValueError("BrainEpisode.power_scale_kw must be finite and greater than 0")
+
+        object.__setattr__(self, "timesteps", timesteps)
+        object.__setattr__(self, "power_scale_kw", power_scale_kw)
+
+    @property
+    def maximum_tariff_vnd_per_kwh(self) -> float:
+        return max(step.tariff_vnd_per_kwh for step in self.timesteps)
+
+    @property
+    def tariff_normalization_denominator_vnd_per_kwh(self) -> float:
+        maximum_tariff = self.maximum_tariff_vnd_per_kwh
+        return maximum_tariff if maximum_tariff > 0.0 else 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class BrainRewardResult:
+    """Reward is money saved: this timestep and this billing month so far."""
+
+    timestep_savings_vnd: float
+    monthly_savings_vnd: float
+
+
+@dataclass(frozen=True, slots=True)
+class BrainEnvironmentStepResult(BrainStepResult):
+    """Complete brain-facing transition from one action."""
+
+    next_observation: BrainObservation | None
+    reward: BrainRewardResult
+    done: bool
+
+    @property
+    def info(self) -> BrainStepResult:
+        """The full diagnostics are this same immutable transition object."""
+        return self
 
 
 class BrainEnv:
@@ -1049,6 +1130,7 @@ class BrainEnv:
         discharge_efficiency: float,
         demand_charge_vnd_per_kw: float,
         battery_wear_vnd_per_kwh: float,
+        episode: BrainEpisode | None = None,
     ) -> None:
         self.bess_world = BessWorld(
             state_of_charge=initial_state_of_charge,
@@ -1066,6 +1148,10 @@ class BrainEnv:
             timestep_hours=timestep_hours,
             demand_charge_vnd_per_kw=demand_charge_vnd_per_kw,
         )
+        if episode is not None and not isinstance(episode, BrainEpisode):
+            raise TypeError("episode must be a BrainEpisode or None")
+        self.episode = episode
+        self._initial_state_of_charge = float(initial_state_of_charge)
 
     @property
     def electricity_energy_savings_vnd(self) -> float:
@@ -1086,26 +1172,103 @@ class BrainEnv:
     def net_battery_savings_vnd(self) -> float:
         return self.raw_world.total_operating_cost_vnd - self.bess_world.total_operating_cost_vnd
 
+    def reset(self) -> BrainObservation:
+        """Start the owned billing-month episode from timestep zero and return its first observation."""
+        if self.episode is None:
+            raise RuntimeError("BrainEnv.reset() requires a configured BrainEpisode")
+
+        self.bess_world.state_of_charge = self._initial_state_of_charge
+        self.bess_world.meter_state = ElectricityMeterState()
+        self.bess_world.timestep_index = 0
+        self.bess_world.total_electricity_energy_cost_vnd = 0.0
+        self.bess_world.total_demand_cost_vnd = 0.0
+        self.bess_world.total_battery_wear_cost_vnd = 0.0
+
+        self.raw_world.meter_state = ElectricityMeterState()
+        self.raw_world.timestep_index = 0
+        self.raw_world.total_electricity_energy_cost_vnd = 0.0
+        self.raw_world.total_demand_cost_vnd = 0.0
+
+        return self.current_observation()
+
+    def current_observation(self) -> BrainObservation:
+        """Build the seven-eye observation for the current owned episode timestep."""
+        if self.episode is None:
+            raise RuntimeError("BrainEnv.current_observation() requires a configured BrainEpisode")
+        if self.bess_world.timestep_index != self.raw_world.timestep_index:
+            raise RuntimeError("BessWorld and RawWorld timestep indexes must stay in lockstep")
+
+        timestep_index = self.bess_world.timestep_index
+        if timestep_index >= len(self.episode.timesteps):
+            raise RuntimeError("episode is finished; reset before requesting another observation")
+
+        timestep = self.episode.timesteps[timestep_index]
+        return build_observation(
+            timestep_index=timestep_index,
+            steps_per_day=self.episode.steps_per_day,
+            net_load_kw=timestep.net_load_kw,
+            state_of_charge=self.bess_world.state_of_charge,
+            minimum_state_of_charge=self.bess_world.minimum_state_of_charge,
+            maximum_state_of_charge=self.bess_world.maximum_state_of_charge,
+            tariff_vnd_per_kwh=timestep.tariff_vnd_per_kwh,
+            maximum_tariff_vnd_per_kwh=(
+                self.episode.tariff_normalization_denominator_vnd_per_kwh
+            ),
+            monthly_peak_kw=self.bess_world.meter_state.monthly_peak_kw,
+            is_working_day=timestep.is_working_day,
+            power_scale_kw=self.episode.power_scale_kw,
+        )
+
     def step(
         self,
-        *,
         action: float,
-        net_load_kw: float,
-        tariff_vnd_per_kwh: float,
-    ) -> BrainStepResult:
-        """Advance both worlds once and report exactly what the battery changed economically."""
+        *,
+        net_load_kw: float | None = None,
+        tariff_vnd_per_kwh: float | None = None,
+    ) -> BrainStepResult | BrainEnvironmentStepResult:
+        """Advance once.
+
+        With ``episode=...`` configured, this is the real brain-facing environment step:
+        action -> physics -> meter -> money -> savings reward -> next observation.
+
+        Without an episode, the explicit net-load/tariff arguments remain available for
+        lower-level standalone callers and return the older ``BrainStepResult``.
+        """
         if self.bess_world.timestep_index != self.raw_world.timestep_index:
             raise RuntimeError("BessWorld and RawWorld timestep indexes must stay in lockstep")
 
         action_value = float(action)
-        net_load_value = float(net_load_kw)
-        tariff_value = float(tariff_vnd_per_kwh)
-        if not all(math.isfinite(value) for value in (action_value, net_load_value, tariff_value)):
-            raise ValueError("BrainEnv step inputs must all be finite")
-        if tariff_value < 0.0:
-            raise ValueError("tariff_vnd_per_kwh must not be negative")
+        if not math.isfinite(action_value):
+            raise ValueError("action must be finite")
+        if action_value < ACTION_MIN or action_value > ACTION_MAX:
+            raise ValueError("action must be inside [-1, 1]")
 
         timestep_index = self.bess_world.timestep_index
+        episode_mode = self.episode is not None
+        previous_monthly_savings_vnd = self.net_battery_savings_vnd
+
+        if episode_mode:
+            assert self.episode is not None
+            if net_load_kw is not None or tariff_vnd_per_kwh is not None:
+                raise TypeError(
+                    "Do not pass net_load_kw or tariff_vnd_per_kwh when BrainEnv owns a BrainEpisode"
+                )
+            if timestep_index >= len(self.episode.timesteps):
+                raise RuntimeError("episode is finished; reset before stepping again")
+            timestep = self.episode.timesteps[timestep_index]
+            net_load_value = timestep.net_load_kw
+            tariff_value = timestep.tariff_vnd_per_kwh
+        else:
+            if net_load_kw is None or tariff_vnd_per_kwh is None:
+                raise TypeError(
+                    "BrainEnv without an episode requires net_load_kw and tariff_vnd_per_kwh"
+                )
+            net_load_value = float(net_load_kw)
+            tariff_value = float(tariff_vnd_per_kwh)
+            if not math.isfinite(net_load_value) or not math.isfinite(tariff_value):
+                raise ValueError("BrainEnv step inputs must all be finite")
+            if tariff_value < 0.0:
+                raise ValueError("tariff_vnd_per_kwh must not be negative")
 
         # BESS goes first. With the shared inputs validated and RawWorld configuration
         # fixed at construction, any BESS failure happens before the ghost world mutates.
@@ -1181,7 +1344,7 @@ class BrainEnv:
         ):
             raise RuntimeError("Cumulative battery savings accounting invariant failed")
 
-        return BrainStepResult(
+        base_result = BrainStepResult(
             timestep_index=timestep_index,
             bess=bess_result,
             raw=raw_result,
@@ -1193,6 +1356,45 @@ class BrainEnv:
             cumulative_demand_savings_vnd=self.demand_savings_vnd,
             cumulative_battery_wear_cost_vnd=self.battery_wear_cost_vnd,
             cumulative_net_battery_savings_vnd=cumulative_net_savings_vnd,
+        )
+
+        if not episode_mode:
+            return base_result
+
+        monthly_savings_vnd = cumulative_net_savings_vnd
+        monthly_delta_vnd = monthly_savings_vnd - previous_monthly_savings_vnd
+        if not math.isclose(
+            monthly_delta_vnd,
+            net_battery_savings_vnd,
+            rel_tol=1e-12,
+            abs_tol=1e-9,
+        ):
+            raise RuntimeError("Monthly savings must advance by exactly the timestep savings")
+
+        assert self.episode is not None
+        done = self.bess_world.timestep_index >= len(self.episode.timesteps)
+        next_observation = None if done else self.current_observation()
+
+        return BrainEnvironmentStepResult(
+            timestep_index=base_result.timestep_index,
+            bess=base_result.bess,
+            raw=base_result.raw,
+            electricity_energy_savings_vnd=base_result.electricity_energy_savings_vnd,
+            demand_savings_vnd=base_result.demand_savings_vnd,
+            battery_wear_cost_vnd=base_result.battery_wear_cost_vnd,
+            net_battery_savings_vnd=base_result.net_battery_savings_vnd,
+            cumulative_electricity_energy_savings_vnd=(
+                base_result.cumulative_electricity_energy_savings_vnd
+            ),
+            cumulative_demand_savings_vnd=base_result.cumulative_demand_savings_vnd,
+            cumulative_battery_wear_cost_vnd=base_result.cumulative_battery_wear_cost_vnd,
+            cumulative_net_battery_savings_vnd=base_result.cumulative_net_battery_savings_vnd,
+            next_observation=next_observation,
+            reward=BrainRewardResult(
+                timestep_savings_vnd=net_battery_savings_vnd,
+                monthly_savings_vnd=monthly_savings_vnd,
+            ),
+            done=done,
         )
 
 
@@ -1209,7 +1411,7 @@ def build_observation(
     monthly_peak_kw: float,
     is_working_day: bool,
     power_scale_kw: float = POWER_SCALE_KW,
-) -> tuple[float, float, float, float, float, float, float]:
+) -> BrainObservation:
     """Build the tiny 7-eye observation the agent gets to see."""
     if steps_per_day <= 0:
         raise ValueError("steps_per_day must be greater than 0")
