@@ -36,6 +36,7 @@ def test_idle_keeps_everything_boring():
     assert result.grid_to_battery_kw == pytest.approx(0.0)
     assert result.conversion_loss_kw == pytest.approx(0.0)
     assert result.grid_import_kw == pytest.approx(300.0)
+    assert result.battery_throughput_kwh == pytest.approx(0.0)
     assert result.starting_soc == pytest.approx(0.50)
     assert result.next_soc == pytest.approx(0.50)
 
@@ -50,6 +51,7 @@ def test_normal_discharge_tracks_every_kw():
     assert result.grid_to_battery_kw == pytest.approx(0.0)
     assert result.conversion_loss_kw == pytest.approx(45.0)
     assert result.grid_import_kw == pytest.approx(595.0)
+    assert result.battery_throughput_kwh == pytest.approx(112.5)
     assert result.next_soc == pytest.approx(0.3875)
 
 
@@ -63,6 +65,7 @@ def test_normal_charge_tracks_every_kw():
     assert result.grid_to_battery_kw == pytest.approx(500.0)
     assert result.conversion_loss_kw == pytest.approx(50.0)
     assert result.grid_import_kw == pytest.approx(800.0)
+    assert result.battery_throughput_kwh == pytest.approx(112.5)
     assert result.next_soc == pytest.approx(0.6125)
 
 

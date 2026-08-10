@@ -70,12 +70,21 @@
 #   - A monthly demand peak changes only when a complete 30-minute block finishes.
 #   - Knows NOTHING about tariff, money, battery wear, reward, or PPO.
 #
+# MONEY ACCOUNTANT:
+#   - Sees only finished accounting facts: grid energy, battery throughput, and
+#     monthly-peak increase, plus their prices.
+#   - Energy cost = grid energy * tariff.
+#   - Wear cost = BATTERY-SIDE throughput * wear rate. No efficiency appears here.
+#   - Demand cost = increase in the completed 30-minute monthly peak * demand fee.
+#   - Operating cost = energy + demand + wear. No reward, PPO, or physical control.
+#
 # This file is a standalone BESS brain playground and is NOT wired into the project.
 # ============================================================
 
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 
@@ -366,6 +375,7 @@ class PhysicsStepResult:
     grid_to_battery_kw: float
     conversion_loss_kw: float
     grid_import_kw: float
+    battery_throughput_kwh: float
     starting_soc: float
     next_soc: float
 
@@ -449,6 +459,7 @@ def run_physics_step(
         net_load_kw=net_load_kw,
         outside_battery_power_kw=outside_battery_power_kw,
     )
+    battery_throughput_kwh = abs(final_battery_kw) * float(timestep_hours)
 
     return PhysicsStepResult(
         requested_battery_kw=requested_battery_kw,
@@ -458,6 +469,7 @@ def run_physics_step(
         grid_to_battery_kw=grid_to_battery_kw,
         conversion_loss_kw=conversion_loss_kw,
         grid_import_kw=grid_import_kw,
+        battery_throughput_kwh=battery_throughput_kwh,
         starting_soc=float(state_of_charge),
         next_soc=next_soc,
     )
@@ -619,6 +631,176 @@ def reset_electricity_meter_for_new_day(meter_state: ElectricityMeterState) -> E
 def reset_electricity_meter_for_new_month() -> ElectricityMeterState:
     """Start a new billing month with an empty block and zero monthly peak."""
     return ElectricityMeterState()
+
+
+@dataclass(frozen=True, slots=True)
+class OperatingCostStepResult:
+    """Boring accounting result for one timestep.
+    It sees Grid pov! battery throughput! ZERO physic logic aurafarming.
+    """
+    grid_energy_kwh: float
+    battery_throughput_kwh: float
+    demand_peak_increase_kw: float
+    electricity_energy_cost_vnd: float
+    demand_cost_vnd: float
+    battery_wear_cost_vnd: float
+    operating_cost_vnd: float
+
+
+def calculate_operating_cost_step(
+    *,
+    grid_energy_kwh: float,
+    battery_throughput_kwh: float,
+    previous_monthly_peak_kw: float,
+    monthly_peak_kw: float,
+    tariff_vnd_per_kwh: float,
+    demand_charge_vnd_per_kw: float,
+    battery_wear_vnd_per_kwh: float,
+) -> OperatingCostStepResult:
+    """Price finished accounting facts only: grid energy, peak increase, throughput."""
+    grid_kwh = float(grid_energy_kwh)
+    throughput_kwh = float(battery_throughput_kwh)
+    previous_peak_kw = float(previous_monthly_peak_kw)
+    current_peak_kw = float(monthly_peak_kw)
+    tariff = float(tariff_vnd_per_kwh)
+    demand_fee = float(demand_charge_vnd_per_kw)
+    wear_rate = float(battery_wear_vnd_per_kwh)
+
+    values = (
+        grid_kwh,
+        throughput_kwh,
+        previous_peak_kw,
+        current_peak_kw,
+        tariff,
+        demand_fee,
+        wear_rate,
+    )
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("Operating-cost inputs must all be finite numbers")
+    if grid_kwh < 0.0:
+        raise ValueError("grid_energy_kwh must not be negative")
+    if throughput_kwh < 0.0:
+        raise ValueError("battery_throughput_kwh must not be negative")
+    if previous_peak_kw < 0.0 or current_peak_kw < 0.0:
+        raise ValueError("monthly demand peaks must not be negative")
+    if tariff < 0.0:
+        raise ValueError("tariff_vnd_per_kwh must not be negative")
+    if demand_fee < 0.0:
+        raise ValueError("demand_charge_vnd_per_kw must not be negative")
+    if wear_rate < 0.0:
+        raise ValueError("battery_wear_vnd_per_kwh must not be negative")
+
+    numerical_tolerance = 1e-12
+    if current_peak_kw < previous_peak_kw - numerical_tolerance:
+        raise ValueError("monthly_peak_kw must not go backwards")
+    demand_peak_increase_kw = max(0.0, current_peak_kw - previous_peak_kw)
+
+    electricity_energy_cost_vnd = grid_kwh * tariff
+    demand_cost_vnd = demand_peak_increase_kw * demand_fee
+    battery_wear_cost_vnd = throughput_kwh * wear_rate
+    operating_cost_vnd = electricity_energy_cost_vnd + demand_cost_vnd + battery_wear_cost_vnd
+
+    return OperatingCostStepResult(
+        grid_energy_kwh=grid_kwh,
+        battery_throughput_kwh=throughput_kwh,
+        demand_peak_increase_kw=demand_peak_increase_kw,
+        electricity_energy_cost_vnd=electricity_energy_cost_vnd,
+        demand_cost_vnd=demand_cost_vnd,
+        battery_wear_cost_vnd=battery_wear_cost_vnd,
+        operating_cost_vnd=operating_cost_vnd,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MonthlyOperatingCostResult:
+    """Independent whole-month look-back from grid and battery power histories."""
+
+    total_grid_energy_kwh: float
+    battery_throughput_kwh: float
+    monthly_peak_kw: float
+    electricity_energy_cost_vnd: float
+    demand_cost_vnd: float
+    battery_wear_cost_vnd: float
+    operating_cost_vnd: float
+
+
+def calculate_month_operating_cost_from_history(
+    *,
+    grid_import_kw: Sequence[float],
+    battery_power_kw: Sequence[float],
+    tariff_vnd_per_kwh: Sequence[float],
+    timestep_hours: float,
+    demand_charge_vnd_per_kw: float,
+    battery_wear_vnd_per_kwh: float,
+) -> MonthlyOperatingCostResult:
+    """Recalculate a complete month directly from raw grid and battery histories."""
+    dt_hours = float(timestep_hours)
+    samples_per_block = _validate_meter_timestep(dt_hours)
+    demand_fee = float(demand_charge_vnd_per_kw)
+    wear_rate = float(battery_wear_vnd_per_kwh)
+
+    if not math.isfinite(demand_fee) or demand_fee < 0.0:
+        raise ValueError("demand_charge_vnd_per_kw must be finite and non-negative")
+    if not math.isfinite(wear_rate) or wear_rate < 0.0:
+        raise ValueError("battery_wear_vnd_per_kwh must be finite and non-negative")
+
+    sample_count = len(grid_import_kw)
+    if sample_count == 0:
+        raise ValueError("month history must contain at least one timestep")
+    if len(battery_power_kw) != sample_count or len(tariff_vnd_per_kwh) != sample_count:
+        raise ValueError("grid, battery, and tariff month histories must have equal length")
+    if sample_count % samples_per_block != 0:
+        raise ValueError("complete month history must end on a 30-minute demand-block boundary")
+
+    total_grid_energy_kwh = 0.0
+    battery_throughput_kwh = 0.0
+    electricity_energy_cost_vnd = 0.0
+    monthly_peak_kw = 0.0
+    block_grid_energy_kwh = 0.0
+    block_sample_count = 0
+
+    # One O(N) pass, no temporary month-sized arrays.
+    for grid_value, battery_value, tariff_value in zip(
+        grid_import_kw,
+        battery_power_kw,
+        tariff_vnd_per_kwh,
+    ):
+        grid_kw = float(grid_value)
+        battery_kw = float(battery_value)
+        tariff = float(tariff_value)
+        if not all(math.isfinite(value) for value in (grid_kw, battery_kw, tariff)):
+            raise ValueError("month history values must all be finite")
+        if grid_kw < 0.0:
+            raise ValueError("grid_import_kw history must not contain negative values")
+        if tariff < 0.0:
+            raise ValueError("tariff history must not contain negative values")
+
+        grid_energy_kwh = grid_kw * dt_hours
+        total_grid_energy_kwh += grid_energy_kwh
+        electricity_energy_cost_vnd += grid_energy_kwh * tariff
+        battery_throughput_kwh += abs(battery_kw) * dt_hours
+
+        block_grid_energy_kwh += grid_energy_kwh
+        block_sample_count += 1
+        if block_sample_count == samples_per_block:
+            completed_block_demand_kw = block_grid_energy_kwh / DEMAND_BLOCK_HOURS
+            monthly_peak_kw = max(monthly_peak_kw, completed_block_demand_kw)
+            block_grid_energy_kwh = 0.0
+            block_sample_count = 0
+
+    demand_cost_vnd = monthly_peak_kw * demand_fee
+    battery_wear_cost_vnd = battery_throughput_kwh * wear_rate
+    operating_cost_vnd = electricity_energy_cost_vnd + demand_cost_vnd + battery_wear_cost_vnd
+
+    return MonthlyOperatingCostResult(
+        total_grid_energy_kwh=total_grid_energy_kwh,
+        battery_throughput_kwh=battery_throughput_kwh,
+        monthly_peak_kw=monthly_peak_kw,
+        electricity_energy_cost_vnd=electricity_energy_cost_vnd,
+        demand_cost_vnd=demand_cost_vnd,
+        battery_wear_cost_vnd=battery_wear_cost_vnd,
+        operating_cost_vnd=operating_cost_vnd,
+    )
 
 
 def build_observation(
