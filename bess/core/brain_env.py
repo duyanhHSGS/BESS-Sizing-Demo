@@ -90,23 +90,45 @@ def police_battery_power(
       positive power = discharge
     V1 deliberately knows nothing about PV, tariffs, rewards, or strategy.
     ``net_load_kw`` is already the final load signal supplied to this env.
-    """
-    if maximum_state_of_charge <= minimum_state_of_charge:
-        raise ValueError("maximum_state_of_charge must be greater than minimum_state_of_charge")
-    if battery_capacity_kwh <= 0.0:
-        raise ValueError("battery_capacity_kwh must be greater than 0")
-    if timestep_hours <= 0.0:
-        raise ValueError("timestep_hours must be greater than 0")
 
+    TODO FUTURE PHYSICS:
+      - Charge/discharge efficiency is NOT modeled yet; current SOC math assumes 100% efficiency.
+      - PV is NOT handled here. Any PV effect must already be baked into ``net_load_kw`` upstream.
+        How PV/net-load preprocessing should work is a future problem for this scratch env.
+    """
     minimum_soc = float(minimum_state_of_charge)
     maximum_soc = float(maximum_state_of_charge)
     capacity_kwh = float(battery_capacity_kwh)
     dt_hours = float(timestep_hours)
-
-    # If a caller hands us a slightly illegal starting SOC, put it back inside
-    # the fence before calculating how much energy is actually available.
-    current_soc = min(maximum_soc, max(minimum_soc, float(state_of_charge)))
+    current_soc = float(state_of_charge)
     requested_power_kw = float(requested_battery_power_kw)
+    final_net_load_kw = float(net_load_kw)
+
+    if not all(
+        math.isfinite(value)
+        for value in (
+            minimum_soc,
+            maximum_soc,
+            capacity_kwh,
+            dt_hours,
+            current_soc,
+            requested_power_kw,
+            final_net_load_kw,
+        )
+    ):
+        raise ValueError("Physics Police inputs must all be finite numbers")
+    if maximum_soc <= minimum_soc:
+        raise ValueError("maximum_state_of_charge must be greater than minimum_state_of_charge")
+    if capacity_kwh <= 0.0:
+        raise ValueError("battery_capacity_kwh must be greater than 0")
+    if dt_hours <= 0.0:
+        raise ValueError("timestep_hours must be greater than 0")
+
+    if current_soc < minimum_soc or current_soc > maximum_soc:
+        raise ValueError(
+            "state_of_charge must already be inside "
+            "[minimum_state_of_charge, maximum_state_of_charge]"
+        )
 
     if requested_power_kw > 0.0:
         # LAW 1 — do not discharge below minimum SOC.
@@ -115,7 +137,7 @@ def police_battery_power(
 
         # LAW 2 — no export. With no separate PV concept, discharge can only
         # serve the already-computed positive net load.
-        maximum_no_export_discharge_kw = max(0.0, float(net_load_kw))
+        maximum_no_export_discharge_kw = max(0.0, final_net_load_kw)
 
         actual_power_kw = min(
             requested_power_kw,
@@ -135,8 +157,15 @@ def police_battery_power(
     # Positive power discharges the battery; negative power charges it.
     next_state_of_charge = current_soc - (actual_power_kw * dt_hours / capacity_kwh)
 
-    # Numerical seatbelt only. The power projection above is the real police.
-    next_state_of_charge = min(maximum_soc, max(minimum_soc, next_state_of_charge))
+    # Do not hide physics bugs by broadly clipping SOC after the fact.
+    # Only snap microscopic floating-point roundoff back onto the exact boundary.
+    numerical_tolerance = 1e-12
+    if next_state_of_charge < minimum_soc - numerical_tolerance or next_state_of_charge > maximum_soc + numerical_tolerance:
+        raise RuntimeError("Physics Police produced an out-of-range next_state_of_charge")
+    if next_state_of_charge < minimum_soc:
+        next_state_of_charge = minimum_soc
+    elif next_state_of_charge > maximum_soc:
+        next_state_of_charge = maximum_soc
 
     return actual_power_kw, next_state_of_charge
 
