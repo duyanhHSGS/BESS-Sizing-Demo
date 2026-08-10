@@ -70,6 +70,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 
 OBSERVATION_DIM = 7
@@ -337,6 +338,122 @@ def next_battery_state_of_charge(
     if next_soc > maximum_soc:
         return maximum_soc
     return next_soc
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicsStepResult:
+    """Everything that physically happened during one BESS timestep.
+
+    All battery-power fields use the battery-side sign convention:
+      negative = charge
+      positive = discharge
+
+    Outside-world power is deliberately split into non-negative directional fields
+    so callers never need to decode a signed "outside battery power" value.
+    """
+
+    requested_battery_kw: float
+    battery_after_police_kw: float
+    final_battery_kw: float
+    battery_to_factory_kw: float
+    grid_to_battery_kw: float
+    conversion_loss_kw: float
+    grid_import_kw: float
+    starting_soc: float
+    next_soc: float
+
+
+def run_physics_step(
+    *,
+    action: float,
+    net_load_kw: float,
+    state_of_charge: float,
+    minimum_state_of_charge: float,
+    maximum_state_of_charge: float,
+    battery_capacity_kwh: float,
+    battery_power_kw: float,
+    timestep_hours: float,
+    charge_efficiency: float,
+    discharge_efficiency: float,
+) -> PhysicsStepResult:
+    """Run exactly one physical BESS timestep, with no billing and no reward.
+
+    Order is intentionally explicit:
+      1. Brain action -> requested battery-side power.
+      2. Battery Police -> SOC-safe battery-side power.
+      3. Grid Guard -> no-export-safe final battery-side power.
+      4. Outside conversion -> directional power flows and conversion loss.
+      5. Battery physics -> next SOC from final battery-side power.
+      6. Grid physics -> final grid import.
+
+    This function is only the boss/orchestrator. The individual physical laws stay
+    inside the existing helper functions so there is one source of truth per rule.
+    """
+    requested_battery_kw = action_to_requested_battery_power_kw(
+        action,
+        battery_power_kw,
+    )
+
+    battery_after_police_kw = police_battery_power(
+        requested_battery_power_kw=requested_battery_kw,
+        state_of_charge=state_of_charge,
+        minimum_state_of_charge=minimum_state_of_charge,
+        maximum_state_of_charge=maximum_state_of_charge,
+        battery_capacity_kwh=battery_capacity_kwh,
+        timestep_hours=timestep_hours,
+    )
+
+    final_battery_kw = grid_guard_no_export(
+        battery_power_kw=battery_after_police_kw,
+        net_load_kw=net_load_kw,
+        discharge_efficiency=discharge_efficiency,
+    )
+
+    outside_battery_power_kw = battery_power_to_outside_power_kw(
+        battery_power_kw=final_battery_kw,
+        charge_efficiency=charge_efficiency,
+        discharge_efficiency=discharge_efficiency,
+    )
+
+    if final_battery_kw > 0.0:
+        battery_to_factory_kw = outside_battery_power_kw
+        grid_to_battery_kw = 0.0
+        conversion_loss_kw = final_battery_kw - battery_to_factory_kw
+    elif final_battery_kw < 0.0:
+        battery_to_factory_kw = 0.0
+        grid_to_battery_kw = -outside_battery_power_kw
+        battery_charge_kw = -final_battery_kw
+        conversion_loss_kw = grid_to_battery_kw - battery_charge_kw
+    else:
+        battery_to_factory_kw = 0.0
+        grid_to_battery_kw = 0.0
+        conversion_loss_kw = 0.0
+
+    next_soc = next_battery_state_of_charge(
+        state_of_charge=state_of_charge,
+        battery_power_kw=final_battery_kw,
+        battery_capacity_kwh=battery_capacity_kwh,
+        timestep_hours=timestep_hours,
+        minimum_state_of_charge=minimum_state_of_charge,
+        maximum_state_of_charge=maximum_state_of_charge,
+    )
+
+    grid_import_kw = grid_import_from_outside_power_kw(
+        net_load_kw=net_load_kw,
+        outside_battery_power_kw=outside_battery_power_kw,
+    )
+
+    return PhysicsStepResult(
+        requested_battery_kw=requested_battery_kw,
+        battery_after_police_kw=battery_after_police_kw,
+        final_battery_kw=final_battery_kw,
+        battery_to_factory_kw=battery_to_factory_kw,
+        grid_to_battery_kw=grid_to_battery_kw,
+        conversion_loss_kw=conversion_loss_kw,
+        grid_import_kw=grid_import_kw,
+        starting_soc=float(state_of_charge),
+        next_soc=next_soc,
+    )
 
 
 def build_observation(
