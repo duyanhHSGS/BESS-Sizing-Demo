@@ -216,3 +216,157 @@ def test_zero_tariff_month_still_builds_finite_zero_tariff_observation():
 
     assert observation[4] == pytest.approx(0.0)
     assert all(math.isfinite(value) for value in observation)
+
+
+# ---------------------------------------------------------------------------
+# BABY TEST 1: pure energy arbitrage, before any neural-network chaos exists.
+#
+# Four 30-minute samples, constant 200 kW factory load:
+#   cheap, cheap, EXPENSIVE, EXPENSIVE
+#      1,     1,       100,       100 VND/kWh
+#
+# Battery starts at minimum SOC, has exactly 80 kWh usable room, 100% efficiency,
+# zero wear, and zero demand charge. Therefore buying 80 kWh for 1 VND/kWh and
+# later avoiding 80 kWh at 100 VND/kWh MUST save exactly 7,920 VND.
+# ---------------------------------------------------------------------------
+
+
+def make_baby_1_arbitrage_env() -> BrainEnv:
+    episode = BrainEpisode(
+        timesteps=tuple(
+            BrainTimestepInput(
+                net_load_kw=200.0,
+                tariff_vnd_per_kwh=tariff,
+                is_working_day=True,
+            )
+            for tariff in (1.0, 1.0, 100.0, 100.0)
+        ),
+        steps_per_day=48,
+    )
+    return BrainEnv(
+        initial_state_of_charge=0.10,
+        minimum_state_of_charge=0.10,
+        maximum_state_of_charge=0.90,
+        battery_capacity_kwh=100.0,
+        battery_power_kw=80.0,
+        timestep_hours=0.50,
+        charge_efficiency=1.0,
+        discharge_efficiency=1.0,
+        demand_charge_vnd_per_kw=0.0,
+        battery_wear_vnd_per_kwh=0.0,
+        episode=episode,
+    )
+
+
+def run_baby_1_actions(actions: tuple[float, float, float, float]):
+    env = make_baby_1_arbitrage_env()
+    env.reset()
+    transitions = tuple(env.step(action) for action in actions)
+    return env, transitions
+
+
+def test_baby_1_cheap_charge_expensive_discharge_has_exact_kw_kwh_and_vnd_trace():
+    env, steps = run_baby_1_actions((-1.0, -1.0, 1.0, 1.0))
+
+    expected = (
+        # final_battery_kw, grid_import_kw, start_soc, next_soc, sample_kwh,
+        # bess_energy_cost, ghost_energy_cost, timestep_savings
+        (-80.0, 280.0, 0.10, 0.50, 140.0, 140.0, 100.0, -40.0),
+        (-80.0, 280.0, 0.50, 0.90, 140.0, 140.0, 100.0, -40.0),
+        (80.0, 120.0, 0.90, 0.50, 60.0, 6_000.0, 10_000.0, 4_000.0),
+        (80.0, 120.0, 0.50, 0.10, 60.0, 6_000.0, 10_000.0, 4_000.0),
+    )
+
+    for step, (
+        final_battery_kw,
+        grid_import_kw,
+        starting_soc,
+        next_soc,
+        sample_energy_kwh,
+        bess_energy_cost_vnd,
+        raw_energy_cost_vnd,
+        timestep_savings_vnd,
+    ) in zip(steps, expected):
+        assert step.bess.physics.final_battery_kw == pytest.approx(final_battery_kw)
+        assert step.bess.physics.grid_import_kw == pytest.approx(grid_import_kw)
+        assert step.bess.physics.starting_soc == pytest.approx(starting_soc)
+        assert step.bess.physics.next_soc == pytest.approx(next_soc)
+        assert step.bess.physics.battery_throughput_kwh == pytest.approx(40.0)
+        assert step.bess.meter.sample_energy_kwh == pytest.approx(sample_energy_kwh)
+        assert step.bess.cost.electricity_energy_cost_vnd == pytest.approx(bess_energy_cost_vnd)
+        assert step.raw.cost.electricity_energy_cost_vnd == pytest.approx(raw_energy_cost_vnd)
+        assert step.bess.cost.demand_cost_vnd == pytest.approx(0.0)
+        assert step.bess.cost.battery_wear_cost_vnd == pytest.approx(0.0)
+        assert step.reward.timestep_savings_vnd == pytest.approx(timestep_savings_vnd)
+
+    # Directional outside-world kW must also be boringly exact at 100% efficiency.
+    assert steps[0].bess.physics.grid_to_battery_kw == pytest.approx(80.0)
+    assert steps[0].bess.physics.battery_to_factory_kw == pytest.approx(0.0)
+    assert steps[2].bess.physics.grid_to_battery_kw == pytest.approx(0.0)
+    assert steps[2].bess.physics.battery_to_factory_kw == pytest.approx(80.0)
+    assert all(step.bess.physics.conversion_loss_kw == pytest.approx(0.0) for step in steps)
+
+    # Whole-episode accounting truth: same starting/ending SOC means no stored-energy free lunch.
+    final = steps[-1]
+    assert env.bess_world.state_of_charge == pytest.approx(0.10)
+    assert env.raw_world.total_operating_cost_vnd == pytest.approx(20_200.0)
+    assert env.bess_world.total_operating_cost_vnd == pytest.approx(12_280.0)
+    assert final.reward.monthly_savings_vnd == pytest.approx(7_920.0)
+    assert sum(step.reward.timestep_savings_vnd for step in steps) == pytest.approx(7_920.0)
+    assert final.reward.monthly_savings_vnd == pytest.approx(
+        env.raw_world.total_operating_cost_vnd - env.bess_world.total_operating_cost_vnd
+    )
+    assert final.done is True
+    assert final.next_observation is None
+
+
+def test_baby_1_obvious_arbitrage_beats_all_idiot_manual_actions():
+    policies = {
+        "always_idle": (0.0, 0.0, 0.0, 0.0),
+        "always_charge": (-1.0, -1.0, -1.0, -1.0),
+        "always_discharge": (1.0, 1.0, 1.0, 1.0),
+        "charge_only_cheap": (-1.0, -1.0, 0.0, 0.0),
+        "discharge_only_expensive": (0.0, 0.0, 1.0, 1.0),
+        "cheap_charge_expensive_discharge": (-1.0, -1.0, 1.0, 1.0),
+    }
+    expected_savings_vnd = {
+        "always_idle": 0.0,
+        "always_charge": -80.0,
+        "always_discharge": 0.0,
+        "charge_only_cheap": -80.0,
+        "discharge_only_expensive": 0.0,
+        "cheap_charge_expensive_discharge": 7_920.0,
+    }
+
+    actual_savings_vnd = {}
+    for name, actions in policies.items():
+        env, steps = run_baby_1_actions(actions)
+        actual_savings_vnd[name] = steps[-1].reward.monthly_savings_vnd
+        assert actual_savings_vnd[name] == pytest.approx(expected_savings_vnd[name])
+        assert actual_savings_vnd[name] == pytest.approx(
+            env.raw_world.total_operating_cost_vnd - env.bess_world.total_operating_cost_vnd
+        )
+
+    obvious = actual_savings_vnd["cheap_charge_expensive_discharge"]
+    stupid_best = max(
+        savings
+        for name, savings in actual_savings_vnd.items()
+        if name != "cheap_charge_expensive_discharge"
+    )
+    assert obvious == pytest.approx(7_920.0)
+    assert obvious > stupid_best
+
+
+def test_baby_1_soc_boundaries_make_stupid_actions_physically_harmless_when_blocked():
+    # Empty battery cannot discharge even if the controller screams +1 forever.
+    _, empty_discharge_steps = run_baby_1_actions((1.0, 1.0, 1.0, 1.0))
+    assert all(step.bess.physics.final_battery_kw == pytest.approx(0.0) for step in empty_discharge_steps)
+    assert all(step.bess.physics.grid_import_kw == pytest.approx(200.0) for step in empty_discharge_steps)
+
+    # Always-charge fills on the two cheap samples, then Battery Police blocks further charge.
+    _, always_charge_steps = run_baby_1_actions((-1.0, -1.0, -1.0, -1.0))
+    assert always_charge_steps[1].bess.physics.next_soc == pytest.approx(0.90)
+    assert always_charge_steps[2].bess.physics.requested_battery_kw == pytest.approx(-80.0)
+    assert always_charge_steps[2].bess.physics.battery_after_police_kw == pytest.approx(0.0)
+    assert always_charge_steps[2].bess.physics.final_battery_kw == pytest.approx(0.0)
+    assert always_charge_steps[2].bess.physics.grid_import_kw == pytest.approx(200.0)
