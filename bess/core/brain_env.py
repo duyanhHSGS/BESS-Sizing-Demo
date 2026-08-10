@@ -37,11 +37,25 @@
 #   action +0.5 -> requested power +225 kW (discharge)
 #   action +1.0 -> requested power +450 kW (discharge)
 #
-# PHYSICS POLICE V1:
-#   LAW 1: SOC may never leave [minimum_state_of_charge, maximum_state_of_charge].
-#          Requested battery power is clipped BEFORE physics so energy is not
-#          magically created/deleted by clipping SOC after an illegal action.
-#   LAW 2: No export. Discharge may never exceed the current non-negative net load.
+# TWO SEPARATE GUARDS — DO NOT MIX THEM:
+#
+# BATTERY POLICE:
+#   - Pure battery-side only.
+#   - Knows SOC, SOC min/max, battery capacity, and timestep.
+#   - Clips requested BATTERY-SIDE power so the battery cannot cross SOC min/max.
+#   - Does NOT know net load, grid, factory, tariff, PV, or efficiency.
+#
+# GRID GUARD:
+#   - Outside-world no-export rule only.
+#   - Knows net load and discharge efficiency.
+#   - Converts battery-side discharge into outside delivered power and clips it so
+#     delivered power cannot exceed net load.
+#   - Charging is untouched by the no-export guard.
+#
+# SOC PHYSICS:
+#   - Uses the FINAL battery-side power after both guards.
+#   - Battery-side power changes stored battery energy exactly; efficiency does NOT
+#     change SOC in this model. Efficiency belongs to the outside conversion layer.
 #
 # This file is a standalone BESS brain playground and is NOT wired into the project.
 # ============================================================
@@ -61,9 +75,10 @@ POWER_SCALE_KW = 1000.0
 
 
 def action_to_requested_battery_power_kw(action: float, battery_power_kw: float) -> float:
-    """Turn the brain's one action into requested battery power in kW.
+    """Turn the brain's one action into requested BATTERY-SIDE power in kW.
+
     Negative = charge, zero = idle, positive = discharge.
-    The returned value is only a request; Physics Police must approve it.
+    The returned value is only a request; Battery Police and Grid Guard may reduce it.
     """
     # TODO: check at init.
     if battery_power_kw <= 0.0:
@@ -76,25 +91,22 @@ def action_to_requested_battery_power_kw(action: float, battery_power_kw: float)
 def police_battery_power(
     *,
     requested_battery_power_kw: float,
-    net_load_kw: float,
     state_of_charge: float,
     minimum_state_of_charge: float,
     maximum_state_of_charge: float,
     battery_capacity_kwh: float,
     timestep_hours: float,
-) -> tuple[float, float]:
-    """Apply the two Physics Police laws.
-    Returns ``(actual_battery_power_kw, next_state_of_charge)``.
-    Sign convention:
-      negative power = charge
-      positive power = discharge
-    V1 deliberately knows nothing about PV, tariffs, rewards, or strategy.
-    ``net_load_kw`` is already the final load signal supplied to this env.
+) -> float:
+    """Battery Police: enforce SOC limits using pure BATTERY-SIDE quantities only.
 
-    TODO FUTURE PHYSICS:
-      - Charge/discharge efficiency is NOT modeled yet; current SOC math assumes 100% efficiency.
-      - PV is NOT handled here. Any PV effect must already be baked into ``net_load_kw`` upstream.
-        How PV/net-load preprocessing should work is a future problem for this scratch env.
+    Returns the SOC-safe battery-side power in kW.
+
+    Sign convention:
+      negative power = charge battery
+      positive power = discharge battery
+
+    This function deliberately knows NOTHING about net load, grid power,
+    factory power, PV, tariff, or efficiency.
     """
     minimum_soc = float(minimum_state_of_charge)
     maximum_soc = float(maximum_state_of_charge)
@@ -102,7 +114,6 @@ def police_battery_power(
     dt_hours = float(timestep_hours)
     current_soc = float(state_of_charge)
     requested_power_kw = float(requested_battery_power_kw)
-    final_net_load_kw = float(net_load_kw)
 
     if not all(
         math.isfinite(value)
@@ -113,17 +124,15 @@ def police_battery_power(
             dt_hours,
             current_soc,
             requested_power_kw,
-            final_net_load_kw,
         )
     ):
-        raise ValueError("Physics Police inputs must all be finite numbers")
+        raise ValueError("Battery Police inputs must all be finite numbers")
     if maximum_soc <= minimum_soc:
         raise ValueError("maximum_state_of_charge must be greater than minimum_state_of_charge")
     if capacity_kwh <= 0.0:
         raise ValueError("battery_capacity_kwh must be greater than 0")
     if dt_hours <= 0.0:
         raise ValueError("timestep_hours must be greater than 0")
-
     if current_soc < minimum_soc or current_soc > maximum_soc:
         raise ValueError(
             "state_of_charge must already be inside "
@@ -131,43 +140,120 @@ def police_battery_power(
         )
 
     if requested_power_kw > 0.0:
-        # LAW 1 — do not discharge below minimum SOC.
-        available_energy_kwh = (current_soc - minimum_soc) * capacity_kwh
-        maximum_soc_safe_discharge_kw = available_energy_kwh / dt_hours
+        # Pure battery-side discharge limit: how much stored energy exists above SOC_min?
+        available_battery_energy_kwh = (current_soc - minimum_soc) * capacity_kwh
+        maximum_soc_safe_discharge_kw = available_battery_energy_kwh / dt_hours
+        return min(requested_power_kw, maximum_soc_safe_discharge_kw)
 
-        # LAW 2 — no export. With no separate PV concept, discharge can only
-        # serve the already-computed positive net load.
-        maximum_no_export_discharge_kw = max(0.0, final_net_load_kw)
+    if requested_power_kw < 0.0:
+        # Pure battery-side charge limit: how much empty battery room exists below SOC_max?
+        available_battery_room_kwh = (maximum_soc - current_soc) * capacity_kwh
+        maximum_soc_safe_charge_kw = available_battery_room_kwh / dt_hours
+        return -min(-requested_power_kw, maximum_soc_safe_charge_kw)
 
-        actual_power_kw = min(
-            requested_power_kw,
-            maximum_soc_safe_discharge_kw,
-            maximum_no_export_discharge_kw,
+    return 0.0
+
+
+def grid_guard_no_export(
+    *,
+    battery_power_kw: float,
+    net_load_kw: float,
+    discharge_efficiency: float,
+) -> float:
+    """Grid Guard: enforce no export while keeping power expressed battery-side.
+
+    ``battery_power_kw`` is already a BATTERY-SIDE number.
+    Positive battery power is discharge. Only discharge can create export.
+
+    Example with efficiency=0.9:
+      +100 battery kW -> +90 kW delivered outside the battery.
+
+    The guard clips battery-side discharge so outside delivered power never exceeds
+    the non-negative net load. Charging passes through unchanged.
+    """
+    battery_side_power_kw = float(battery_power_kw)
+    final_net_load_kw = float(net_load_kw)
+    efficiency = float(discharge_efficiency)
+
+    if not all(
+        math.isfinite(value)
+        for value in (
+            battery_side_power_kw,
+            final_net_load_kw,
+            efficiency,
         )
+    ):
+        raise ValueError("Grid Guard inputs must all be finite numbers")
+    if efficiency <= 0.0 or efficiency > 1.0:
+        raise ValueError("discharge_efficiency must be greater than 0 and at most 1")
 
-    elif requested_power_kw < 0.0:
-        # LAW 1 — do not charge above maximum SOC.
-        available_room_kwh = (maximum_soc - current_soc) * capacity_kwh
-        maximum_soc_safe_charge_kw = available_room_kwh / dt_hours
-        actual_power_kw = -min(-requested_power_kw, maximum_soc_safe_charge_kw)
+    # Charging cannot create export, so no-export does not modify charge power.
+    if battery_side_power_kw <= 0.0:
+        return battery_side_power_kw
 
-    else:
-        actual_power_kw = 0.0
+    # net_load_kw is the already-prepared outside-world demand signal.
+    # If it is negative, there is zero demand available for battery discharge.
+    non_negative_net_load_kw = max(0.0, final_net_load_kw)
 
-    # Positive power discharges the battery; negative power charges it.
-    next_state_of_charge = current_soc - (actual_power_kw * dt_hours / capacity_kwh)
+    # outside_delivered_kw = battery_side_discharge_kw * discharge_efficiency
+    # Therefore battery_side_discharge_kw may be at most net_load / efficiency.
+    maximum_no_export_battery_discharge_kw = non_negative_net_load_kw / efficiency
+    return min(battery_side_power_kw, maximum_no_export_battery_discharge_kw)
 
-    # Do not hide physics bugs by broadly clipping SOC after the fact.
-    # Only snap microscopic floating-point roundoff back onto the exact boundary.
+
+def next_battery_state_of_charge(
+    *,
+    state_of_charge: float,
+    battery_power_kw: float,
+    battery_capacity_kwh: float,
+    timestep_hours: float,
+    minimum_state_of_charge: float,
+    maximum_state_of_charge: float,
+) -> float:
+    """Apply FINAL battery-side power to SOC with no efficiency term.
+
+    Positive battery power removes stored energy.
+    Negative battery power adds stored energy.
+    """
+    current_soc = float(state_of_charge)
+    battery_side_power_kw = float(battery_power_kw)
+    capacity_kwh = float(battery_capacity_kwh)
+    dt_hours = float(timestep_hours)
+    minimum_soc = float(minimum_state_of_charge)
+    maximum_soc = float(maximum_state_of_charge)
+
+    if not all(
+        math.isfinite(value)
+        for value in (
+            current_soc,
+            battery_side_power_kw,
+            capacity_kwh,
+            dt_hours,
+            minimum_soc,
+            maximum_soc,
+        )
+    ):
+        raise ValueError("SOC physics inputs must all be finite numbers")
+    if capacity_kwh <= 0.0:
+        raise ValueError("battery_capacity_kwh must be greater than 0")
+    if dt_hours <= 0.0:
+        raise ValueError("timestep_hours must be greater than 0")
+    if maximum_soc <= minimum_soc:
+        raise ValueError("maximum_state_of_charge must be greater than minimum_state_of_charge")
+
+    next_soc = current_soc - (battery_side_power_kw * dt_hours / capacity_kwh)
+
     numerical_tolerance = 1e-12
-    if next_state_of_charge < minimum_soc - numerical_tolerance or next_state_of_charge > maximum_soc + numerical_tolerance:
-        raise RuntimeError("Physics Police produced an out-of-range next_state_of_charge")
-    if next_state_of_charge < minimum_soc:
-        next_state_of_charge = minimum_soc
-    elif next_state_of_charge > maximum_soc:
-        next_state_of_charge = maximum_soc
-
-    return actual_power_kw, next_state_of_charge
+    if next_soc < minimum_soc - numerical_tolerance or next_soc > maximum_soc + numerical_tolerance:
+        raise RuntimeError(
+            "Final battery-side power would push SOC outside the legal range; "
+            "run Battery Police before SOC physics"
+        )
+    if next_soc < minimum_soc:
+        return minimum_soc
+    if next_soc > maximum_soc:
+        return maximum_soc
+    return next_soc
 
 
 def build_observation(
