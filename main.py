@@ -16,6 +16,7 @@ import bess.shadow.shadow_jobs as shadow_jobs
 import bess.shadow.shadow_runs as shadow_runs
 import bess.integrations.thingsboard_connector as thingsboard_connector
 import bess.forecasting.shadow_weather as shadow_weather
+import EXPERIMENT_FIELD.brain_env_sessions as brain_env_sessions
 from bess.evaluation.benchmark import (
     build_benchmark,
     detect_dt_hours,
@@ -186,6 +187,65 @@ def training_job_detail(job_id):
 @app.route("/api/training/jobs/<job_id>/events", methods=["GET"])
 def training_job_events(job_id):
     return Response(MANAGER.sse_events(job_id), mimetype="text/event-stream")
+
+
+@app.route("/api/brain-env/context", methods=["GET"])
+def brain_env_context():
+    try:
+        return jsonify(brain_env_sessions.context(dict(PARAMETERS)))
+    except (brain_env_sessions.BrainEnvSessionError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 422
+
+
+@app.route("/api/brain-env/sessions", methods=["POST"])
+def brain_env_session_create():
+    payload = request.get_json(silent=True) or {}
+    try:
+        session = brain_env_sessions.create_session(
+            dict(PARAMETERS),
+            day_index=payload.get("day_index"),
+            starting_peak_kw=payload.get("starting_peak_kw", 0.0),
+        )
+    except (brain_env_sessions.BrainEnvSessionError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 422
+    return jsonify({"status": session.status(), "trace": []}), 201
+
+
+def _brain_env_session_or_404(session_id):
+    try:
+        return brain_env_sessions.get_session(session_id), None
+    except brain_env_sessions.BrainEnvSessionNotFound as exc:
+        return None, (jsonify({"error": str(exc)}), 404)
+
+
+@app.route("/api/brain-env/sessions/<session_id>", methods=["GET"])
+def brain_env_session_detail(session_id):
+    session, error = _brain_env_session_or_404(session_id)
+    if error:
+        return error
+    return jsonify(session.detail())
+
+
+@app.route("/api/brain-env/sessions/<session_id>/step", methods=["POST"])
+def brain_env_session_step(session_id):
+    session, error = _brain_env_session_or_404(session_id)
+    if error:
+        return error
+    payload = request.get_json(silent=True) or {}
+    try:
+        entry, status = session.step(payload.get("action"))
+    except brain_env_sessions.BrainEnvSessionComplete as exc:
+        return jsonify({"error": str(exc), "status": session.status()}), 409
+    except (brain_env_sessions.BrainEnvSessionError, ValueError) as exc:
+        return jsonify({"error": str(exc), "status": session.status()}), 422
+    return jsonify({"entry": entry, "status": status})
+
+
+@app.route("/api/brain-env/sessions/<session_id>", methods=["DELETE"])
+def brain_env_session_delete(session_id):
+    if not brain_env_sessions.drop_session(session_id):
+        return jsonify({"error": "BrainEnv session not found."}), 404
+    return jsonify({"ok": True})
 
 
 @app.route("/api/dispatch/policies", methods=["GET"])

@@ -842,6 +842,23 @@
     .shadow-stat b { display: block; margin-top: 5px; font-size: 18px; }
     .shadow-good { color: #047857; }
     .shadow-bad { color: #b42318; }
+    .brain-hero { background: linear-gradient(135deg, #172554, #312e81 55%, #701a75); color: #fff; }
+    .brain-hero h2 { color: #fff; }
+    .brain-control-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; align-items: end; }
+    .brain-action-wrap { grid-column: 1 / -1; display: grid; grid-template-columns: auto minmax(220px, 1fr) auto; gap: 12px; align-items: center; }
+    .brain-action-wrap input[type="range"] { width: 100%; accent-color: #7c3aed; }
+    .brain-action-value { min-width: 170px; font-weight: 800; text-align: center; color: #fef3c7; }
+    .brain-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 10px; margin-top: 14px; }
+    .brain-stat { padding: 12px; border: 1px solid #d8dee9; border-radius: 12px; background: #fff; }
+    .brain-stat span { display: block; color: #64748b; font-size: 12px; }
+    .brain-stat b { display: block; margin-top: 5px; font-size: 18px; }
+    .brain-chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; }
+    .brain-chart { display: block; width: 100%; height: 280px; background: #fff; border-radius: 10px; }
+    .brain-diagnostics { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }
+    .brain-diagnostic { padding: 9px 10px; border-radius: 9px; background: #f8fafc; border: 1px solid #e2e8f0; }
+    .brain-diagnostic span { display: block; color: #64748b; font-size: 11px; }
+    .brain-diagnostic b { display: block; margin-top: 3px; }
+    .brain-status-error { color: #b42318; }
   </style>
 </head>
 
@@ -851,6 +868,7 @@
       <button class="tab-button active" type="button" data-tab-target="sizing-demo">Sizing Demo</button>
       <button class="tab-button" type="button" data-tab-target="get-weather">Get Weather</button>
       <button class="tab-button" type="button" data-tab-target="training-lab">Training Lab</button>
+      <button class="tab-button" type="button" data-tab-target="brain-env">BrainEnv</button>
       <button class="tab-button" type="button" data-tab-target="benchmarking">Benchmarking</button>
       <button class="tab-button" type="button" data-tab-target="live-runs">Live Runs</button>
       <button class="tab-button" type="button" data-tab-target="shadow-running">Shadow Running</button>
@@ -1564,6 +1582,61 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       </section>
     </section>
 
+    <section id="tab-brain-env" class="tab-panel">
+      <section class="card brain-hero">
+        <div class="section-head">
+          <div>
+            <h2>BrainEnv Twin-World Playground</h2>
+            <div>One factory day. One action slider. Battery World fights its Ghost No-Battery twin.</div>
+          </div>
+          <div id="brain-status" class="live-status">Open this tab to wake the tiny environment.</div>
+        </div>
+        <div class="brain-control-grid">
+          <label>CSV day <select id="brain-day"></select></label>
+          <label>Carry-in monthly peak (kW)
+            <input id="brain-starting-peak" type="number" step="any" value="0">
+          </label>
+          <button id="btn-brain-start" class="primary" type="button">Start selected day</button>
+          <button id="btn-brain-step" type="button">Step once</button>
+          <button id="btn-brain-auto" class="primary" type="button">Auto-run</button>
+          <button id="btn-brain-pause" type="button" disabled>Pause</button>
+          <button id="btn-brain-reset" type="button">Reset</button>
+          <div class="brain-action-wrap">
+            <span>Charge -1</span>
+            <input id="brain-action" data-keep-range type="range" min="-1" max="1" step="0.01" value="0">
+            <span>+1 Discharge</span>
+            <output id="brain-action-value" class="brain-action-value">0.00 - IDLE</output>
+          </div>
+        </div>
+        <div id="brain-session-info" class="info">No active BrainEnv session.</div>
+      </section>
+
+      <section class="card">
+        <h2>Applied settings snapshot</h2>
+        <div id="brain-settings" class="brain-diagnostics">Loading applied UI settings...</div>
+      </section>
+
+      <div id="brain-stats" class="brain-stats"></div>
+
+      <div class="brain-chart-grid">
+        <section class="card">
+          <h2>Grid duel</h2>
+          <canvas id="brain-grid-chart" class="brain-chart" width="900" height="280"></canvas>
+          <p class="chart-help">Raw factory net load, Battery World grid import, and Ghost World grid import.</p>
+        </section>
+        <section class="card">
+          <h2>Brain action and battery SOC</h2>
+          <canvas id="brain-soc-chart" class="brain-chart" width="900" height="280"></canvas>
+          <p class="chart-help">Action uses -1 charge, 0 idle, +1 discharge. SOC shows the resulting battery state.</p>
+        </section>
+      </div>
+
+      <section class="card">
+        <h2>Latest-step nerd scan</h2>
+        <div id="brain-diagnostics" class="brain-diagnostics">Take one step to reveal Battery Police, Grid Guard, meter, losses, and money diagnostics.</div>
+      </section>
+    </section>
+
     <section id="tab-benchmarking" class="tab-panel">
       <section class="card benchmark-hero">
         <div class="section-head">
@@ -1883,7 +1956,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
   <script>
     // Numeric inputs are intentionally unrestricted in the UI. Backend/domain
     // validation still reports values that cannot form a meaningful scenario.
-    document.querySelectorAll('input[type="number"], input[type="range"]').forEach((input) => {
+    document.querySelectorAll('input[type="number"], input[type="range"]:not([data-keep-range])').forEach((input) => {
       input.type = "number";
       input.removeAttribute("min");
       input.removeAttribute("max");
@@ -1928,6 +2001,31 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const batteryPowerInput = document.getElementById("tf-bpow");
     const oracleProgress = document.getElementById("oracle-progress");
     const sizingTableBody = document.getElementById("sizing-table-body");
+    const brainDaySelect = document.getElementById("brain-day");
+    const brainStartingPeak = document.getElementById("brain-starting-peak");
+    const brainAction = document.getElementById("brain-action");
+    const brainActionValue = document.getElementById("brain-action-value");
+    const brainStatusElement = document.getElementById("brain-status");
+    const brainSessionInfo = document.getElementById("brain-session-info");
+    const brainSettingsElement = document.getElementById("brain-settings");
+    const brainStatsElement = document.getElementById("brain-stats");
+    const brainDiagnosticsElement = document.getElementById("brain-diagnostics");
+    const brainGridChart = document.getElementById("brain-grid-chart");
+    const brainSocChart = document.getElementById("brain-soc-chart");
+    const brainStartButton = document.getElementById("btn-brain-start");
+    const brainStepButton = document.getElementById("btn-brain-step");
+    const brainAutoButton = document.getElementById("btn-brain-auto");
+    const brainPauseButton = document.getElementById("btn-brain-pause");
+    const brainResetButton = document.getElementById("btn-brain-reset");
+    const brainSessionStorageKey = "sizing-demo-brain-env-session-v1";
+    let brainContextPayload = null;
+    let brainSessionStatus = null;
+    let brainTrace = [];
+    let brainInitialized = false;
+    let brainRunning = false;
+    let brainStepPending = false;
+    let brainSessionPending = false;
+    let brainAutoTimer = null;
 
     const sampleBatteryCandidates = {{ sample_battery_candidates | tojson }};
     const currentTariffConfig = {
@@ -2121,6 +2219,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       if (liveLastPayload) renderSelectedLiveDay();
       if (shadowLastDays.length) renderSelectedShadowDay();
       if (benchmarkingState.result) drawBenchmarkVersus();
+      if (brainInitialized) drawBrainCharts();
     }
 
     function initializeTariffAppearanceControls() {
@@ -2146,6 +2245,379 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     }
 
     initializeTariffAppearanceControls();
+
+    async function brainApi(url, options = {}) {
+      const response = await fetch(url, options);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const error = new Error(payload.error || `BrainEnv request failed (${response.status})`);
+        error.status = response.status;
+        error.payload = payload;
+        throw error;
+      }
+      return payload;
+    }
+
+    function storedBrainSessionId() {
+      try {
+        return localStorage.getItem(brainSessionStorageKey);
+      } catch (_error) {
+        return null;
+      }
+    }
+
+    function storeBrainSessionId(sessionId) {
+      try {
+        localStorage.setItem(brainSessionStorageKey, sessionId);
+      } catch (_error) {
+        // The live page still works when browser storage is unavailable.
+      }
+    }
+
+    function clearStoredBrainSessionId() {
+      try {
+        localStorage.removeItem(brainSessionStorageKey);
+      } catch (_error) {
+        // Nothing else is required when browser storage is unavailable.
+      }
+    }
+
+    function setBrainMessage(message, isError = false) {
+      brainStatusElement.textContent = message;
+      brainStatusElement.classList.toggle("brain-status-error", isError);
+    }
+
+    function brainSetting(label, value) {
+      return `<div class="brain-diagnostic"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`;
+    }
+
+    function renderBrainSettings(settings = {}) {
+      brainSettingsElement.innerHTML = [
+        brainSetting("Battery body", `${formatNumber(settings.battery_capacity_kwh || 0, 1)} kWh / ${formatNumber(settings.battery_power_kw || 0, 1)} kW`),
+        brainSetting("Starting / allowed SOC", `${formatNumber((settings.initial_soc || 0) * 100, 1)}% / ${formatNumber((settings.minimum_soc || 0) * 100, 1)}-${formatNumber((settings.maximum_soc || 0) * 100, 1)}%`),
+        brainSetting("Efficiencies", `charge ${formatNumber((settings.charge_efficiency || 0) * 100, 1)}% / discharge ${formatNumber((settings.discharge_efficiency || 0) * 100, 1)}%`),
+        brainSetting("Native timestep", `${formatNumber((settings.timestep_hours || 0) * 60, 3)} minutes`),
+        brainSetting("Battery wear", `${formatNumber(settings.battery_wear_vnd_per_kwh || 0, 2)} VND/kWh`),
+        brainSetting("Demand meter", `${escapeHtml(settings.billing_mode || "unknown")} / ${formatNumber(settings.demand_charge_vnd_per_kw || 0)} VND/kW`),
+        brainSetting("Energy prices", `${formatNumber(settings.cheap_tariff_vnd_per_kwh || 0)} / ${formatNumber(settings.normal_tariff_vnd_per_kwh || 0)} / ${formatNumber(settings.expensive_tariff_vnd_per_kwh || 0)} VND/kWh`),
+        brainSetting("Tariff windows", `cheap ${settings.cheap_windows || "none"}; expensive ${settings.expensive_windows || "none"}`),
+      ].join("");
+    }
+
+    function updateBrainActionLabel() {
+      const value = Number(brainAction.value || 0);
+      const mode = value < -0.005 ? "CHARGE" : value > 0.005 ? "DISCHARGE" : "IDLE";
+      brainActionValue.value = `${value.toFixed(2)} - ${mode}`;
+      brainActionValue.textContent = brainActionValue.value;
+    }
+
+    function brainStat(label, value, className = "") {
+      return `<div class="brain-stat"><span>${escapeHtml(label)}</span><b class="${className}">${escapeHtml(value)}</b></div>`;
+    }
+
+    function renderBrainStats() {
+      const summary = brainSessionStatus?.summary || {};
+      brainStatsElement.innerHTML = [
+        brainStat("Battery World cost", formatVnd(summary.bess_operating_cost_vnd || 0)),
+        brainStat("Ghost World cost", formatVnd(summary.raw_operating_cost_vnd || 0)),
+        brainStat("Net battery savings", formatVnd(summary.net_battery_savings_vnd || 0), Number(summary.net_battery_savings_vnd || 0) >= 0 ? "shadow-good" : "shadow-bad"),
+        brainStat("Energy savings", formatVnd(summary.energy_savings_vnd || 0)),
+        brainStat("Demand savings", formatVnd(summary.demand_savings_vnd || 0)),
+        brainStat("Battery wear", formatVnd(summary.battery_wear_cost_vnd || 0)),
+        brainStat("Battery SOC", `${formatNumber((summary.state_of_charge || 0) * 100, 2)}%`),
+        brainStat("BESS / Ghost peak", `${formatNumber(summary.bess_monthly_peak_kw || 0, 2)} / ${formatNumber(summary.raw_monthly_peak_kw || 0, 2)} kW`),
+      ].join("");
+    }
+
+    function renderBrainDiagnostics(entry) {
+      if (!entry) {
+        brainDiagnosticsElement.textContent = "Take one step to reveal Battery Police, Grid Guard, meter, losses, and money diagnostics.";
+        return;
+      }
+      const clippedByPolice = Math.abs(Number(entry.requested_battery_kw) - Number(entry.battery_after_police_kw)) > 1e-9;
+      const clippedByGridGuard = Math.abs(Number(entry.battery_after_police_kw) - Number(entry.final_battery_kw)) > 1e-9;
+      const items = [
+        ["Step / clock", `${entry.step_index} / ${entry.time}`],
+        ["Load / PV / net", `${formatNumber(entry.load_kw, 2)} / ${formatNumber(entry.pv_kw, 2)} / ${formatNumber(entry.net_load_kw, 2)} kW`],
+        ["Tariff", `${formatNumber(entry.tariff_vnd_per_kwh, 2)} VND/kWh`],
+        ["Brain action", formatNumber(entry.action, 2)],
+        ["Requested battery", `${formatNumber(entry.requested_battery_kw, 2)} kW`],
+        ["After Battery Police", `${formatNumber(entry.battery_after_police_kw, 2)} kW${clippedByPolice ? " (CLIPPED)" : ""}`],
+        ["Final after Grid Guard", `${formatNumber(entry.final_battery_kw, 2)} kW${clippedByGridGuard ? " (CLIPPED)" : ""}`],
+        ["Battery to factory", `${formatNumber(entry.battery_to_factory_kw, 2)} kW`],
+        ["Grid to battery", `${formatNumber(entry.grid_to_battery_kw, 2)} kW`],
+        ["Conversion loss", `${formatNumber(entry.conversion_loss_kw, 3)} kW`],
+        ["Step throughput", `${formatNumber(entry.battery_throughput_kwh, 3)} kWh`],
+        ["SOC start -> next", `${formatNumber(entry.starting_soc * 100, 2)}% -> ${formatNumber(entry.next_soc * 100, 2)}%`],
+        ["BESS / Ghost grid", `${formatNumber(entry.bess_grid_import_kw, 2)} / ${formatNumber(entry.raw_grid_import_kw, 2)} kW`],
+        ["30-minute block", entry.bess_block_completed ? `complete at ${formatNumber(entry.bess_completed_block_demand_kw, 2)} kW` : "still accumulating"],
+        ["BESS / Ghost peak", `${formatNumber(entry.bess_monthly_peak_kw, 2)} / ${formatNumber(entry.raw_monthly_peak_kw, 2)} kW`],
+        ["Step energy savings", formatVnd(entry.energy_savings_vnd)],
+        ["Step demand savings", formatVnd(entry.demand_savings_vnd)],
+        ["Step wear", formatVnd(entry.battery_wear_cost_vnd)],
+        ["Step net savings", formatVnd(entry.net_battery_savings_vnd)],
+      ];
+      brainDiagnosticsElement.innerHTML = items.map(([label, value]) => brainSetting(label, value)).join("");
+    }
+
+    function prepareBrainCanvas(canvas) {
+      const rect = canvas.getBoundingClientRect();
+      const width = Math.max(320, rect.width || 900);
+      const height = Math.max(220, rect.height || 280);
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.round(width * ratio);
+      canvas.height = Math.round(height * ratio);
+      const canvasContext = canvas.getContext("2d");
+      canvasContext.setTransform(ratio, 0, 0, ratio, 0, 0);
+      canvasContext.clearRect(0, 0, width, height);
+      return { canvasContext, width, height };
+    }
+
+    function drawBrainLine(canvasContext, values, xForIndex, yForValue, color, width = 2) {
+      if (!values.length) return;
+      canvasContext.beginPath();
+      values.forEach((value, index) => {
+        const x = xForIndex(index);
+        const y = yForValue(Number(value));
+        if (index === 0) canvasContext.moveTo(x, y);
+        else canvasContext.lineTo(x, y);
+      });
+      canvasContext.strokeStyle = color;
+      canvasContext.lineWidth = width;
+      canvasContext.stroke();
+    }
+
+    function drawBrainAxes(canvasContext, plot, labels) {
+      canvasContext.strokeStyle = "#cbd5e1";
+      canvasContext.lineWidth = 1;
+      canvasContext.strokeRect(plot.left, plot.top, plot.width, plot.height);
+      canvasContext.fillStyle = "#475569";
+      canvasContext.font = "11px Segoe UI, system-ui, sans-serif";
+      canvasContext.textAlign = "left";
+      canvasContext.fillText(labels.top, plot.left + 4, plot.top + 13);
+      canvasContext.fillText(labels.bottom, plot.left + 4, plot.top + plot.height - 5);
+      canvasContext.textAlign = "right";
+      canvasContext.fillText("24:00", plot.left + plot.width, plot.top + plot.height + 17);
+      canvasContext.textAlign = "left";
+      canvasContext.fillText("00:00", plot.left, plot.top + plot.height + 17);
+    }
+
+    function drawBrainCharts() {
+      const totalSteps = Math.max(2, Number(brainSessionStatus?.total_steps || brainContextPayload?.days?.[0]?.step_count || 2));
+      const dayMeta = brainSessionStatus || {};
+      const tariffConfig = brainSessionStatus?.settings ? {
+        cheapWindows: brainSessionStatus.settings.cheap_windows,
+        expensiveWindows: brainSessionStatus.settings.expensive_windows,
+        sundayNoPeak: brainSessionStatus.settings.sunday_no_peak,
+      } : currentTariffConfig;
+
+      const grid = prepareBrainCanvas(brainGridChart);
+      const gridPlot = { left: 45, top: 18, width: grid.width - 62, height: grid.height - 48 };
+      const gridValues = brainTrace.flatMap((entry) => [entry.net_load_kw, entry.bess_grid_import_kw, entry.raw_grid_import_kw]);
+      const gridMin = Math.min(0, ...gridValues);
+      const gridMax = Math.max(1, ...gridValues);
+      const gridSpan = Math.max(1, gridMax - gridMin);
+      const gridX = (index) => gridPlot.left + gridPlot.width * index / (totalSteps - 1);
+      const gridY = (value) => gridPlot.top + gridPlot.height * (gridMax - value) / gridSpan;
+      drawTariffBands(grid.canvasContext, gridPlot, tariffConfig, dayMeta.date_iso);
+      drawBrainAxes(grid.canvasContext, gridPlot, { top: `${formatNumber(gridMax, 1)} kW`, bottom: `${formatNumber(gridMin, 1)} kW` });
+      drawBrainLine(grid.canvasContext, brainTrace.map((entry) => entry.net_load_kw), gridX, gridY, "#92400e", 1.5);
+      drawBrainLine(grid.canvasContext, brainTrace.map((entry) => entry.raw_grid_import_kw), gridX, gridY, "#64748b", 2);
+      drawBrainLine(grid.canvasContext, brainTrace.map((entry) => entry.bess_grid_import_kw), gridX, gridY, "#2563eb", 2.5);
+      grid.canvasContext.fillStyle = "#92400e"; grid.canvasContext.fillText("Net load", gridPlot.left + 8, gridPlot.top + 29);
+      grid.canvasContext.fillStyle = "#64748b"; grid.canvasContext.fillText("Ghost grid", gridPlot.left + 70, gridPlot.top + 29);
+      grid.canvasContext.fillStyle = "#2563eb"; grid.canvasContext.fillText("BESS grid", gridPlot.left + 142, gridPlot.top + 29);
+
+      const soc = prepareBrainCanvas(brainSocChart);
+      const socPlot = { left: 45, top: 18, width: soc.width - 62, height: soc.height - 48 };
+      const socX = (index) => socPlot.left + socPlot.width * index / (totalSteps - 1);
+      const socY = (value) => socPlot.top + socPlot.height * (1 - value);
+      const actionY = (value) => socPlot.top + socPlot.height * (1 - (value + 1) / 2);
+      drawTariffBands(soc.canvasContext, socPlot, tariffConfig, dayMeta.date_iso);
+      drawBrainAxes(soc.canvasContext, socPlot, { top: "100% SOC / +1", bottom: "0% SOC / -1" });
+      drawBrainLine(soc.canvasContext, brainTrace.map((entry) => entry.next_soc), socX, socY, "#059669", 2.5);
+      drawBrainLine(soc.canvasContext, brainTrace.map((entry) => entry.action), socX, actionY, "#7c3aed", 2);
+      soc.canvasContext.fillStyle = "#059669"; soc.canvasContext.fillText("SOC", socPlot.left + 8, socPlot.top + 29);
+      soc.canvasContext.fillStyle = "#7c3aed"; soc.canvasContext.fillText("Action", socPlot.left + 42, socPlot.top + 29);
+    }
+
+    function updateBrainControls() {
+      const hasSession = Boolean(brainSessionStatus?.session_id);
+      const complete = Boolean(brainSessionStatus?.complete);
+      brainDaySelect.disabled = hasSession;
+      brainStartingPeak.disabled = hasSession;
+      brainStartButton.disabled = brainStepPending || brainSessionPending || brainRunning;
+      brainStepButton.disabled = brainStepPending || brainSessionPending || brainRunning || complete;
+      brainAutoButton.disabled = brainStepPending || brainSessionPending || brainRunning || complete;
+      brainPauseButton.disabled = !brainRunning;
+      if (hasSession) {
+        brainSessionInfo.textContent = `${brainSessionStatus.dataset_name} - day ${brainSessionStatus.day_index}${brainSessionStatus.date_iso ? ` (${brainSessionStatus.date_iso})` : ""} - step ${brainSessionStatus.step_index}/${brainSessionStatus.total_steps} - carry-in peak ${formatNumber(brainSessionStatus.starting_peak_kw, 2)} kW`;
+      } else {
+        brainSessionInfo.textContent = "No active BrainEnv session. Step or Auto-run will start the selected day automatically.";
+      }
+    }
+
+    function renderBrainSession() {
+      updateBrainControls();
+      renderBrainStats();
+      renderBrainDiagnostics(brainTrace.at(-1));
+      drawBrainCharts();
+      if (brainSessionStatus?.complete) {
+        pauseBrainAuto();
+        setBrainMessage("Day complete. Uncle Memory archived the final twin-world score.");
+      }
+    }
+
+    async function loadBrainContext() {
+      try {
+        brainContextPayload = await brainApi("/api/brain-env/context");
+        brainDaySelect.innerHTML = brainContextPayload.days.map((day) => (
+          `<option value="${day.day_index}">Day ${day.day_index}${day.date_iso ? ` - ${escapeHtml(day.date_iso)}` : ""} (${escapeHtml(day.day_type)}, ${day.step_count} steps)</option>`
+        )).join("");
+        renderBrainSettings(brainContextPayload.settings);
+        setBrainMessage(`Ready: ${brainContextPayload.dataset_name}. Pick a day and move the action brain.`);
+
+        const savedSessionId = storedBrainSessionId();
+        if (savedSessionId) {
+          try {
+            const detail = await brainApi(`/api/brain-env/sessions/${encodeURIComponent(savedSessionId)}`);
+            brainSessionStatus = detail.status;
+            brainTrace = detail.trace || [];
+            brainDaySelect.value = String(brainSessionStatus.day_index);
+            brainStartingPeak.value = String(brainSessionStatus.starting_peak_kw);
+            renderBrainSettings(brainSessionStatus.settings);
+            setBrainMessage("Reconnected to the in-memory BrainEnv session after refresh.");
+          } catch (error) {
+            clearStoredBrainSessionId();
+            if (error.status !== 404) throw error;
+          }
+        }
+        renderBrainSession();
+      } catch (error) {
+        setBrainMessage(error.message, true);
+      }
+    }
+
+    async function startBrainSession() {
+      if (brainSessionPending) throw new Error("BrainEnv session creation is already in progress.");
+      brainSessionPending = true;
+      updateBrainControls();
+      pauseBrainAuto();
+      try {
+        if (brainSessionStatus?.session_id) {
+          await brainApi(`/api/brain-env/sessions/${encodeURIComponent(brainSessionStatus.session_id)}`, { method: "DELETE" }).catch(() => null);
+          brainSessionStatus = null;
+          brainTrace = [];
+          clearStoredBrainSessionId();
+        }
+        const payload = await brainApi("/api/brain-env/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            day_index: Number(brainDaySelect.value),
+            starting_peak_kw: Number(brainStartingPeak.value),
+          }),
+        });
+        brainSessionStatus = payload.status;
+        brainTrace = payload.trace || [];
+        storeBrainSessionId(brainSessionStatus.session_id);
+        renderBrainSettings(brainSessionStatus.settings);
+        setBrainMessage("BrainEnv session started. Battery World and Ghost World are locked together.");
+        renderBrainSession();
+      } catch (error) {
+        renderBrainSession();
+        throw error;
+      } finally {
+        brainSessionPending = false;
+        updateBrainControls();
+      }
+    }
+
+    async function ensureBrainSession() {
+      if (!brainSessionStatus?.session_id) await startBrainSession();
+    }
+
+    async function stepBrainSession() {
+      if (brainStepPending) return;
+      brainStepPending = true;
+      updateBrainControls();
+      try {
+        await ensureBrainSession();
+        if (brainSessionStatus.complete) return;
+        const payload = await brainApi(`/api/brain-env/sessions/${encodeURIComponent(brainSessionStatus.session_id)}/step`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: Number(brainAction.value) }),
+        });
+        brainTrace.push(payload.entry);
+        brainSessionStatus = payload.status;
+        setBrainMessage(`Step ${brainSessionStatus.step_index}/${brainSessionStatus.total_steps} complete. Next action reads the live slider.`);
+        renderBrainSession();
+      } catch (error) {
+        pauseBrainAuto();
+        if (error.status === 404) {
+          brainSessionStatus = null;
+          brainTrace = [];
+          clearStoredBrainSessionId();
+        } else if (error.payload?.status) {
+          brainSessionStatus = error.payload.status;
+        }
+        setBrainMessage(error.message, true);
+        renderBrainSession();
+      } finally {
+        brainStepPending = false;
+        updateBrainControls();
+      }
+    }
+
+    function pauseBrainAuto() {
+      brainRunning = false;
+      if (brainAutoTimer !== null) window.clearTimeout(brainAutoTimer);
+      brainAutoTimer = null;
+      updateBrainControls();
+    }
+
+    async function runBrainAutoTick() {
+      if (!brainRunning) return;
+      await stepBrainSession();
+      if (brainRunning && !brainSessionStatus?.complete) {
+        brainAutoTimer = window.setTimeout(runBrainAutoTick, 120);
+      }
+    }
+
+    async function startBrainAuto() {
+      if (brainRunning || brainSessionStatus?.complete) return;
+      try {
+        await ensureBrainSession();
+      } catch (error) {
+        setBrainMessage(error.message, true);
+        return;
+      }
+      brainRunning = true;
+      updateBrainControls();
+      setBrainMessage("Auto-run active. Move the slider live; the next step will obey it.");
+      runBrainAutoTick();
+    }
+
+    async function resetBrainSession() {
+      pauseBrainAuto();
+      const sessionId = brainSessionStatus?.session_id || storedBrainSessionId();
+      if (sessionId) {
+        await brainApi(`/api/brain-env/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }).catch(() => null);
+      }
+      clearStoredBrainSessionId();
+      brainSessionStatus = null;
+      brainTrace = [];
+      setBrainMessage("BrainEnv reset. Pick a day and start another twin-world experiment.");
+      renderBrainSession();
+    }
+
+    async function initializeBrainEnvTab() {
+      if (brainInitialized) return;
+      brainInitialized = true;
+      updateBrainActionLabel();
+      await loadBrainContext();
+    }
 
     function billValue(day, field) {
       return day && Number.isFinite(Number(day[field])) ? Number(day[field]) : null;
@@ -4412,6 +4884,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           });
           if (target === "training-lab") {
             refreshTrainingLab();
+          } else if (target === "brain-env") {
+            initializeBrainEnvTab();
+            drawBrainCharts();
           } else if (target === "get-weather") {
             loadWeatherContext();
           } else if (target === "benchmarking") {
@@ -5416,6 +5891,19 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       drawDispatchViewer();
     });
     dispatchRunButton.addEventListener("click", createDispatchRun);
+    brainAction.addEventListener("input", updateBrainActionLabel);
+    brainStartButton.addEventListener("click", () => {
+      startBrainSession().catch((error) => setBrainMessage(error.message, true));
+    });
+    brainStepButton.addEventListener("click", stepBrainSession);
+    brainAutoButton.addEventListener("click", startBrainAuto);
+    brainPauseButton.addEventListener("click", () => {
+      pauseBrainAuto();
+      setBrainMessage("Auto-run paused. Uncle Manager is holding the clipboard.");
+    });
+    brainResetButton.addEventListener("click", () => {
+      resetBrainSession().catch((error) => setBrainMessage(error.message, true));
+    });
     window.addEventListener("resize", () => {
       hideTooltip();
       hideDispatchTooltip();
@@ -5428,6 +5916,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       }
       if (document.getElementById("tab-shadow-running").classList.contains("active")) {
         renderSelectedShadowDay();
+      }
+      if (document.getElementById("tab-brain-env").classList.contains("active")) {
+        drawBrainCharts();
       }
     });
     drawBenchmark();
