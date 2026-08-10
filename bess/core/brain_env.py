@@ -64,6 +64,12 @@
 #   - Battery-side power changes stored battery energy exactly; efficiency does NOT
 #     change SOC in this model. Efficiency belongs only to outside electrical physics.
 #
+# UTILITY ELECTRICITY METER:
+#   - Sees ONLY final grid_import_kw from physics.
+#   - Integrates energy inside fixed, clock-aligned, non-overlapping 30-minute blocks.
+#   - A monthly demand peak changes only when a complete 30-minute block finishes.
+#   - Knows NOTHING about tariff, money, battery wear, reward, or PPO.
+#
 # This file is a standalone BESS brain playground and is NOT wired into the project.
 # ============================================================
 
@@ -80,6 +86,7 @@ ACTION_MAX = 1.0
 
 # TODO BIG JUICY TODO: 1000 kW is an arbitrary temporary ruler. Replace this with a normalization rule that is principled for the site/data and does not silently erase large values.
 POWER_SCALE_KW = 1000.0
+DEMAND_BLOCK_HOURS = 0.5
 
 
 def action_to_requested_battery_power_kw(action: float, battery_power_kw: float) -> float:
@@ -454,6 +461,164 @@ def run_physics_step(
         starting_soc=float(state_of_charge),
         next_soc=next_soc,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ElectricityMeterState:
+    """Memory carried by the fixed 30-minute utility demand meter.
+
+    ``block_energy_kwh`` and ``block_elapsed_hours`` describe only the currently
+    open 30-minute block. ``monthly_peak_kw`` is the highest COMPLETED block
+    demand seen in the current month.
+    """
+
+    block_energy_kwh: float = 0.0
+    block_elapsed_hours: float = 0.0
+    monthly_peak_kw: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class ElectricityMeterStepResult:
+    """Named answer to: what did the utility meter see on this timestep?"""
+
+    grid_import_kw: float
+    sample_energy_kwh: float
+    accumulated_block_energy_kwh: float
+    accumulated_block_elapsed_hours: float
+    block_completed: bool
+    completed_block_demand_kw: float | None
+    previous_monthly_peak_kw: float
+    monthly_peak_kw: float
+    new_monthly_peak: bool
+    next_state: ElectricityMeterState
+
+
+def _validate_meter_timestep(timestep_hours: float) -> int:
+    """Return samples per fixed 30-minute block, rejecting awkward resolutions."""
+    dt_hours = float(timestep_hours)
+    if not math.isfinite(dt_hours) or dt_hours <= 0.0:
+        raise ValueError("timestep_hours must be a finite number greater than 0")
+
+    samples_per_block = DEMAND_BLOCK_HOURS / dt_hours
+    rounded_samples_per_block = round(samples_per_block)
+    if rounded_samples_per_block < 1 or not math.isclose(
+        samples_per_block,
+        rounded_samples_per_block,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        raise ValueError("timestep_hours must divide a fixed 30-minute demand block exactly")
+    return int(rounded_samples_per_block)
+
+
+def run_electricity_meter_step(
+    *,
+    grid_import_kw: float,
+    timestep_hours: float,
+    meter_state: ElectricityMeterState,
+) -> ElectricityMeterStepResult:
+    """Feed one grid-import sample into the fixed, non-overlapping 30-minute meter.
+
+    The meter knows nothing about battery physics, tariff, billing, wear, reward,
+    PPO, or episodes. It only integrates grid-import energy inside one fixed
+    30-minute block and updates the monthly maximum when that block completes.
+    """
+    _validate_meter_timestep(timestep_hours)
+
+    grid_kw = float(grid_import_kw)
+    dt_hours = float(timestep_hours)
+    if not math.isfinite(grid_kw):
+        raise ValueError("grid_import_kw must be finite")
+    if grid_kw < 0.0:
+        raise ValueError("grid_import_kw must not be negative")
+    if not isinstance(meter_state, ElectricityMeterState):
+        raise TypeError("meter_state must be an ElectricityMeterState")
+
+    previous_block_energy_kwh = float(meter_state.block_energy_kwh)
+    previous_block_elapsed_hours = float(meter_state.block_elapsed_hours)
+    previous_monthly_peak_kw = float(meter_state.monthly_peak_kw)
+    if not all(
+        math.isfinite(value)
+        for value in (
+            previous_block_energy_kwh,
+            previous_block_elapsed_hours,
+            previous_monthly_peak_kw,
+        )
+    ):
+        raise ValueError("Electricity meter state values must all be finite")
+    if previous_block_energy_kwh < 0.0:
+        raise ValueError("meter_state.block_energy_kwh must not be negative")
+    if previous_block_elapsed_hours < 0.0 or previous_block_elapsed_hours >= DEMAND_BLOCK_HOURS:
+        raise ValueError("meter_state.block_elapsed_hours must be inside [0, 0.5)")
+    if previous_block_elapsed_hours == 0.0 and previous_block_energy_kwh != 0.0:
+        raise ValueError("an empty meter block cannot already contain energy")
+    if previous_monthly_peak_kw < 0.0:
+        raise ValueError("meter_state.monthly_peak_kw must not be negative")
+
+    # A carried state must sit exactly on this timestep's sample grid. This keeps
+    # the meter fixed/clock-aligned instead of silently inventing partial samples.
+    elapsed_samples = previous_block_elapsed_hours / dt_hours
+    if not math.isclose(elapsed_samples, round(elapsed_samples), rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError("meter_state.block_elapsed_hours is not aligned to timestep_hours")
+
+    sample_energy_kwh = grid_kw * dt_hours
+    accumulated_block_energy_kwh = previous_block_energy_kwh + sample_energy_kwh
+    accumulated_block_elapsed_hours = previous_block_elapsed_hours + dt_hours
+
+    numerical_tolerance = 1e-12
+    if accumulated_block_elapsed_hours > DEMAND_BLOCK_HOURS + numerical_tolerance:
+        raise RuntimeError("meter state would overrun the fixed 30-minute demand block")
+
+    block_completed = math.isclose(
+        accumulated_block_elapsed_hours,
+        DEMAND_BLOCK_HOURS,
+        rel_tol=0.0,
+        abs_tol=numerical_tolerance,
+    )
+
+    completed_block_demand_kw: float | None = None
+    monthly_peak_kw = previous_monthly_peak_kw
+    new_monthly_peak = False
+
+    if block_completed:
+        completed_block_demand_kw = accumulated_block_energy_kwh / DEMAND_BLOCK_HOURS
+        new_monthly_peak = completed_block_demand_kw > previous_monthly_peak_kw
+        monthly_peak_kw = max(previous_monthly_peak_kw, completed_block_demand_kw)
+        next_state = ElectricityMeterState(monthly_peak_kw=monthly_peak_kw)
+    else:
+        next_state = ElectricityMeterState(
+            block_energy_kwh=accumulated_block_energy_kwh,
+            block_elapsed_hours=accumulated_block_elapsed_hours,
+            monthly_peak_kw=monthly_peak_kw,
+        )
+
+    return ElectricityMeterStepResult(
+        grid_import_kw=grid_kw,
+        sample_energy_kwh=sample_energy_kwh,
+        accumulated_block_energy_kwh=accumulated_block_energy_kwh,
+        accumulated_block_elapsed_hours=accumulated_block_elapsed_hours,
+        block_completed=block_completed,
+        completed_block_demand_kw=completed_block_demand_kw,
+        previous_monthly_peak_kw=previous_monthly_peak_kw,
+        monthly_peak_kw=monthly_peak_kw,
+        new_monthly_peak=new_monthly_peak,
+        next_state=next_state,
+    )
+
+
+def reset_electricity_meter_for_new_day(meter_state: ElectricityMeterState) -> ElectricityMeterState:
+    """Start a new clock day: clear the open block, preserve the monthly peak."""
+    if not isinstance(meter_state, ElectricityMeterState):
+        raise TypeError("meter_state must be an ElectricityMeterState")
+    monthly_peak_kw = float(meter_state.monthly_peak_kw)
+    if not math.isfinite(monthly_peak_kw) or monthly_peak_kw < 0.0:
+        raise ValueError("meter_state.monthly_peak_kw must be finite and non-negative")
+    return ElectricityMeterState(monthly_peak_kw=monthly_peak_kw)
+
+
+def reset_electricity_meter_for_new_month() -> ElectricityMeterState:
+    """Start a new billing month with an empty block and zero monthly peak."""
+    return ElectricityMeterState()
 
 
 def build_observation(
