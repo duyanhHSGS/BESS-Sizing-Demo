@@ -52,10 +52,17 @@
 #     delivered power cannot exceed net load.
 #   - Charging is untouched by the no-export guard.
 #
+# OUTSIDE ELECTRICAL PHYSICS:
+#   - Converts FINAL battery-side power into the power seen by the factory/grid.
+#   - Discharge: outside gets battery_power * discharge_efficiency.
+#   - Charge: grid must provide battery_charge / charge_efficiency.
+#   - Final grid import = non-negative net load - signed outside battery power.
+#   - Grid import must never become negative; Grid Guard must run first.
+#
 # SOC PHYSICS:
 #   - Uses the FINAL battery-side power after both guards.
 #   - Battery-side power changes stored battery energy exactly; efficiency does NOT
-#     change SOC in this model. Efficiency belongs to the outside conversion layer.
+#     change SOC in this model. Efficiency belongs only to outside electrical physics.
 #
 # This file is a standalone BESS brain playground and is NOT wired into the project.
 # ============================================================
@@ -199,6 +206,82 @@ def grid_guard_no_export(
     # Therefore battery_side_discharge_kw may be at most net_load / efficiency.
     maximum_no_export_battery_discharge_kw = non_negative_net_load_kw / efficiency
     return min(battery_side_power_kw, maximum_no_export_battery_discharge_kw)
+
+
+def battery_power_to_outside_power_kw(
+    *,
+    battery_power_kw: float,
+    charge_efficiency: float,
+    discharge_efficiency: float,
+) -> float:
+    """Convert FINAL battery-side power into signed outside-world power.
+
+    Sign convention stays the same on both sides:
+      positive = battery supplies power outward (discharge)
+      negative = outside world must supply power inward (charge)
+
+    Battery-side energy is exact in this model. Efficiency only changes what the
+    factory/grid sees outside the battery.
+
+    Examples with 90% efficiency:
+      +100 battery kW discharge -> +90 outside kW delivered
+      -100 battery kW charge    -> -111.111... outside kW demanded
+    """
+    battery_side_power_kw = float(battery_power_kw)
+    charge_eta = float(charge_efficiency)
+    discharge_eta = float(discharge_efficiency)
+
+    if not all(
+        math.isfinite(value)
+        for value in (
+            battery_side_power_kw,
+            charge_eta,
+            discharge_eta,
+        )
+    ):
+        raise ValueError("Outside physics inputs must all be finite numbers")
+    if charge_eta <= 0.0 or charge_eta > 1.0:
+        raise ValueError("charge_efficiency must be greater than 0 and at most 1")
+    if discharge_eta <= 0.0 or discharge_eta > 1.0:
+        raise ValueError("discharge_efficiency must be greater than 0 and at most 1")
+
+    if battery_side_power_kw > 0.0:
+        return battery_side_power_kw * discharge_eta
+    if battery_side_power_kw < 0.0:
+        return battery_side_power_kw / charge_eta
+    return 0.0
+
+
+def grid_import_from_outside_power_kw(
+    *,
+    net_load_kw: float,
+    outside_battery_power_kw: float,
+) -> float:
+    """Calculate final grid import from prepared net load and outside battery power.
+
+    ``outside_battery_power_kw`` uses the same sign convention:
+      positive discharge reduces grid import
+      negative charge increases grid import
+
+    No export is allowed. Grid Guard must have clipped discharge before this function.
+    """
+    prepared_net_load_kw = float(net_load_kw)
+    outside_power_kw = float(outside_battery_power_kw)
+
+    if not math.isfinite(prepared_net_load_kw) or not math.isfinite(outside_power_kw):
+        raise ValueError("Grid physics inputs must all be finite numbers")
+
+    non_negative_net_load_kw = max(0.0, prepared_net_load_kw)
+    grid_import_kw = non_negative_net_load_kw - outside_power_kw
+
+    numerical_tolerance = 1e-12
+    if grid_import_kw < -numerical_tolerance:
+        raise RuntimeError(
+            "Outside battery discharge would export power; run Grid Guard before grid physics"
+        )
+    if grid_import_kw < 0.0:
+        return 0.0
+    return grid_import_kw
 
 
 def next_battery_state_of_charge(
