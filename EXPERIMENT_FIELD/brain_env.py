@@ -97,6 +97,34 @@ BrainObservation = tuple[float, float, float, float, float, float, float]
 # TODO BIG JUICY TODO: 1000 kW is an arbitrary temporary ruler. Replace this with a normalization rule that is principled for the site/data and does not silently erase large values.
 POWER_SCALE_KW = 1000.0
 DEMAND_BLOCK_HOURS = 0.5
+MONEY_RELATIVE_TOLERANCE = 1e-12
+MONEY_ABSOLUTE_TOLERANCE_VND = 1e-6
+
+
+def _money_values_close(
+    left_vnd: float,
+    right_vnd: float,
+    *accounting_scale_values_vnd: float,
+) -> bool:
+    """Compare derived money values at the scale of their source totals.
+
+    Savings can be a tiny difference between two large accumulated operating
+    costs. Comparing only the two small savings values makes harmless binary
+    floating-point cancellation look like an accounting failure.
+    """
+    left = float(left_vnd)
+    right = float(right_vnd)
+    scale = max(
+        abs(left),
+        abs(right),
+        *(abs(float(value)) for value in accounting_scale_values_vnd),
+        1.0,
+    )
+    tolerance_vnd = max(
+        MONEY_ABSOLUTE_TOLERANCE_VND,
+        MONEY_RELATIVE_TOLERANCE * scale,
+    )
+    return abs(left - right) <= tolerance_vnd
 
 
 def action_to_requested_battery_power_kw(action: float, battery_power_kw: float) -> float:
@@ -1243,14 +1271,62 @@ class BrainEnv:
         net_load_kw: float | None = None,
         tariff_vnd_per_kwh: float | None = None,
     ) -> BrainStepResult | BrainEnvironmentStepResult:
-        """Advance once.
+        """Advance once transactionally.
 
         With ``episode=...`` configured, this is the real brain-facing environment step:
         action -> physics -> meter -> money -> savings reward -> next observation.
 
         Without an episode, the explicit net-load/tariff arguments remain available for
         lower-level standalone callers and return the older ``BrainStepResult``.
+
+        Any failure restores both worlds completely. A rejected HTTP step therefore
+        cannot advance the backend counter without producing a matching trace entry.
         """
+        bess_snapshot = (
+            self.bess_world.state_of_charge,
+            self.bess_world.meter_state,
+            self.bess_world.timestep_index,
+            self.bess_world.total_electricity_energy_cost_vnd,
+            self.bess_world.total_demand_cost_vnd,
+            self.bess_world.total_battery_wear_cost_vnd,
+        )
+        raw_snapshot = (
+            self.raw_world.meter_state,
+            self.raw_world.timestep_index,
+            self.raw_world.total_electricity_energy_cost_vnd,
+            self.raw_world.total_demand_cost_vnd,
+        )
+        try:
+            return self._step_unchecked(
+                action,
+                net_load_kw=net_load_kw,
+                tariff_vnd_per_kwh=tariff_vnd_per_kwh,
+            )
+        except Exception:
+            (
+                self.bess_world.state_of_charge,
+                self.bess_world.meter_state,
+                self.bess_world.timestep_index,
+                self.bess_world.total_electricity_energy_cost_vnd,
+                self.bess_world.total_demand_cost_vnd,
+                self.bess_world.total_battery_wear_cost_vnd,
+            ) = bess_snapshot
+            (
+                self.raw_world.meter_state,
+                self.raw_world.timestep_index,
+                self.raw_world.total_electricity_energy_cost_vnd,
+                self.raw_world.total_demand_cost_vnd,
+            ) = raw_snapshot
+            raise
+
+    def _step_unchecked(
+        self,
+        action: float,
+        *,
+        net_load_kw: float | None = None,
+        tariff_vnd_per_kwh: float | None = None,
+    ) -> BrainStepResult | BrainEnvironmentStepResult:
+        """Compute and commit one step; the public wrapper owns rollback."""
         if self.bess_world.timestep_index != self.raw_world.timestep_index:
             raise RuntimeError("BessWorld and RawWorld timestep indexes must stay in lockstep")
 
@@ -1287,36 +1363,16 @@ class BrainEnv:
             if tariff_value < 0.0:
                 raise ValueError("tariff_vnd_per_kwh must not be negative")
 
-        # BESS goes first. With the shared inputs validated and RawWorld configuration
-        # fixed at construction, any BESS failure happens before the ghost world mutates.
-        bess_snapshot = (
-            self.bess_world.state_of_charge,
-            self.bess_world.meter_state,
-            self.bess_world.timestep_index,
-            self.bess_world.total_electricity_energy_cost_vnd,
-            self.bess_world.total_demand_cost_vnd,
-            self.bess_world.total_battery_wear_cost_vnd,
-        )
+        # The public step wrapper snapshots both universes before either mutates.
         bess_result = self.bess_world.step(
             action=action_value,
             net_load_kw=net_load_value,
             tariff_vnd_per_kwh=tariff_value,
         )
-        try:
-            raw_result = self.raw_world.step(
-                net_load_kw=net_load_value,
-                tariff_vnd_per_kwh=tariff_value,
-            )
-        except Exception:
-            (
-                self.bess_world.state_of_charge,
-                self.bess_world.meter_state,
-                self.bess_world.timestep_index,
-                self.bess_world.total_electricity_energy_cost_vnd,
-                self.bess_world.total_demand_cost_vnd,
-                self.bess_world.total_battery_wear_cost_vnd,
-            ) = bess_snapshot
-            raise
+        raw_result = self.raw_world.step(
+            net_load_kw=net_load_value,
+            tariff_vnd_per_kwh=tariff_value,
+        )
 
         if self.bess_world.timestep_index != self.raw_world.timestep_index:
             raise RuntimeError("BessWorld and RawWorld advanced out of lockstep")
@@ -1339,11 +1395,11 @@ class BrainEnv:
         reconstructed_net_savings_vnd = (
             electricity_energy_savings_vnd + demand_savings_vnd - battery_wear_cost_vnd
         )
-        if not math.isclose(
+        if not _money_values_close(
             net_battery_savings_vnd,
             reconstructed_net_savings_vnd,
-            rel_tol=1e-12,
-            abs_tol=1e-9,
+            raw_result.cost.operating_cost_vnd,
+            bess_result.cost.operating_cost_vnd,
         ):
             raise RuntimeError("Battery savings accounting invariant failed")
 
@@ -1353,11 +1409,11 @@ class BrainEnv:
             + self.demand_savings_vnd
             - self.battery_wear_cost_vnd
         )
-        if not math.isclose(
+        if not _money_values_close(
             cumulative_net_savings_vnd,
             reconstructed_cumulative_net_savings_vnd,
-            rel_tol=1e-12,
-            abs_tol=1e-9,
+            self.raw_world.total_operating_cost_vnd,
+            self.bess_world.total_operating_cost_vnd,
         ):
             raise RuntimeError("Cumulative battery savings accounting invariant failed")
 
@@ -1380,11 +1436,11 @@ class BrainEnv:
 
         monthly_savings_vnd = cumulative_net_savings_vnd
         monthly_delta_vnd = monthly_savings_vnd - previous_monthly_savings_vnd
-        if not math.isclose(
+        if not _money_values_close(
             monthly_delta_vnd,
             net_battery_savings_vnd,
-            rel_tol=1e-12,
-            abs_tol=1e-9,
+            self.raw_world.total_operating_cost_vnd,
+            self.bess_world.total_operating_cost_vnd,
         ):
             raise RuntimeError("Monthly savings must advance by exactly the timestep savings")
 

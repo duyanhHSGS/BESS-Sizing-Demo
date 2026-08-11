@@ -133,6 +133,8 @@ def test_completion_has_no_fake_future_preview(brain1_csv: Path) -> None:
 
     assert session.status()["complete"] is True
     assert session.status()["preview"] is None
+    assert len(session.trace) == session.status()["total_steps"]
+    assert session.trace[-1]["done"] is True
     assert session.trace[-1]["next_observation"] is None
     with pytest.raises(human_sessions.BrainEnvSessionComplete):
         session.step()
@@ -159,4 +161,3 @@ def test_brain1_flask_api_lifecycle(brain1_csv: Path, monkeypatch: pytest.Monkey
     assert client.get(f"/api/brain1/sessions/{session_id}").status_code == 200
     assert client.delete(f"/api/brain1/sessions/{session_id}").status_code == 200
     assert client.get(f"/api/brain1/sessions/{session_id}").status_code == 404
-

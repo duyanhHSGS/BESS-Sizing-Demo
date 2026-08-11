@@ -2,6 +2,8 @@ import math
 
 import pytest
 
+import EXPERIMENT_FIELD.brain_env as brain_env_module
+
 from EXPERIMENT_FIELD.brain_env import (
     BrainEnvironmentStepResult,
     BrainEnv,
@@ -144,6 +146,35 @@ def test_invalid_action_fails_before_either_world_mutates():
     assert env.bess_world.state_of_charge == pytest.approx(starting_soc)
     assert env.bess_world.total_operating_cost_vnd == pytest.approx(0.0)
     assert env.raw_world.total_operating_cost_vnd == pytest.approx(0.0)
+
+
+def test_post_commit_accounting_failure_rolls_both_worlds_back(monkeypatch):
+    env = make_env(
+        make_episode(
+            BrainTimestepInput(net_load_kw=200.0, tariff_vnd_per_kwh=10.0, is_working_day=True)
+        )
+    )
+    env.reset()
+    starting_soc = env.bess_world.state_of_charge
+    starting_bess_meter = env.bess_world.meter_state
+    starting_raw_meter = env.raw_world.meter_state
+    monkeypatch.setattr(brain_env_module, "_money_values_close", lambda *_values: False)
+
+    with pytest.raises(RuntimeError, match="Battery savings accounting invariant failed"):
+        env.step(1.0)
+
+    assert env.bess_world.state_of_charge == pytest.approx(starting_soc)
+    assert env.bess_world.meter_state == starting_bess_meter
+    assert env.raw_world.meter_state == starting_raw_meter
+    assert env.bess_world.timestep_index == 0
+    assert env.raw_world.timestep_index == 0
+    assert env.bess_world.total_operating_cost_vnd == pytest.approx(0.0)
+    assert env.raw_world.total_operating_cost_vnd == pytest.approx(0.0)
+
+
+def test_money_comparison_uses_source_total_scale_without_hiding_real_drift():
+    assert brain_env_module._money_values_close(0.0, 0.0005, 1_000_000_000.0)
+    assert not brain_env_module._money_values_close(0.0, 1.0, 1_000_000.0)
 
 
 def test_step_after_done_fails_loudly_without_advancing_again():

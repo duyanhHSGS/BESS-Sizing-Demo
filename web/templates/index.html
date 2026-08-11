@@ -2480,6 +2480,20 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       canvasContext.strokeStyle = color;
       canvasContext.lineWidth = width;
       canvasContext.stroke();
+
+      // Keep the newest sample visible even when the trace contains only one
+      // point and therefore has no line segment for Canvas to stroke.
+      const latestIndex = values.length - 1;
+      canvasContext.beginPath();
+      canvasContext.arc(
+        xForIndex(latestIndex),
+        yForValue(Number(values[latestIndex])),
+        Math.max(2.5, width + 1),
+        0,
+        Math.PI * 2,
+      );
+      canvasContext.fillStyle = color;
+      canvasContext.fill();
     }
 
     function drawBrainAxes(canvasContext, plot, labels) {
@@ -2839,6 +2853,42 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       brain1DiagnosticsElement.innerHTML = items.map(([label, value]) => brainSetting(label, value)).join("");
     }
 
+    function brain1XForTraceIndex(plot, index, totalSteps) {
+      const recordedStep = Number(brain1Trace[index]?.step_index);
+      const completedSteps = Number.isFinite(recordedStep) ? recordedStep + 1 : index + 1;
+      const progress = Math.max(0, Math.min(1, completedSteps / totalSteps));
+      return plot.left + plot.width * progress;
+    }
+
+    function drawBrain1Progress(canvasContext, plot, totalSteps) {
+      const traceSteps = Math.min(totalSteps, brain1Trace.length);
+      const progress = traceSteps / totalSteps;
+      const progressX = plot.left + plot.width * progress;
+      const traceComplete = Boolean(brain1SessionStatus?.complete)
+        && traceSteps === totalSteps
+        && Boolean(brain1Trace[brain1Trace.length - 1]?.done);
+
+      canvasContext.save();
+      canvasContext.setLineDash([4, 4]);
+      canvasContext.strokeStyle = traceComplete ? "#059669" : "#0f172a";
+      canvasContext.lineWidth = 1.5;
+      canvasContext.beginPath();
+      canvasContext.moveTo(progressX, plot.top);
+      canvasContext.lineTo(progressX, plot.top + plot.height);
+      canvasContext.stroke();
+      canvasContext.restore();
+
+      canvasContext.fillStyle = traceComplete ? "#047857" : "#334155";
+      canvasContext.font = "bold 11px Segoe UI, system-ui, sans-serif";
+      canvasContext.textAlign = "right";
+      canvasContext.fillText(
+        `${traceSteps}/${totalSteps} - ${formatNumber(progress * 100, 0)}%${traceComplete ? " - COMPLETE" : ""}`,
+        plot.left + plot.width - 5,
+        plot.top + plot.height - 7,
+      );
+      canvasContext.textAlign = "left";
+    }
+
     function drawBrain1Charts() {
       const totalSteps = Math.max(2, Number(brain1SessionStatus?.total_steps || brain1ContextPayload?.days?.[0]?.step_count || 2));
       const tariffConfig = brain1SessionStatus?.settings ? {
@@ -2854,13 +2904,14 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       const rewardMin = Math.min(0, ...rewardValues);
       const rewardMax = Math.max(1, ...rewardValues);
       const rewardSpan = Math.max(1, rewardMax - rewardMin);
-      const rewardX = (index) => rewardPlot.left + rewardPlot.width * index / (totalSteps - 1);
+      const rewardX = (index) => brain1XForTraceIndex(rewardPlot, index, totalSteps);
       const rewardY = (value) => rewardPlot.top + rewardPlot.height * (rewardMax - value) / rewardSpan;
       const actionY = (value) => rewardPlot.top + rewardPlot.height * (1 - (value + 1) / 2);
       drawTariffBands(reward.canvasContext, rewardPlot, tariffConfig, dateIso);
       drawBrainAxes(reward.canvasContext, rewardPlot, { top: `${formatNumber(rewardMax, 0)} VND / +1`, bottom: `${formatNumber(rewardMin, 0)} VND / -1` });
       drawBrainLine(reward.canvasContext, rewardValues, rewardX, rewardY, "#059669", 2.5);
       drawBrainLine(reward.canvasContext, brain1Trace.map((entry) => entry.executed_action), rewardX, actionY, "#d97706", 2);
+      drawBrain1Progress(reward.canvasContext, rewardPlot, totalSteps);
       reward.canvasContext.fillStyle = "#059669"; reward.canvasContext.fillText("Step reward", rewardPlot.left + 8, rewardPlot.top + 29);
       reward.canvasContext.fillStyle = "#d97706"; reward.canvasContext.fillText("Brain 1 action", rewardPlot.left + 88, rewardPlot.top + 29);
 
@@ -2869,22 +2920,24 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       const gridValues = brain1Trace.flatMap((entry) => [entry.bess_grid_import_kw, entry.raw_grid_import_kw]);
       const gridMin = 0;
       const gridMax = Math.max(1, ...gridValues);
-      const gridX = (index) => gridPlot.left + gridPlot.width * index / (totalSteps - 1);
+      const gridX = (index) => brain1XForTraceIndex(gridPlot, index, totalSteps);
       const gridY = (value) => gridPlot.top + gridPlot.height * (gridMax - value) / Math.max(1, gridMax - gridMin);
       drawTariffBands(grid.canvasContext, gridPlot, tariffConfig, dateIso);
       drawBrainAxes(grid.canvasContext, gridPlot, { top: `${formatNumber(gridMax, 1)} kW`, bottom: "0 kW" });
       drawBrainLine(grid.canvasContext, brain1Trace.map((entry) => entry.raw_grid_import_kw), gridX, gridY, "#64748b", 2);
       drawBrainLine(grid.canvasContext, brain1Trace.map((entry) => entry.bess_grid_import_kw), gridX, gridY, "#2563eb", 2.5);
+      drawBrain1Progress(grid.canvasContext, gridPlot, totalSteps);
       grid.canvasContext.fillStyle = "#64748b"; grid.canvasContext.fillText("Ghost grid", gridPlot.left + 8, gridPlot.top + 29);
       grid.canvasContext.fillStyle = "#2563eb"; grid.canvasContext.fillText("Brain 1 grid", gridPlot.left + 78, gridPlot.top + 29);
 
       const soc = prepareBrainCanvas(brain1SocChart);
       const socPlot = { left: 48, top: 18, width: soc.width - 65, height: soc.height - 48 };
-      const socX = (index) => socPlot.left + socPlot.width * index / (totalSteps - 1);
+      const socX = (index) => brain1XForTraceIndex(socPlot, index, totalSteps);
       const socY = (value) => socPlot.top + socPlot.height * (1 - value);
       drawTariffBands(soc.canvasContext, socPlot, tariffConfig, dateIso);
       drawBrainAxes(soc.canvasContext, socPlot, { top: "100% SOC", bottom: "0% SOC" });
       drawBrainLine(soc.canvasContext, brain1Trace.map((entry) => entry.next_soc), socX, socY, "#7c3aed", 2.5);
+      drawBrain1Progress(soc.canvasContext, socPlot, totalSteps);
     }
 
     function updateBrain1Controls() {
@@ -2911,7 +2964,17 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       renderBrain1Diagnostics(brain1Trace.length ? brain1Trace[brain1Trace.length - 1] : null);
       drawBrain1Charts();
       if (brain1SessionStatus?.complete) {
-        setBrain1Message("Brain 1 finished the selected day. Uncle Memory sealed the final reward.");
+        const totalSteps = Number(brain1SessionStatus.total_steps);
+        const traceComplete = brain1Trace.length === totalSteps
+          && Boolean(brain1Trace[brain1Trace.length - 1]?.done);
+        if (traceComplete) {
+          setBrain1Message("Brain 1 finished the selected day. Uncle Memory sealed the final reward.");
+        } else {
+          setBrain1Message(
+            `Brain 1 counter says complete, but the graph owns ${brain1Trace.length}/${totalSteps} executed steps. Reset this inconsistent session.`,
+            true,
+          );
+        }
       }
     }
 

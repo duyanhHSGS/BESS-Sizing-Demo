@@ -39,3 +39,25 @@ def test_brain1_ui_previews_decisions_and_steps_without_action_payload() -> None
     assert 'method: "POST"' in html
     assert "body: JSON.stringify({ action" not in _brain1_section()
     assert "storedBrain1SessionId" in html
+
+
+def test_brain_chart_line_keeps_a_single_latest_sample_visible() -> None:
+    html = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+    draw_line = html.split("function drawBrainLine", 1)[1].split(
+        "function drawBrainAxes", 1
+    )[0]
+
+    assert "const latestIndex = values.length - 1" in draw_line
+    assert "canvasContext.arc(" in draw_line
+    assert "canvasContext.fill()" in draw_line
+
+
+def test_brain1_graph_uses_executed_step_progress_and_guards_completion() -> None:
+    html = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+
+    assert "function brain1XForTraceIndex" in html
+    assert "recordedStep + 1" in html
+    assert "function drawBrain1Progress" in html
+    assert "traceSteps === totalSteps" in html
+    assert "brain1Trace.length === totalSteps" in html
+    assert "the graph owns ${brain1Trace.length}/${totalSteps} executed steps" in html
