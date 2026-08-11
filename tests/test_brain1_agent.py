@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from EXPERIMENT_FIELD.brain1_agent import Brain1Agent
+from EXPERIMENT_FIELD.brain1_agent import Brain1Agent, Brain1Decision
 from EXPERIMENT_FIELD.brain_env import BrainEnv, BrainEpisode, BrainTimestepInput
 
 
@@ -155,6 +155,32 @@ def test_same_observation_is_deterministic_and_not_mutated():
 
     assert first == second == -1.0
     assert observation == original
+
+
+@pytest.mark.parametrize(
+    "soc,tariff,action,label,reason_code",
+    [
+        (0.50, 0.05, -1.0, "CHARGE", "cheap_with_room"),
+        (0.50, 0.50, 0.0, "IDLE", "middle_tariff"),
+        (0.50, 0.90, 1.0, "DISCHARGE", "expensive_with_energy"),
+        (1.00, 0.05, 0.0, "IDLE", "cheap_but_full"),
+        (0.00, 0.90, 0.0, "IDLE", "expensive_but_empty"),
+    ],
+)
+def test_decide_explains_the_exact_action(soc, tariff, action, label, reason_code):
+    agent = make_agent()
+    observation = with_eyes(soc=soc, tariff=tariff)
+
+    decision = agent.decide(observation)
+
+    assert isinstance(decision, Brain1Decision)
+    assert decision.action == action
+    assert decision.label == label
+    assert decision.reason_code == reason_code
+    assert decision.reason
+    assert decision.normalized_soc == pytest.approx(soc)
+    assert decision.normalized_tariff == pytest.approx(tariff)
+    assert agent.act(observation) == decision.action
 
 
 def test_agent_configuration_does_not_change_after_act():

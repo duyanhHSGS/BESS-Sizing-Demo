@@ -17,6 +17,7 @@ import bess.shadow.shadow_runs as shadow_runs
 import bess.integrations.thingsboard_connector as thingsboard_connector
 import bess.forecasting.shadow_weather as shadow_weather
 import EXPERIMENT_FIELD.brain_env_sessions as brain_env_sessions
+import EXPERIMENT_FIELD.brain1_sessions as brain1_sessions
 from bess.evaluation.benchmark import (
     build_benchmark,
     detect_dt_hours,
@@ -245,6 +246,64 @@ def brain_env_session_step(session_id):
 def brain_env_session_delete(session_id):
     if not brain_env_sessions.drop_session(session_id):
         return jsonify({"error": "BrainEnv session not found."}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/brain1/context", methods=["GET"])
+def brain1_context():
+    try:
+        return jsonify(brain1_sessions.context(dict(PARAMETERS)))
+    except (brain1_sessions.Brain1SessionError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 422
+
+
+@app.route("/api/brain1/sessions", methods=["POST"])
+def brain1_session_create():
+    payload = request.get_json(silent=True) or {}
+    try:
+        session = brain1_sessions.create_session(
+            dict(PARAMETERS),
+            day_index=payload.get("day_index"),
+            starting_peak_kw=payload.get("starting_peak_kw", 0.0),
+        )
+    except (brain1_sessions.Brain1SessionError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 422
+    return jsonify({"status": session.status(), "trace": []}), 201
+
+
+def _brain1_session_or_404(session_id):
+    try:
+        return brain1_sessions.get_session(session_id), None
+    except brain1_sessions.BrainEnvSessionNotFound as exc:
+        return None, (jsonify({"error": str(exc)}), 404)
+
+
+@app.route("/api/brain1/sessions/<session_id>", methods=["GET"])
+def brain1_session_detail(session_id):
+    session, error = _brain1_session_or_404(session_id)
+    if error:
+        return error
+    return jsonify(session.detail())
+
+
+@app.route("/api/brain1/sessions/<session_id>/step", methods=["POST"])
+def brain1_session_step(session_id):
+    session, error = _brain1_session_or_404(session_id)
+    if error:
+        return error
+    try:
+        entry, status = session.step()
+    except brain1_sessions.BrainEnvSessionComplete as exc:
+        return jsonify({"error": str(exc), "status": session.status()}), 409
+    except (brain1_sessions.Brain1SessionError, ValueError, RuntimeError) as exc:
+        return jsonify({"error": str(exc), "status": session.status()}), 422
+    return jsonify({"entry": entry, "status": status})
+
+
+@app.route("/api/brain1/sessions/<session_id>", methods=["DELETE"])
+def brain1_session_delete(session_id):
+    if not brain1_sessions.drop_session(session_id):
+        return jsonify({"error": "Brain 1 session not found."}), 404
     return jsonify({"ok": True})
 
 

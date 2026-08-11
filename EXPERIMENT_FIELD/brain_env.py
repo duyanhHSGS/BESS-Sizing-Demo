@@ -1063,6 +1063,7 @@ class BrainEpisode:
     timesteps: tuple[BrainTimestepInput, ...]
     steps_per_day: int
     power_scale_kw: float = POWER_SCALE_KW
+    tariff_normalization_vnd_per_kwh: float | None = None
 
     def __post_init__(self) -> None:
         timesteps = tuple(self.timesteps)
@@ -1079,8 +1080,22 @@ class BrainEpisode:
         if not math.isfinite(power_scale_kw) or power_scale_kw <= 0.0:
             raise ValueError("BrainEpisode.power_scale_kw must be finite and greater than 0")
 
+        tariff_normalization = self.tariff_normalization_vnd_per_kwh
+        if tariff_normalization is not None:
+            tariff_normalization = float(tariff_normalization)
+            if not math.isfinite(tariff_normalization) or tariff_normalization <= 0.0:
+                raise ValueError(
+                    "BrainEpisode.tariff_normalization_vnd_per_kwh must be "
+                    "finite and greater than 0 when provided"
+                )
+
         object.__setattr__(self, "timesteps", timesteps)
         object.__setattr__(self, "power_scale_kw", power_scale_kw)
+        object.__setattr__(
+            self,
+            "tariff_normalization_vnd_per_kwh",
+            tariff_normalization,
+        )
 
     @property
     def maximum_tariff_vnd_per_kwh(self) -> float:
@@ -1088,6 +1103,8 @@ class BrainEpisode:
 
     @property
     def tariff_normalization_denominator_vnd_per_kwh(self) -> float:
+        if self.tariff_normalization_vnd_per_kwh is not None:
+            return self.tariff_normalization_vnd_per_kwh
         maximum_tariff = self.maximum_tariff_vnd_per_kwh
         return maximum_tariff if maximum_tariff > 0.0 else 1.0
 

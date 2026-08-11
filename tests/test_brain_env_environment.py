@@ -218,6 +218,43 @@ def test_zero_tariff_month_still_builds_finite_zero_tariff_observation():
     assert all(math.isfinite(value) for value in observation)
 
 
+def test_episode_can_use_applied_tariff_ruler_larger_than_day_maximum():
+    episode = BrainEpisode(
+        timesteps=(
+            BrainTimestepInput(
+                net_load_kw=100.0,
+                tariff_vnd_per_kwh=20.0,
+                is_working_day=False,
+            ),
+        ),
+        steps_per_day=48,
+        tariff_normalization_vnd_per_kwh=30.0,
+    )
+    env = make_env(episode)
+
+    observation = env.reset()
+
+    assert episode.maximum_tariff_vnd_per_kwh == pytest.approx(20.0)
+    assert episode.tariff_normalization_denominator_vnd_per_kwh == pytest.approx(30.0)
+    assert observation[4] == pytest.approx(20.0 / 30.0)
+
+
+@pytest.mark.parametrize("bad_value", [0.0, -1.0, float("nan"), float("inf")])
+def test_episode_rejects_invalid_explicit_tariff_ruler(bad_value):
+    with pytest.raises(ValueError, match="tariff_normalization"):
+        BrainEpisode(
+            timesteps=(
+                BrainTimestepInput(
+                    net_load_kw=100.0,
+                    tariff_vnd_per_kwh=20.0,
+                    is_working_day=True,
+                ),
+            ),
+            steps_per_day=48,
+            tariff_normalization_vnd_per_kwh=bad_value,
+        )
+
+
 # ---------------------------------------------------------------------------
 # BABY TEST 1: pure energy arbitrage, before any neural-network chaos exists.
 #

@@ -859,6 +859,16 @@
     .brain-diagnostic span { display: block; color: #64748b; font-size: 11px; }
     .brain-diagnostic b { display: block; margin-top: 3px; }
     .brain-status-error { color: #b42318; }
+    .brain1-hero { background: linear-gradient(135deg, #052e16, #14532d 52%, #854d0e); color: #fff; }
+    .brain1-hero h2 { color: #fff; }
+    .brain1-eyes { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 10px; }
+    .brain1-eye { padding: 12px; border-radius: 12px; background: #f8fafc; border: 1px solid #cbd5e1; }
+    .brain1-eye.watched { background: #fef3c7; border: 2px solid #d97706; }
+    .brain1-eye span { display: block; color: #64748b; font-size: 11px; }
+    .brain1-eye b { display: block; margin-top: 5px; font-size: 18px; }
+    .brain1-decision { padding: 16px; border-radius: 14px; background: #111827; color: #fff; }
+    .brain1-decision strong { display: block; font-size: 26px; color: #facc15; }
+    .brain1-decision p { margin-bottom: 0; color: #e5e7eb; }
   </style>
 </head>
 
@@ -869,6 +879,7 @@
       <button class="tab-button" type="button" data-tab-target="get-weather">Get Weather</button>
       <button class="tab-button" type="button" data-tab-target="training-lab">Training Lab</button>
       <button class="tab-button" type="button" data-tab-target="brain-env">BrainEnv</button>
+      <button class="tab-button" type="button" data-tab-target="brain1">Brain 1</button>
       <button class="tab-button" type="button" data-tab-target="benchmarking">Benchmarking</button>
       <button class="tab-button" type="button" data-tab-target="live-runs">Live Runs</button>
       <button class="tab-button" type="button" data-tab-target="shadow-running">Shadow Running</button>
@@ -1637,6 +1648,68 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       </section>
     </section>
 
+    <section id="tab-brain1" class="tab-panel">
+      <section class="card brain1-hero">
+        <div class="section-head">
+          <div>
+            <h2>Brain 1 Spectator Laboratory</h2>
+            <div>Brain 1 owns the action. Humans may only select the exhibit and press the next-step button.</div>
+          </div>
+          <div id="brain1-status" class="live-status">Open this tab to wake Brain 1.</div>
+        </div>
+        <div class="brain-control-grid">
+          <label>CSV day <select id="brain1-day"></select></label>
+          <label>Carry-in monthly peak (kW)
+            <input id="brain1-starting-peak" type="number" step="any" value="0">
+          </label>
+          <button id="btn-brain1-start" class="primary" type="button">Start Brain 1 day</button>
+          <button id="btn-brain1-step" class="primary" type="button">Step Brain 1 once</button>
+          <button id="btn-brain1-reset" type="button">Reset</button>
+        </div>
+        <div id="brain1-session-info" class="info">No active Brain 1 session.</div>
+      </section>
+
+      <div class="dashboard-grid">
+        <section class="card">
+          <h2>Brain 1's seven eyes</h2>
+          <div id="brain1-eyes" class="brain1-eyes">Start a session to reveal the observation.</div>
+        </section>
+        <section class="card">
+          <h2>Decision preview</h2>
+          <div id="brain1-decision" class="brain1-decision">
+            <strong>WAITING</strong>
+            <p>Brain 1 has not inspected a timestep yet.</p>
+          </div>
+          <div id="brain1-thresholds" class="brain-diagnostics"></div>
+        </section>
+      </div>
+
+      <div id="brain1-stats" class="brain-stats"></div>
+
+      <div class="brain-chart-grid">
+        <section class="card">
+          <h2>Brain 1 action and money reward</h2>
+          <canvas id="brain1-reward-chart" class="brain-chart" width="900" height="280"></canvas>
+          <p class="chart-help">One deterministic action and one real savings reward per clicked timestep.</p>
+        </section>
+        <section class="card">
+          <h2>Battery World versus Ghost World</h2>
+          <canvas id="brain1-grid-chart" class="brain-chart" width="900" height="280"></canvas>
+          <p class="chart-help">Brain 1 controls Battery World; Ghost World shows the same factory without a battery.</p>
+        </section>
+        <section class="card">
+          <h2>Battery SOC</h2>
+          <canvas id="brain1-soc-chart" class="brain-chart" width="900" height="280"></canvas>
+          <p class="chart-help">The battery tummy level after each Brain 1 decision.</p>
+        </section>
+      </div>
+
+      <section class="card">
+        <h2>Latest executed step</h2>
+        <div id="brain1-diagnostics" class="brain-diagnostics">Press Step Brain 1 once to execute the previewed decision.</div>
+      </section>
+    </section>
+
     <section id="tab-benchmarking" class="tab-panel">
       <section class="card benchmark-hero">
         <div class="section-head">
@@ -2026,6 +2099,27 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     let brainStepPending = false;
     let brainSessionPending = false;
     let brainAutoTimer = null;
+    const brain1DaySelect = document.getElementById("brain1-day");
+    const brain1StartingPeak = document.getElementById("brain1-starting-peak");
+    const brain1StatusElement = document.getElementById("brain1-status");
+    const brain1SessionInfo = document.getElementById("brain1-session-info");
+    const brain1EyesElement = document.getElementById("brain1-eyes");
+    const brain1DecisionElement = document.getElementById("brain1-decision");
+    const brain1ThresholdsElement = document.getElementById("brain1-thresholds");
+    const brain1StatsElement = document.getElementById("brain1-stats");
+    const brain1DiagnosticsElement = document.getElementById("brain1-diagnostics");
+    const brain1RewardChart = document.getElementById("brain1-reward-chart");
+    const brain1GridChart = document.getElementById("brain1-grid-chart");
+    const brain1SocChart = document.getElementById("brain1-soc-chart");
+    const brain1StartButton = document.getElementById("btn-brain1-start");
+    const brain1StepButton = document.getElementById("btn-brain1-step");
+    const brain1ResetButton = document.getElementById("btn-brain1-reset");
+    const brain1SessionStorageKey = "sizing-demo-brain1-session-v1";
+    let brain1ContextPayload = null;
+    let brain1SessionStatus = null;
+    let brain1Trace = [];
+    let brain1Initialized = false;
+    let brain1Pending = false;
 
     const sampleBatteryCandidates = {{ sample_battery_candidates | tojson }};
     const currentTariffConfig = {
@@ -2220,6 +2314,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       if (shadowLastDays.length) renderSelectedShadowDay();
       if (benchmarkingState.result) drawBenchmarkVersus();
       if (brainInitialized) drawBrainCharts();
+      if (brain1Initialized) drawBrain1Charts();
     }
 
     function initializeTariffAppearanceControls() {
@@ -2617,6 +2712,323 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       brainInitialized = true;
       updateBrainActionLabel();
       await loadBrainContext();
+    }
+
+    async function brain1Api(url, options = {}) {
+      const response = await fetch(url, options);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const error = new Error(payload.error || `Brain 1 request failed (${response.status})`);
+        error.status = response.status;
+        error.payload = payload;
+        throw error;
+      }
+      return payload;
+    }
+
+    function storedBrain1SessionId() {
+      try {
+        return localStorage.getItem(brain1SessionStorageKey);
+      } catch (_error) {
+        return null;
+      }
+    }
+
+    function storeBrain1SessionId(sessionId) {
+      try {
+        localStorage.setItem(brain1SessionStorageKey, sessionId);
+      } catch (_error) {
+        // Brain 1 still works; only refresh reconnection becomes unavailable.
+      }
+    }
+
+    function clearStoredBrain1SessionId() {
+      try {
+        localStorage.removeItem(brain1SessionStorageKey);
+      } catch (_error) {
+        // Nothing else is required when browser storage is unavailable.
+      }
+    }
+
+    function setBrain1Message(message, isError = false) {
+      brain1StatusElement.textContent = message;
+      brain1StatusElement.classList.toggle("brain-status-error", isError);
+    }
+
+    function renderBrain1Thresholds() {
+      const thresholds = brain1SessionStatus?.thresholds || brain1ContextPayload?.thresholds || {};
+      brain1ThresholdsElement.innerHTML = [
+        brainSetting("Cheap rule", `${formatNumber(thresholds.cheap_vnd_per_kwh || 0, 2)} VND/kWh -> ${formatNumber(thresholds.cheap_normalized || 0, 4)}`),
+        brainSetting("Expensive rule", `${formatNumber(thresholds.expensive_vnd_per_kwh || 0, 2)} VND/kWh -> ${formatNumber(thresholds.expensive_normalized || 0, 4)}`),
+        brainSetting("Tariff ruler", `${formatNumber(brain1SessionStatus?.tariff_normalization_vnd_per_kwh || thresholds.normalization_vnd_per_kwh || 0, 2)} VND/kWh`),
+      ].join("");
+    }
+
+    function renderBrain1Eyes(preview) {
+      const observation = preview?.observation;
+      if (!observation) {
+        brain1EyesElement.textContent = brain1SessionStatus?.complete
+          ? "The day is complete. Brain 1 has no fake future observation."
+          : "Start a session to reveal the observation.";
+        return;
+      }
+      const eyes = [
+        ["time_sin", "Eye 1 - clock sine"],
+        ["time_cos", "Eye 2 - clock cosine"],
+        ["normalized_net_load", "Eye 3 - net load"],
+        ["normalized_soc", "Eye 4 - battery tummy"],
+        ["normalized_tariff", "Eye 5 - tariff"],
+        ["normalized_monthly_peak", "Eye 6 - monthly peak"],
+        ["working_day", "Eye 7 - working day"],
+      ];
+      brain1EyesElement.innerHTML = eyes.map(([key, label]) => (
+        `<div class="brain1-eye ${key === "normalized_soc" || key === "normalized_tariff" ? "watched" : ""}">` +
+        `<span>${escapeHtml(label)}</span><b>${formatNumber(observation[key], 5)}</b></div>`
+      )).join("");
+    }
+
+    function renderBrain1Decision(preview) {
+      const decision = preview?.decision;
+      if (!decision) {
+        brain1DecisionElement.innerHTML = brain1SessionStatus?.complete
+          ? "<strong>DAY COMPLETE</strong><p>There is no next action and no invented future eye scan.</p>"
+          : "<strong>WAITING</strong><p>Brain 1 has not inspected a timestep yet.</p>";
+        return;
+      }
+      brain1DecisionElement.innerHTML =
+        `<strong>${escapeHtml(decision.label)} (${formatNumber(decision.action, 0)})</strong>` +
+        `<p>${escapeHtml(decision.reason)}</p>` +
+        `<p>Preview for step ${preview.step_index} at ${escapeHtml(preview.time)}; tariff ${formatNumber(preview.tariff_vnd_per_kwh, 2)} VND/kWh.</p>`;
+    }
+
+    function renderBrain1Stats() {
+      const summary = brain1SessionStatus?.summary || {};
+      brain1StatsElement.innerHTML = [
+        brainStat("Latest step reward", formatVnd(summary.latest_timestep_reward_vnd || 0), Number(summary.latest_timestep_reward_vnd || 0) >= 0 ? "shadow-good" : "shadow-bad"),
+        brainStat("Monthly reward", formatVnd(summary.monthly_reward_vnd || 0), Number(summary.monthly_reward_vnd || 0) >= 0 ? "shadow-good" : "shadow-bad"),
+        brainStat("Battery World cost", formatVnd(summary.bess_operating_cost_vnd || 0)),
+        brainStat("Ghost World cost", formatVnd(summary.raw_operating_cost_vnd || 0)),
+        brainStat("Energy savings", formatVnd(summary.energy_savings_vnd || 0)),
+        brainStat("Demand savings", formatVnd(summary.demand_savings_vnd || 0)),
+        brainStat("Battery wear", formatVnd(summary.battery_wear_cost_vnd || 0)),
+        brainStat("Battery SOC", `${formatNumber((summary.state_of_charge || 0) * 100, 2)}%`),
+      ].join("");
+    }
+
+    function renderBrain1Diagnostics(entry) {
+      if (!entry) {
+        brain1DiagnosticsElement.textContent = "Press Step Brain 1 once to execute the previewed decision.";
+        return;
+      }
+      const items = [
+        ["Executed decision", `${entry.decision.label} (${formatNumber(entry.executed_action, 0)})`],
+        ["Decision reason", entry.decision.reason],
+        ["Step / clock", `${entry.step_index} / ${entry.time}`],
+        ["Load / PV / net", `${formatNumber(entry.load_kw, 2)} / ${formatNumber(entry.pv_kw, 2)} / ${formatNumber(entry.net_load_kw, 2)} kW`],
+        ["Requested / final battery", `${formatNumber(entry.requested_battery_kw, 2)} / ${formatNumber(entry.final_battery_kw, 2)} kW`],
+        ["Battery Police output", `${formatNumber(entry.battery_after_police_kw, 2)} kW`],
+        ["Battery to factory", `${formatNumber(entry.battery_to_factory_kw, 2)} kW`],
+        ["Grid to battery", `${formatNumber(entry.grid_to_battery_kw, 2)} kW`],
+        ["Conversion loss", `${formatNumber(entry.conversion_loss_kw, 3)} kW`],
+        ["BESS / Ghost grid", `${formatNumber(entry.bess_grid_import_kw, 2)} / ${formatNumber(entry.raw_grid_import_kw, 2)} kW`],
+        ["SOC start -> next", `${formatNumber(entry.starting_soc * 100, 2)}% -> ${formatNumber(entry.next_soc * 100, 2)}%`],
+        ["BESS / Ghost peak", `${formatNumber(entry.bess_monthly_peak_kw, 2)} / ${formatNumber(entry.raw_monthly_peak_kw, 2)} kW`],
+        ["Step reward", formatVnd(entry.reward.timestep_savings_vnd)],
+        ["Monthly reward", formatVnd(entry.reward.monthly_savings_vnd)],
+      ];
+      brain1DiagnosticsElement.innerHTML = items.map(([label, value]) => brainSetting(label, value)).join("");
+    }
+
+    function drawBrain1Charts() {
+      const totalSteps = Math.max(2, Number(brain1SessionStatus?.total_steps || brain1ContextPayload?.days?.[0]?.step_count || 2));
+      const tariffConfig = brain1SessionStatus?.settings ? {
+        cheapWindows: brain1SessionStatus.settings.cheap_windows,
+        expensiveWindows: brain1SessionStatus.settings.expensive_windows,
+        sundayNoPeak: brain1SessionStatus.settings.sunday_no_peak,
+      } : currentTariffConfig;
+      const dateIso = brain1SessionStatus?.date_iso;
+
+      const reward = prepareBrainCanvas(brain1RewardChart);
+      const rewardPlot = { left: 58, top: 18, width: reward.width - 75, height: reward.height - 48 };
+      const rewardValues = brain1Trace.map((entry) => Number(entry.reward.timestep_savings_vnd));
+      const rewardMin = Math.min(0, ...rewardValues);
+      const rewardMax = Math.max(1, ...rewardValues);
+      const rewardSpan = Math.max(1, rewardMax - rewardMin);
+      const rewardX = (index) => rewardPlot.left + rewardPlot.width * index / (totalSteps - 1);
+      const rewardY = (value) => rewardPlot.top + rewardPlot.height * (rewardMax - value) / rewardSpan;
+      const actionY = (value) => rewardPlot.top + rewardPlot.height * (1 - (value + 1) / 2);
+      drawTariffBands(reward.canvasContext, rewardPlot, tariffConfig, dateIso);
+      drawBrainAxes(reward.canvasContext, rewardPlot, { top: `${formatNumber(rewardMax, 0)} VND / +1`, bottom: `${formatNumber(rewardMin, 0)} VND / -1` });
+      drawBrainLine(reward.canvasContext, rewardValues, rewardX, rewardY, "#059669", 2.5);
+      drawBrainLine(reward.canvasContext, brain1Trace.map((entry) => entry.executed_action), rewardX, actionY, "#d97706", 2);
+      reward.canvasContext.fillStyle = "#059669"; reward.canvasContext.fillText("Step reward", rewardPlot.left + 8, rewardPlot.top + 29);
+      reward.canvasContext.fillStyle = "#d97706"; reward.canvasContext.fillText("Brain 1 action", rewardPlot.left + 88, rewardPlot.top + 29);
+
+      const grid = prepareBrainCanvas(brain1GridChart);
+      const gridPlot = { left: 48, top: 18, width: grid.width - 65, height: grid.height - 48 };
+      const gridValues = brain1Trace.flatMap((entry) => [entry.bess_grid_import_kw, entry.raw_grid_import_kw]);
+      const gridMin = 0;
+      const gridMax = Math.max(1, ...gridValues);
+      const gridX = (index) => gridPlot.left + gridPlot.width * index / (totalSteps - 1);
+      const gridY = (value) => gridPlot.top + gridPlot.height * (gridMax - value) / Math.max(1, gridMax - gridMin);
+      drawTariffBands(grid.canvasContext, gridPlot, tariffConfig, dateIso);
+      drawBrainAxes(grid.canvasContext, gridPlot, { top: `${formatNumber(gridMax, 1)} kW`, bottom: "0 kW" });
+      drawBrainLine(grid.canvasContext, brain1Trace.map((entry) => entry.raw_grid_import_kw), gridX, gridY, "#64748b", 2);
+      drawBrainLine(grid.canvasContext, brain1Trace.map((entry) => entry.bess_grid_import_kw), gridX, gridY, "#2563eb", 2.5);
+      grid.canvasContext.fillStyle = "#64748b"; grid.canvasContext.fillText("Ghost grid", gridPlot.left + 8, gridPlot.top + 29);
+      grid.canvasContext.fillStyle = "#2563eb"; grid.canvasContext.fillText("Brain 1 grid", gridPlot.left + 78, gridPlot.top + 29);
+
+      const soc = prepareBrainCanvas(brain1SocChart);
+      const socPlot = { left: 48, top: 18, width: soc.width - 65, height: soc.height - 48 };
+      const socX = (index) => socPlot.left + socPlot.width * index / (totalSteps - 1);
+      const socY = (value) => socPlot.top + socPlot.height * (1 - value);
+      drawTariffBands(soc.canvasContext, socPlot, tariffConfig, dateIso);
+      drawBrainAxes(soc.canvasContext, socPlot, { top: "100% SOC", bottom: "0% SOC" });
+      drawBrainLine(soc.canvasContext, brain1Trace.map((entry) => entry.next_soc), socX, socY, "#7c3aed", 2.5);
+    }
+
+    function updateBrain1Controls() {
+      const hasSession = Boolean(brain1SessionStatus?.session_id);
+      brain1DaySelect.disabled = hasSession;
+      brain1StartingPeak.disabled = hasSession;
+      brain1StartButton.disabled = brain1Pending;
+      brain1StepButton.disabled = brain1Pending || !hasSession || Boolean(brain1SessionStatus?.complete);
+      brain1ResetButton.disabled = brain1Pending;
+      if (hasSession) {
+        brain1SessionInfo.textContent = `${brain1SessionStatus.dataset_name} - day ${brain1SessionStatus.day_index}${brain1SessionStatus.date_iso ? ` (${brain1SessionStatus.date_iso})` : ""} - step ${brain1SessionStatus.step_index}/${brain1SessionStatus.total_steps} - carry-in peak ${formatNumber(brain1SessionStatus.starting_peak_kw, 2)} kW`;
+      } else {
+        brain1SessionInfo.textContent = "No active Brain 1 session. Start a day to reveal its first decision preview.";
+      }
+    }
+
+    function renderBrain1Session() {
+      const preview = brain1SessionStatus?.preview || null;
+      updateBrain1Controls();
+      renderBrain1Thresholds();
+      renderBrain1Eyes(preview);
+      renderBrain1Decision(preview);
+      renderBrain1Stats();
+      renderBrain1Diagnostics(brain1Trace.length ? brain1Trace[brain1Trace.length - 1] : null);
+      drawBrain1Charts();
+      if (brain1SessionStatus?.complete) {
+        setBrain1Message("Brain 1 finished the selected day. Uncle Memory sealed the final reward.");
+      }
+    }
+
+    async function loadBrain1Context() {
+      try {
+        brain1ContextPayload = await brain1Api("/api/brain1/context");
+        brain1DaySelect.innerHTML = brain1ContextPayload.days.map((day) => (
+          `<option value="${day.day_index}">Day ${day.day_index}${day.date_iso ? ` - ${escapeHtml(day.date_iso)}` : ""} (${escapeHtml(day.day_type)}, ${day.step_count} steps)</option>`
+        )).join("");
+        renderBrain1Thresholds();
+        setBrain1Message(`Ready: ${brain1ContextPayload.dataset_name}. Start a day to inspect Brain 1's first thought.`);
+
+        const savedSessionId = storedBrain1SessionId();
+        if (savedSessionId) {
+          try {
+            const detail = await brain1Api(`/api/brain1/sessions/${encodeURIComponent(savedSessionId)}`);
+            brain1SessionStatus = detail.status;
+            brain1Trace = detail.trace || [];
+            brain1DaySelect.value = String(brain1SessionStatus.day_index);
+            brain1StartingPeak.value = String(brain1SessionStatus.starting_peak_kw);
+            setBrain1Message("Reconnected to Brain 1's in-memory exhibit after refresh.");
+          } catch (error) {
+            clearStoredBrain1SessionId();
+            if (error.status !== 404) throw error;
+          }
+        }
+        renderBrain1Session();
+      } catch (error) {
+        setBrain1Message(error.message, true);
+      }
+    }
+
+    async function startBrain1Session() {
+      if (brain1Pending) return;
+      brain1Pending = true;
+      updateBrain1Controls();
+      try {
+        if (brain1SessionStatus?.session_id) {
+          await brain1Api(`/api/brain1/sessions/${encodeURIComponent(brain1SessionStatus.session_id)}`, { method: "DELETE" }).catch(() => null);
+          brain1SessionStatus = null;
+          brain1Trace = [];
+          clearStoredBrain1SessionId();
+        }
+        const payload = await brain1Api("/api/brain1/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            day_index: Number(brain1DaySelect.value),
+            starting_peak_kw: Number(brain1StartingPeak.value),
+          }),
+        });
+        brain1SessionStatus = payload.status;
+        brain1Trace = payload.trace || [];
+        storeBrain1SessionId(brain1SessionStatus.session_id);
+        setBrain1Message("Brain 1 is ready. Its first decision is previewed but not executed yet.");
+        renderBrain1Session();
+      } catch (error) {
+        renderBrain1Session();
+        throw error;
+      } finally {
+        brain1Pending = false;
+        updateBrain1Controls();
+      }
+    }
+
+    async function stepBrain1Session() {
+      if (brain1Pending || !brain1SessionStatus?.session_id) return;
+      brain1Pending = true;
+      updateBrain1Controls();
+      try {
+        const payload = await brain1Api(`/api/brain1/sessions/${encodeURIComponent(brain1SessionStatus.session_id)}/step`, {
+          method: "POST",
+        });
+        brain1Trace.push(payload.entry);
+        brain1SessionStatus = payload.status;
+        setBrain1Message(`Executed Brain 1 step ${brain1SessionStatus.step_index}/${brain1SessionStatus.total_steps}. The panel now previews the next thought.`);
+        renderBrain1Session();
+      } catch (error) {
+        if (error.status === 404) {
+          brain1SessionStatus = null;
+          brain1Trace = [];
+          clearStoredBrain1SessionId();
+        } else if (error.payload?.status) {
+          brain1SessionStatus = error.payload.status;
+        }
+        setBrain1Message(error.message, true);
+        renderBrain1Session();
+      } finally {
+        brain1Pending = false;
+        updateBrain1Controls();
+      }
+    }
+
+    async function resetBrain1Session() {
+      if (brain1Pending) return;
+      brain1Pending = true;
+      updateBrain1Controls();
+      try {
+        const sessionId = brain1SessionStatus?.session_id || storedBrain1SessionId();
+        if (sessionId) {
+          await brain1Api(`/api/brain1/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }).catch(() => null);
+        }
+        clearStoredBrain1SessionId();
+        brain1SessionStatus = null;
+        brain1Trace = [];
+        setBrain1Message("Brain 1 reset. Choose a day and open a fresh exhibit.");
+        renderBrain1Session();
+      } finally {
+        brain1Pending = false;
+        updateBrain1Controls();
+      }
+    }
+
+    async function initializeBrain1Tab() {
+      if (brain1Initialized) return;
+      brain1Initialized = true;
+      await loadBrain1Context();
     }
 
     function billValue(day, field) {
@@ -4887,6 +5299,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           } else if (target === "brain-env") {
             initializeBrainEnvTab();
             drawBrainCharts();
+          } else if (target === "brain1") {
+            initializeBrain1Tab();
+            drawBrain1Charts();
           } else if (target === "get-weather") {
             loadWeatherContext();
           } else if (target === "benchmarking") {
@@ -5904,6 +6319,13 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     brainResetButton.addEventListener("click", () => {
       resetBrainSession().catch((error) => setBrainMessage(error.message, true));
     });
+    brain1StartButton.addEventListener("click", () => {
+      startBrain1Session().catch((error) => setBrain1Message(error.message, true));
+    });
+    brain1StepButton.addEventListener("click", stepBrain1Session);
+    brain1ResetButton.addEventListener("click", () => {
+      resetBrain1Session().catch((error) => setBrain1Message(error.message, true));
+    });
     window.addEventListener("resize", () => {
       hideTooltip();
       hideDispatchTooltip();
@@ -5919,6 +6341,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       }
       if (document.getElementById("tab-brain-env").classList.contains("active")) {
         drawBrainCharts();
+      }
+      if (document.getElementById("tab-brain1").classList.contains("active")) {
+        drawBrain1Charts();
       }
     });
     drawBenchmark();

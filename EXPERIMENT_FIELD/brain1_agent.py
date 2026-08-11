@@ -7,6 +7,20 @@ from EXPERIMENT_FIELD.brain_env import BrainObservation
 
 
 @dataclass(frozen=True, slots=True)
+class Brain1Decision:
+    """One explainable, deterministic Brain 1 answer."""
+
+    action: float
+    label: str
+    reason_code: str
+    reason: str
+    normalized_soc: float
+    normalized_tariff: float
+    cheap_threshold_normalized: float
+    expensive_threshold_normalized: float
+
+
+@dataclass(frozen=True, slots=True)
 class Brain1Agent:
     """Deterministic school-answer benchmark for obvious tariff arbitrage.
 
@@ -42,6 +56,10 @@ class Brain1Agent:
 
     def act(self, observation: BrainObservation) -> float:
         """Return exactly -1 (charge), 0 (idle), or +1 (discharge)."""
+        return self.decide(observation).action
+
+    def decide(self, observation: BrainObservation) -> Brain1Decision:
+        """Return the action and the exact school-answer reason behind it."""
         try:
             observation_length = len(observation)
         except TypeError as exc:
@@ -72,12 +90,48 @@ class Brain1Agent:
             normalized_tariff <= self.cheap_tariff_max_normalized
             and normalized_soc < 1.0
         ):
-            return -1.0
+            return Brain1Decision(
+                action=-1.0,
+                label="CHARGE",
+                reason_code="cheap_with_room",
+                reason="The tariff is cheap and the battery still has room, so Brain 1 requests full charge.",
+                normalized_soc=normalized_soc,
+                normalized_tariff=normalized_tariff,
+                cheap_threshold_normalized=self.cheap_tariff_max_normalized,
+                expensive_threshold_normalized=self.expensive_tariff_min_normalized,
+            )
 
         if (
             normalized_tariff >= self.expensive_tariff_min_normalized
             and normalized_soc > 0.0
         ):
-            return 1.0
+            return Brain1Decision(
+                action=1.0,
+                label="DISCHARGE",
+                reason_code="expensive_with_energy",
+                reason="The tariff is expensive and the battery has usable energy, so Brain 1 requests full discharge.",
+                normalized_soc=normalized_soc,
+                normalized_tariff=normalized_tariff,
+                cheap_threshold_normalized=self.cheap_tariff_max_normalized,
+                expensive_threshold_normalized=self.expensive_tariff_min_normalized,
+            )
 
-        return 0.0
+        if normalized_tariff <= self.cheap_tariff_max_normalized:
+            reason_code = "cheap_but_full"
+            reason = "The tariff is cheap, but the battery is already full, so Brain 1 idles."
+        elif normalized_tariff >= self.expensive_tariff_min_normalized:
+            reason_code = "expensive_but_empty"
+            reason = "The tariff is expensive, but the battery is empty, so Brain 1 idles."
+        else:
+            reason_code = "middle_tariff"
+            reason = "The tariff is between the cheap and expensive thresholds, so Brain 1 idles."
+        return Brain1Decision(
+            action=0.0,
+            label="IDLE",
+            reason_code=reason_code,
+            reason=reason,
+            normalized_soc=normalized_soc,
+            normalized_tariff=normalized_tariff,
+            cheap_threshold_normalized=self.cheap_tariff_max_normalized,
+            expensive_threshold_normalized=self.expensive_tariff_min_normalized,
+        )
