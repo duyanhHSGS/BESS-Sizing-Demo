@@ -9,6 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -16,7 +17,13 @@ from bess.paths import PROJECT_ROOT
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from bess.core.scenario_gen import DayData
+
+@dataclass(slots=True)
+class TelemetryDay:
+    load: Any
+    pv: Any
+    day_type: str
+    date_iso: str
 
 
 BASE_DIR = PROJECT_ROOT
@@ -232,7 +239,7 @@ def _keys(value: Any) -> list[str]:
     return [part.strip() for part in str(value or "").split(",") if part.strip()]
 
 
-def fetch_days(start_iso: str, end_iso: str) -> tuple[list[DayData], dict[str, str], dict[str, Any]]:
+def fetch_days(start_iso: str, end_iso: str) -> tuple[list[TelemetryDay], dict[str, str], dict[str, Any]]:
     config = _validated_runtime_config()
     start_day = date.fromisoformat(start_iso)
     end_day = date.fromisoformat(end_iso)
@@ -301,7 +308,7 @@ def _channel(config: dict[str, Any], telemetry: dict[str, list], key_spec: str) 
     return dict(output)
 
 
-def _build_days(config, telemetry, start_day: date, end_day: date) -> tuple[list[DayData], dict[str, str]]:
+def _build_days(config, telemetry, start_day: date, end_day: date) -> tuple[list[TelemetryDay], dict[str, str]]:
     timezone = ZoneInfo(config["timezone"])
     interval = int(config["interval_minutes"])
     steps = 1440 // interval
@@ -327,11 +334,10 @@ def _build_days(config, telemetry, start_day: date, end_day: date) -> tuple[list
         if load is None or pv is None:
             failures[cursor.isoformat()] = "load/PV telemetry is missing or exceeds the configured gap limit"
         else:
-            valid.append(DayData(
+            valid.append(TelemetryDay(
                 load=_array(load),
                 pv=_array(pv),
                 day_type="weekend" if cursor.weekday() >= 5 else "working",
-                weather="thingsboard",
                 date_iso=cursor.isoformat(),
             ))
         cursor += timedelta(days=1)

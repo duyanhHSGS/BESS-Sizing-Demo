@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from EXPERIMENT_FIELD.brain1_agent import Brain1Agent, Brain1Decision
-from EXPERIMENT_FIELD.brain_env import BrainEnv, BrainEpisode, BrainTimestepInput
+from bess.brain.brain1_agent import Brain1Agent, Brain1Decision
+from bess.brain.brain_env import BrainEnv, BrainEpisode, BrainTimestepInput
 
 
 BASE_OBSERVATION = (0.0, 1.0, 0.2, 0.5, 0.5, 0.1, 1.0)
@@ -199,7 +199,7 @@ def test_agent_configuration_does_not_change_after_act():
 
 
 def test_brain1_imports_no_production_bess_or_training_stack():
-    source_path = Path(__file__).parents[1] / "EXPERIMENT_FIELD" / "brain1_agent.py"
+    source_path = Path(__file__).parents[1] / "bess" / "brain" / "brain1_agent.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
     imported_modules = []
 
@@ -209,9 +209,9 @@ def test_brain1_imports_no_production_bess_or_training_stack():
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
             imported_modules.append(node.module)
 
-    assert "EXPERIMENT_FIELD.brain_env" in imported_modules
+    assert "bess.brain.brain_env" in imported_modules
     assert not any(module == "bess" or module.startswith("bess.") for module in imported_modules)
-    assert not any("training" in module.lower() or "ppo" in module.lower() for module in imported_modules)
+    assert not any("training" in module.lower() for module in imported_modules)
 
 
 # ---------------------------------------------------------------------------

@@ -1,1 +1,0 @@
-"""bess.agents package."""

@@ -1,8 +1,4 @@
-"""Canonical project defaults.
-
-Keep literal defaults here once. Other modules derive runtime config from these
-values instead of carrying their own battery/tariff/timestep copies.
-"""
+"""Canonical algorithm-neutral project defaults."""
 
 DEFAULT_PARAMETERS = {
     "selected_data_csv": "offline_tande-15.csv",
@@ -34,55 +30,6 @@ DEFAULT_PARAMETERS = {
 
 DEFAULT_DT_HOURS = float(DEFAULT_PARAMETERS["dt"])
 
-# Runtime system defaults are derived from DEFAULT_PARAMETERS so the web UI,
-# dispatch, training, and fallback controller cannot silently disagree.
-SYSTEM_CONFIG = {
-    "BESS": {
-        "E_cap_kWh": float(DEFAULT_PARAMETERS["battery_capacity_kWh"]),
-        "P_rated_kW": float(DEFAULT_PARAMETERS["battery_power_limit_kW"]),
-        "eta_ch": float(DEFAULT_PARAMETERS["charge_efficiency"]),
-        "eta_dis": float(DEFAULT_PARAMETERS["discharge_efficiency"]),
-        "soc_min": float(DEFAULT_PARAMETERS["minimum_soc"]),
-        "soc_max": float(DEFAULT_PARAMETERS["maximum_soc"]),
-        "soc_safety_buffer": 0.05,
-        "soc_eod": float(DEFAULT_PARAMETERS["required_final_soc"]),
-        "soc_min_emergency": 0.05,
-    },
-    "Tariff": {
-        "price_peak_VND_per_kWh": float(DEFAULT_PARAMETERS["billing_expensive"]),
-        "price_mid_VND_per_kWh": float(DEFAULT_PARAMETERS["billing_normal"]),
-        "price_off_VND_per_kWh": float(DEFAULT_PARAMETERS["billing_cheap"]),
-        "T_cap_VND_per_kW_per_month": float(DEFAULT_PARAMETERS["billing_peak_penalty"]),
-        "peak_windows": DEFAULT_PARAMETERS["billing_windows_expensive"],
-        "off_windows": DEFAULT_PARAMETERS["billing_windows_cheap"],
-        "sunday_no_peak": bool(DEFAULT_PARAMETERS["billing_sunday"]),
-        "FIT_PRICE_VND_per_kWh": 1200.0,
-        "ENABLE_EXPORT": False,
-    },
-    "Time": {
-        "dt_hours": DEFAULT_DT_HOURS,
-    },
-    "Operation": {
-        "P_target_user_kW": 350.0,
-    },
-    "Safety": {
-        "V_NOMINAL": 1.0,
-        "V_BLACKOUT_TH": 0.85,
-        "T_DERATE": [[35, 1.0], [42, 0.7], [45, 0.5], [999, 0.0]],
-    },
-}
-
-# PPO training defaults. PPO_GAMMA is also used by potential-based SOC shaping.
-PPO_GAMMA = 0.995
-PPO_LAMBDA = 0.97
-PRO_GAMMA = 0.995
-GREPO_GAMMA = 0.995
-GREPRO_GAMMA = 0.995
-PPO2_GAMMA = 1.0
-PPO2_LAM_ENERGY = 0.97
-PPO2_LAM_PEAK = 0.97
-
-# Live UI data: main.py uses these when optional sample sizing is enabled.
 SAMPLE_BATTERY_CANDIDATES = tuple(
     {
         "id": f"{int(capacity)}kwh-{ratio_label}",
@@ -95,11 +42,6 @@ SAMPLE_BATTERY_CANDIDATES = tuple(
     for ratio, ratio_label in ((0.35, "0.35C"), (0.50, "0.50C"), (0.70, "0.70C"))
 )
 
-# Form fields are derived from the canonical parameter keys rather than copied
-# into a second hand-maintained list. dt is detected from the selected dataset;
-# billing_mode and billing_sunday are handled separately by main.py.
 FORM_FIELDS = tuple(
-    key
-    for key in DEFAULT_PARAMETERS
-    if key not in {"dt", "billing_mode", "billing_sunday"}
+    key for key in DEFAULT_PARAMETERS if key not in {"dt", "billing_mode", "billing_sunday"}
 )

@@ -1,6 +1,6 @@
 import pytest
 
-from EXPERIMENT_FIELD.brain_env import (
+from bess.brain.brain_env import (
     ElectricityMeterState,
     ElectricityMeterStepResult,
     reset_electricity_meter_for_new_day,

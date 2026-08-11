@@ -1,6 +1,6 @@
 import pytest
 
-from EXPERIMENT_FIELD.brain_env import PhysicsStepResult, run_physics_step
+from bess.brain.brain_env import PhysicsStepResult, run_physics_step
 
 
 BASE = {

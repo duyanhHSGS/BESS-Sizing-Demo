@@ -2,9 +2,9 @@ import math
 
 import pytest
 
-import EXPERIMENT_FIELD.brain_env as brain_env_module
+import bess.brain.brain_env as brain_env_module
 
-from EXPERIMENT_FIELD.brain_env import (
+from bess.brain.brain_env import (
     BrainEnvironmentStepResult,
     BrainEnv,
     BrainEpisode,
@@ -127,6 +127,32 @@ def test_one_timestep_episode_is_exact_done_boundary():
     assert result.next_observation is None
     assert result.reward.timestep_savings_vnd == pytest.approx(0.0)
     assert result.reward.monthly_savings_vnd == pytest.approx(0.0)
+
+
+def test_terminal_soc_projection_preserves_requested_projected_and_executed_actions():
+    episode = make_episode(
+        BrainTimestepInput(net_load_kw=200.0, tariff_vnd_per_kwh=10.0, is_working_day=True),
+        BrainTimestepInput(net_load_kw=200.0, tariff_vnd_per_kwh=10.0, is_working_day=True),
+    )
+    env = BrainEnv(
+        **{**BASE_ENV, "initial_state_of_charge": 0.50},
+        episode=episode,
+        required_final_soc=0.50,
+    )
+    env.reset()
+
+    first = env.step(1.0)
+    final = env.step(1.0)
+
+    assert first.requested_action == pytest.approx(1.0)
+    assert first.projected_action == pytest.approx(1.0)
+    assert final.requested_action == pytest.approx(1.0)
+    assert final.projected_action == pytest.approx(-1.0)
+    assert final.requested_battery_kw == pytest.approx(100.0)
+    assert final.projected_battery_kw == pytest.approx(-100.0)
+    assert final.horizon_adjusted is True
+    assert final.bess.physics.final_battery_kw == pytest.approx(-100.0)
+    assert env.bess_world.state_of_charge == pytest.approx(0.50)
 
 
 def test_invalid_action_fails_before_either_world_mutates():

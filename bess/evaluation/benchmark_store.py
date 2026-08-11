@@ -51,12 +51,11 @@ def save_result(result: dict[str, Any]) -> dict[str, Any]:
     temporary_path.replace(final_path)
 
     snapshot = result.get("snapshot", {})
-    roster = snapshot.get("policies", [])
+    roster = snapshot.get("controllers", [])
     leaderboard = result.get("leaderboard", [])
     compact = {
-        "contestant_count": len(leaderboard),
-        "policy_count": sum(row.get("type") == "policy" for row in leaderboard),
-        "best_policy": next((row.get("id") for row in leaderboard if row.get("type") == "policy"), None),
+        "controller_count": len(leaderboard),
+        "best_controller": leaderboard[0].get("id") if leaderboard else None,
     }
     with _conn() as conn:
         conn.execute(

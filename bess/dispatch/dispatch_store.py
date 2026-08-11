@@ -64,9 +64,9 @@ def save_run(
     run_id = uuid.uuid4().hex
     traces = {}
     kpi = {}
-    for policy_name, result in results.items():
-        traces[policy_name] = result.get("days", [])
-        kpi[policy_name] = result.get("kpi", {})
+    for controller_id, result in results.items():
+        traces[controller_id] = result.get("trace", [])
+        kpi[controller_id] = result.get("kpi", {})
 
     trace_path = _inside_base(trace_dir / f"{run_id}.json")
     trace_path.write_text(json.dumps(traces), encoding="utf-8")
@@ -107,21 +107,19 @@ def get_run(run_id: str, run_dir: Path | None = None) -> dict[str, Any] | None:
     return _row_to_dict(row) if row else None
 
 
-def latest_run_for_policy(policy_name: str, run_dir: Path | None = None) -> dict[str, Any] | None:
+def latest_run_for_controller(controller_id: str, run_dir: Path | None = None) -> dict[str, Any] | None:
     for run in list_runs(run_dir):
-        policies = run.get("config", {}).get("policies", [])
-        if policy_name in policies or run.get("config", {}).get("policy") == policy_name:
+        controllers = run.get("config", {}).get("controllers", [])
+        if controller_id in controllers:
             return run
     return None
 
 
-def latest_runs_by_policy(run_dir: Path | None = None) -> dict[str, dict[str, Any]]:
+def latest_runs_by_controller(run_dir: Path | None = None) -> dict[str, dict[str, Any]]:
     latest = {}
     for run in list_runs(run_dir):
-        for policy_name in run.get("config", {}).get("policies", []):
-            latest.setdefault(policy_name, run)
-        if run.get("config", {}).get("policy"):
-            latest.setdefault(run["config"]["policy"], run)
+        for controller_id in run.get("config", {}).get("controllers", []):
+            latest.setdefault(controller_id, run)
     return latest
 
 

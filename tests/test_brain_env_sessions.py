@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-import EXPERIMENT_FIELD.brain_env_sessions as brain_sessions
-from EXPERIMENT_FIELD.brain_env import action_to_requested_battery_power_kw
+import bess.brain.brain_env_sessions as brain_sessions
+from bess.brain.brain_env import action_to_requested_battery_power_kw
 
 
 def _parameters(*, billing_mode: str = "2tc") -> dict[str, object]:

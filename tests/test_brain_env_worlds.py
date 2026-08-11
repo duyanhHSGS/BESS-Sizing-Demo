@@ -1,6 +1,6 @@
 import pytest
 
-from EXPERIMENT_FIELD.brain_env import (
+from bess.brain.brain_env import (
     BrainEnv,
     BrainStepResult,
     ElectricityMeterState,

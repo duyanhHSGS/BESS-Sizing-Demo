@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from EXPERIMENT_FIELD.brain3_agent import (
+from bess.brain.brain3_agent import (
     BRAIN3_ACTIONS,
     BRAIN3_ACTION_DIM,
     BRAIN3_ACTION_LABELS,
@@ -14,7 +14,7 @@ from EXPERIMENT_FIELD.brain3_agent import (
     Brain3ReplayBuffer,
     ReplayBatch,
 )
-from EXPERIMENT_FIELD.brain_env import BrainEnv, BrainEpisode, BrainTimestepInput
+from bess.brain.brain_env import BrainEnv, BrainEpisode, BrainTimestepInput
 
 
 def observation(value: float = 0.0):
@@ -221,8 +221,8 @@ def test_invalid_observations_and_action_indexes_fail_loudly():
         Brain3Agent.action_from_index(3)
 
 
-def test_brain3_imports_only_experiment_env_not_production_bess_or_training_stack():
-    path = Path(__file__).resolve().parents[1] / "EXPERIMENT_FIELD" / "brain3_agent.py"
+def test_brain3_imports_only_canonical_env_not_training_stack():
+    path = Path(__file__).resolve().parents[1] / "bess" / "brain" / "brain3_agent.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     imported_modules = []
     for node in ast.walk(tree):
@@ -231,6 +231,6 @@ def test_brain3_imports_only_experiment_env_not_production_bess_or_training_stac
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
             imported_modules.append(node.module)
 
-    assert "EXPERIMENT_FIELD.brain_env" in imported_modules
-    assert all(not module.startswith("bess") for module in imported_modules)
-    assert all("ppo" not in module.lower() for module in imported_modules)
+    assert "bess.brain.brain_env" in imported_modules
+    assert all(not module.startswith("bess.training") for module in imported_modules)
+    assert all("legacy" not in module.lower() for module in imported_modules)

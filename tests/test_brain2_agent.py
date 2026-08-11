@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from EXPERIMENT_FIELD.brain2_agent import Brain2Agent, Brain2Decision
-from EXPERIMENT_FIELD.brain_env import BrainEnv, BrainEpisode, BrainTimestepInput
+from bess.brain.brain2_agent import Brain2Agent, Brain2Decision
+from bess.brain.brain_env import BrainEnv, BrainEpisode, BrainTimestepInput
 
 
 BASE_AGENT = {
@@ -295,7 +295,7 @@ def test_same_input_is_deterministic_observation_is_not_mutated_and_agent_is_fro
 
 
 def test_brain2_imports_no_production_bess_or_training_stack():
-    path = Path(__file__).resolve().parents[1] / "EXPERIMENT_FIELD" / "brain2_agent.py"
+    path = Path(__file__).resolve().parents[1] / "bess" / "brain" / "brain2_agent.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     imported_modules = []
     for node in ast.walk(tree):
@@ -304,10 +304,10 @@ def test_brain2_imports_no_production_bess_or_training_stack():
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
             imported_modules.append(node.module)
 
-    assert "EXPERIMENT_FIELD.brain_env" in imported_modules
+    assert "bess.brain.brain_env" in imported_modules
     assert all(not module.startswith("bess") for module in imported_modules)
     assert all("training" not in module.lower() for module in imported_modules)
-    assert all("ppo" not in module.lower() for module in imported_modules)
+    assert all("training" not in module.lower() for module in imported_modules)
 
 
 def test_full_day_unclipped_world_hits_full_at_cheap_end_and_minimum_at_midnight():

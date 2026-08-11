@@ -304,7 +304,7 @@ def _demand_windows(steps, dt):
 
 
 def _demand_window(start, steps, dt):
-    """Return the fixed meter block containing ``start`` (legacy helper)."""
+    """Return the fixed meter block containing ``start``."""
     block_steps = demand_window_steps(dt)
     block_start = (int(start) // block_steps) * block_steps
     if block_start + block_steps > int(steps):
