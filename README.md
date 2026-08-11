@@ -28,6 +28,16 @@ Dispatch, Benchmarking, Live, and Shadow all call the same measured-data runtime
 Every selected controller owns an independent BrainEnv while receiving identical
 load, PV-derived net load, tariffs, and battery settings.
 
+Sizing, Human, Live, Shadow, and Dispatch provide per-line chart toggles and hover
+readouts. Dispatch separates grid/peak, requested/projected/executed battery power,
+SOC, and reward/savings traces instead of compressing them into one chart.
+When an Oracle result is cached or calculated, Sizing overlays its grid and billing
+peak while Dispatch also exposes its grid, meter, battery schedule, peak, and SOC.
+
+Complete calendar months are preferred for billing episodes. If calendar data is
+incomplete, the runtime warns and falls back to chronological sequential 30-day
+periods; any trailing days that cannot complete a block are skipped with a warning.
+
 Shadow never emits battery commands. It can replay local CSV data or completed
 ThingsBoard telemetry and persists frozen results under `runs/shadow/`.
 

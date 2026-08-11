@@ -92,7 +92,13 @@ def load_csv_days(path: Path) -> list[BrainDay]:
     return days
 
 
-def split_billing_periods(days: list[BrainDay], *, reject_leftover: bool) -> list[BrainPeriod]:
+def split_billing_periods(
+    days: list[BrainDay],
+    *,
+    reject_leftover: bool,
+    warnings: list[str] | None = None,
+) -> list[BrainPeriod]:
+    notices = warnings if warnings is not None else []
     dated: list[tuple[date, BrainDay]] = []
     for day in days:
         if not day.date_iso:
@@ -117,23 +123,24 @@ def split_billing_periods(days: list[BrainDay], *, reject_leftover: bool) -> lis
                 BrainPeriod(key, tuple(day for _, day in sorted(entries)))
                 for key, entries in sorted(groups.items())
             ]
-        if reject_leftover:
-            incomplete = []
-            for key, entries in sorted(groups.items()):
-                stamps = sorted(stamp for stamp, _ in entries)
-                expected = calendar.monthrange(stamps[0].year, stamps[0].month)[1]
-                if len(stamps) != expected or stamps[0].day != 1 or stamps[-1].day != expected:
-                    incomplete.append(key)
-            raise BrainRuntimeError(
-                "dated dataset contains incomplete calendar billing periods: "
-                + ", ".join(incomplete)
-            )
+        incomplete = []
+        for key, entries in sorted(groups.items()):
+            stamps = sorted(stamp for stamp, _ in entries)
+            expected = calendar.monthrange(stamps[0].year, stamps[0].month)[1]
+            if len(stamps) != expected or stamps[0].day != 1 or stamps[-1].day != expected:
+                incomplete.append(key)
+        notices.append(
+            "Incomplete calendar month(s) "
+            + ", ".join(incomplete)
+            + "; using sequential 30-day billing periods instead."
+        )
+        days = [day for _, day in sorted(dated)]
 
     full_count = len(days) // 30
     leftover = len(days) % 30
-    if reject_leftover and leftover:
-        raise BrainRuntimeError(
-            f"dataset has {len(days)} days; sequential billing fallback requires complete 30-day periods"
+    if leftover and reject_leftover and full_count:
+        notices.append(
+            f"Skipped {leftover} trailing day(s) that could not form a complete 30-day billing period."
         )
     periods = [
         BrainPeriod(f"period-{index + 1:03d}", tuple(days[index * 30:(index + 1) * 30]))
@@ -429,9 +436,11 @@ def run_controllers(
     checkpoint_dir: Path,
 ) -> tuple[dict[str, Any], list[str]]:
     config = BrainConfig.from_parameters(parameters)
-    periods = split_billing_periods(load_csv_days(csv_path), reject_leftover=True)
-    results: dict[str, Any] = {}
     warnings: list[str] = []
+    periods = split_billing_periods(
+        load_csv_days(csv_path), reject_leftover=True, warnings=warnings
+    )
+    results: dict[str, Any] = {}
     for controller_id in dict.fromkeys(controller_ids):
         try:
             results[controller_id] = run_controller(controller_id, periods, config, checkpoint_dir)

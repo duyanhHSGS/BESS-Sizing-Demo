@@ -1,8 +1,6 @@
 from datetime import date, timedelta
 
-import pytest
-
-from bess.brain.runtime import BrainDay, BrainRuntimeError, load_csv_days, run_controllers, split_billing_periods
+from bess.brain.runtime import BrainDay, load_csv_days, run_controllers, split_billing_periods
 from bess.core.settings import DEFAULT_PARAMETERS
 from bess.paths import PROJECT_ROOT
 
@@ -45,7 +43,7 @@ def test_runtime_trace_preserves_requested_and_executed_actions() -> None:
     } <= row.keys()
 
 
-def test_dated_periods_are_calendar_chronological_and_incomplete_months_fail() -> None:
+def test_dated_periods_are_calendar_chronological_and_incomplete_months_fallback() -> None:
     def day(offset: int) -> BrainDay:
         stamp = date(2026, 1, 1) + timedelta(days=offset)
         return BrainDay(offset + 1, stamp.isoformat(), "working", (1.0,) * 48, (0.0,) * 48)
@@ -56,5 +54,8 @@ def test_dated_periods_are_calendar_chronological_and_incomplete_months_fail() -
     assert periods[0].days[0].date_iso == "2026-01-01"
     assert periods[-1].days[-1].date_iso == "2026-02-28"
 
-    with pytest.raises(BrainRuntimeError, match="incomplete calendar"):
-        split_billing_periods(complete[:-1], reject_leftover=True)
+    warnings = []
+    fallback = split_billing_periods(complete[:-1], reject_leftover=True, warnings=warnings)
+    assert [len(period.days) for period in fallback] == [30]
+    assert any("sequential 30-day" in warning for warning in warnings)
+    assert any("Skipped 28 trailing" in warning for warning in warnings)

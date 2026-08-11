@@ -16,3 +16,32 @@ def test_dispatch_exposes_builtin_brains_and_checkpoint_roster() -> None:
     assert '"id": "brain2"' in source
     assert "*compatible" in source
     assert "list_compatible_checkpoints" in source
+
+
+def test_dense_viewers_keep_toggleable_lines_and_peak_overlays() -> None:
+    html = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+    javascript = (PROJECT_ROOT / "web" / "brain_hq.js").read_text(encoding="utf-8")
+    for identifier in (
+        "dispatch-power-lines",
+        "dispatch-action-lines",
+        "dispatch-soc-lines",
+        "dispatch-money-lines",
+        "live-lines",
+        "shadow-lines",
+        "human-lines",
+        "sizing-lines",
+    ):
+        assert f'id="{identifier}"' in html
+    assert "controlledPlot" in javascript
+    assert "bindChartHover" in javascript
+    assert "Raw billing-scope peak" in javascript
+    assert "requested_battery_kw" in javascript
+    assert "projected_battery_kw" in javascript
+    assert "executed_battery_kw" in javascript
+    assert "Oracle grid" in javascript
+    assert "Oracle billing peak" in javascript
+    assert "Oracle battery schedule" in javascript
+    assert "Oracle SOC" in javascript
+    assert '<pre id="human-status"' not in html
+    assert '<pre id="live-status"' not in html
+    assert '<pre id="dispatch-status"' not in html

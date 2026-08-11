@@ -1,0 +1,15 @@
+.chart-readout {
+  position: fixed;
+  z-index: 50;
+}
+
+.status-note {
+  max-width: 560px;
+  padding: 7px 10px;
+  border: 1px solid #294258;
+  border-radius: 8px;
+  background: #08151f;
+  color: #b9cedb;
+  font-size: 12px;
+  white-space: pre-line;
+}

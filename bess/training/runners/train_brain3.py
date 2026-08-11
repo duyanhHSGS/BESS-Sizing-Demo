@@ -124,7 +124,12 @@ def main() -> None:
         raise SystemExit("steps and eval-every must be positive")
     parameters = json.loads(args.parameters.read_text(encoding="utf-8"))
     config = BrainConfig.from_parameters(parameters)
-    periods = split_billing_periods(load_csv_days(args.csv), reject_leftover=True)
+    period_warnings: list[str] = []
+    periods = split_billing_periods(
+        load_csv_days(args.csv), reject_leftover=True, warnings=period_warnings
+    )
+    for warning in period_warnings:
+        print(json.dumps({"type": "warning", "message": warning}), flush=True)
     held_ratio = args.control_dt_minutes / (config.timestep_hours * 60.0)
     held_steps = round(held_ratio)
     decisions_per_day = 1440.0 / args.control_dt_minutes

@@ -146,9 +146,11 @@ def catchup(
     applied = {**parameters, **config.get("parameters", {})}
     applied["dt"] = str(24.0 / len(source_days[0].load_kw))
     brain_config = BrainConfig.from_parameters(applied)
-    periods = split_billing_periods(source_days, reject_leftover=True)
-    results = {}
     warnings = []
+    periods = split_billing_periods(
+        source_days, reject_leftover=True, warnings=warnings
+    )
+    results = {}
     controllers = config["controllers"]
     for index, controller_id in enumerate(controllers):
         if cancelled():
