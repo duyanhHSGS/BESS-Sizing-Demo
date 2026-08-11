@@ -4,7 +4,7 @@ from bess.paths import PROJECT_ROOT
 def _brain1_section() -> str:
     html = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
     return html.split('<section id="tab-brain1"', 1)[1].split(
-        '<section id="tab-benchmarking"', 1
+        '<section id="tab-brain2"', 1
     )[0]
 
 
@@ -55,9 +55,9 @@ def test_brain_chart_line_keeps_a_single_latest_sample_visible() -> None:
 def test_brain1_graph_uses_executed_step_progress_and_guards_completion() -> None:
     html = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
 
-    assert "function brain1XForTraceIndex" in html
+    assert "function spectatorXForTraceIndex" in html
     assert "recordedStep + 1" in html
-    assert "function drawBrain1Progress" in html
+    assert "function drawSpectatorProgress" in html
     assert "traceSteps === totalSteps" in html
     assert "brain1Trace.length === totalSteps" in html
     assert "the graph owns ${brain1Trace.length}/${totalSteps} executed steps" in html
