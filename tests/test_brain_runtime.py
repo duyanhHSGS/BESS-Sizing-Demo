@@ -40,6 +40,7 @@ def test_runtime_trace_preserves_requested_and_executed_actions() -> None:
         "projected_battery_kw",
         "executed_battery_kw",
         "horizon_adjusted",
+        "billing_period",
     } <= row.keys()
 
 

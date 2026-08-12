@@ -17,9 +17,9 @@ def test_flask_entrypoint_uses_brain_hq_assets() -> None:
     source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
     html = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
     assert "from bess.webapp import app" in source
-    assert "/assets/brain_hq.css" in html
     assert "/assets/brain_hq_overrides.css" in html
     assert "/assets/brain_hq.js" in html
+    assert not (PROJECT_ROOT / "web" / "brain_hq.css").exists()
     assert len(html.split('class="panel')) == 8
 
 

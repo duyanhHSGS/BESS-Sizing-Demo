@@ -28,11 +28,12 @@ Dispatch, Benchmarking, Live, and Shadow all call the same measured-data runtime
 Every selected controller owns an independent BrainEnv while receiving identical
 load, PV-derived net load, tariffs, and battery settings.
 
-Sizing, Human, Live, Shadow, and Dispatch provide per-line chart toggles and hover
-readouts. Dispatch separates grid/peak, requested/projected/executed battery power,
-SOC, and reward/savings traces instead of compressing them into one chart.
-When an Oracle result is cached or calculated, Sizing overlays its grid and billing
-peak while Dispatch also exposes its grid, meter, battery schedule, peak, and SOC.
+The dashboard restores the dense, flat OG visual language from `web/old.html` while
+keeping only the seven Brain HQ workflows and current APIs. Sizing and Dispatch plot
+one complete billing month at a time with OG bill strips, textual line toggles, hover
+readouts, and explicit DEADLY peak overlays. Oracle and every Brain controller use
+the same canonical period membership; Oracle is solved as one LP across the whole
+month and Brain 3 runs one continuous BrainEnv episode across that same month.
 
 Complete calendar months are preferred for billing episodes. If calendar data is
 incomplete, the runtime warns and falls back to chronological sequential 30-day

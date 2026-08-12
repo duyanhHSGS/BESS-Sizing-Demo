@@ -3,6 +3,8 @@ from pathlib import Path
 
 from bess.evaluation.benchmark import (
     _annotate_day_billing,
+    _billing_period_key,
+    _canonical_billing_days,
     _day_energy_cost,
     _demand_windows,
     _detect_dt_from_rows,
@@ -10,7 +12,6 @@ from bess.evaluation.benchmark import (
     _group_days,
     _load_rows,
     _month_peaks,
-    _month_start_day,
     _prices_for_day,
     _rounded_series,
     _rolling_30_minute_average,
@@ -32,7 +33,7 @@ def build_oracle_lp(parameters):
 
     csv_path = selected_data_path(parameters)
     csv_stat = csv_path.stat()
-    dt, base_days = _prepared_oracle_input(
+    dt, prepared_days = _prepared_oracle_input(
         str(csv_path.resolve()),
         csv_stat.st_size,
         csv_stat.st_mtime_ns,
@@ -45,32 +46,37 @@ def build_oracle_lp(parameters):
     maximum_soc = _clamp(_to_float(parameters.get("maximum_soc"), 1.0), minimum_soc, 1.0)
     required_final_soc = _clamp(_to_float(parameters.get("required_final_soc"), minimum_soc), minimum_soc, maximum_soc)
 
-    if not base_days:
+    if not prepared_days:
         return {"available": True, "status": "No CSV rows found.", "days": [], "summary": _empty_summary()}
 
+    base_days, period_warnings = _canonical_billing_days([dict(day) for day in prepared_days])
+
     if capacity <= 0.0 or power_limit <= 0.0:
-        return _no_battery_result(base_days, parameters, dt)
+        result = _no_battery_result(base_days, parameters, dt)
+        result["warnings"] = period_warnings
+        return result
 
     month_results = []
-    month_starts = sorted({_month_start_day(day["day_index"]) for day in base_days})
-    for month_start in month_starts:
-        month_days = [day for day in base_days if _month_start_day(day["day_index"]) == month_start]
-        month_results.extend(
-            _solve_month(
-                linprog,
-                lil_matrix,
-                month_days,
-                parameters,
-                dt,
-                capacity,
-                power_limit,
-                charge_efficiency,
-                discharge_efficiency,
-                minimum_soc,
-                maximum_soc,
-                required_final_soc,
-            )
+    billing_periods = list(dict.fromkeys(_billing_period_key(day) for day in base_days))
+    for billing_period in billing_periods:
+        month_days = [day for day in base_days if _billing_period_key(day) == billing_period]
+        solved_days = _solve_month(
+            linprog,
+            lil_matrix,
+            month_days,
+            parameters,
+            dt,
+            capacity,
+            power_limit,
+            charge_efficiency,
+            discharge_efficiency,
+            minimum_soc,
+            maximum_soc,
+            required_final_soc,
         )
+        for day in solved_days:
+            day["billing_period"] = billing_period
+        month_results.extend(solved_days)
 
     summary = _build_summary(base_days, month_results, parameters, dt)
     _attach_month_peaks(month_results, parameters, dt)
@@ -79,6 +85,7 @@ def build_oracle_lp(parameters):
         "status": "Oracle LP solved." if summary["solved_day_count"] else "Oracle LP could not solve any month.",
         "days": month_results,
         "summary": summary,
+        "warnings": period_warnings,
     }
 
 
@@ -274,6 +281,7 @@ def _slice_days(days, solution, idx, parameters, dt):
             {
                 "day_index": day["day_index"],
                 "date_iso": day.get("date_iso"),
+                "billing_period": day.get("billing_period"),
                 "solved": True,
                 "status": "optimal",
                 "grid": [float(value) for value in grid_import],
@@ -311,7 +319,7 @@ def _build_summary(base_days, oracle_days, parameters, dt):
     oracle_saving = (before_energy + before_demand) - (after_energy + after_demand + wear_cost)
     seer_factor = _clamp(_to_float(parameters.get("billing_real_saving_factor"), 1.0), 0.0, 1.0)
     total_bill = after_energy + after_demand + wear_cost
-    month_count = len({_month_start_day(day["day_index"]) for day in base_days})
+    month_count = len({_billing_period_key(day) for day in base_days})
     oracle_annual_saving = _annualized_monthly_saving(base_days, solved_days, parameters, dt)
     seer_annual_saving = max(0.0, oracle_annual_saving) * seer_factor
     sizing_economics = _sizing_economics(
@@ -376,10 +384,10 @@ def _sizing_economics(parameters, oracle_annual_saving, seer_annual_saving, orac
 
 def _annualized_monthly_saving(base_days, oracle_days, parameters, dt):
     oracle_by_day = {day["day_index"]: day for day in oracle_days if day.get("solved")}
-    month_starts = sorted({_month_start_day(day["day_index"]) for day in base_days})
+    month_starts = list(dict.fromkeys(_billing_period_key(day) for day in base_days))
     monthly_savings = []
     for month_start in month_starts:
-        month_base = [day for day in base_days if _month_start_day(day["day_index"]) == month_start]
+        month_base = [day for day in base_days if _billing_period_key(day) == month_start]
         month_oracle = [
             oracle_by_day[day["day_index"]]
             for day in month_base
@@ -404,7 +412,7 @@ def _annualized_monthly_saving(base_days, oracle_days, parameters, dt):
 def _attach_month_peaks(days, parameters, dt):
     month_peaks = _month_peaks(days, dt)
     for day in days:
-        day["month_peak"] = month_peaks.get(_month_start_day(day["day_index"]))
+        day["month_peak"] = month_peaks.get(_billing_period_key(day))
     _annotate_day_billing(days, parameters, dt)
 
 
@@ -418,6 +426,7 @@ def _no_battery_result(days, parameters, dt):
             {
                 "day_index": day["day_index"],
                 "date_iso": day.get("date_iso"),
+                "billing_period": day.get("billing_period"),
                 "solved": True,
                 "status": "battery disabled",
                 "grid": day["grid"],
@@ -449,6 +458,8 @@ def _failed_day(day, message):
     count = len(day["grid"])
     return {
         "day_index": day["day_index"],
+        "date_iso": day.get("date_iso"),
+        "billing_period": day.get("billing_period"),
         "solved": False,
         "status": message,
         "grid": day["grid"],

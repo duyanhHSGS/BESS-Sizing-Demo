@@ -49,6 +49,7 @@ def build_benchmark(parameters):
     rows = _load_rows(csv_path)
     dt = _detect_dt_from_rows(rows)
     days = _group_days(rows, dt)
+    days, period_warnings = _canonical_billing_days(days)
     total_load_kWh = sum(day["load_kWh"] for day in days)
     total_pv_kWh = sum(day["pv_kWh"] for day in days)
     total_grid_kWh = sum(day["grid_kWh"] for day in days)
@@ -61,7 +62,7 @@ def build_benchmark(parameters):
     )
     month_peaks = _month_peaks(days, dt)
     for day in days:
-        day["month_peak"] = month_peaks.get(_month_start_day(day["day_index"]))
+        day["month_peak"] = month_peaks.get(_billing_period_key(day))
     _annotate_day_billing(days, parameters, dt)
 
     monthly_peak = max(
@@ -89,6 +90,7 @@ def build_benchmark(parameters):
         "csv_filename": csv_path.name,
         "time_labels": _time_labels(_max_step_count(days), dt),
         "days": days,
+        "warnings": period_warnings,
         "summary": {
             "day_count": len(days),
             "month_start_day_index": monthly_peak["month_start_day_index"],
@@ -110,6 +112,32 @@ def build_benchmark(parameters):
             "total_bill_vnd": round(energy_cost_vnd + demand_charge_vnd),
         },
     }
+
+
+def _canonical_billing_days(days):
+    """Apply the same complete-period contract used by every Brain controller."""
+    from bess.brain.runtime import BrainDay, split_billing_periods
+
+    notices = []
+    brain_days = [
+        BrainDay(
+            day["day_index"],
+            day.get("date_iso"),
+            day["day_type"],
+            tuple(day["load"]),
+            tuple(day["pv"]),
+        )
+        for day in days
+    ]
+    periods = split_billing_periods(brain_days, reject_leftover=True, warnings=notices)
+    by_index = {day["day_index"]: day for day in days}
+    canonical = []
+    for period in periods:
+        for source in period.days:
+            day = by_index[source.day_index]
+            day["billing_period"] = period.key
+            canonical.append(day)
+    return canonical, notices
 
 
 def _load_rows(path):
@@ -217,11 +245,11 @@ def _demand_charge(parameters, peak_grid_kW):
 def _annotate_day_billing(days, parameters, dt):
     month_counts = {}
     for day in days:
-        month_start = _month_start_day(day["day_index"])
+        month_start = _billing_period_key(day)
         month_counts[month_start] = month_counts.get(month_start, 0) + 1
 
     for day in days:
-        month_start = _month_start_day(day["day_index"])
+        month_start = _billing_period_key(day)
         month_peak = day.get("month_peak")
         monthly_demand = _demand_charge(parameters, month_peak["value_kW"]) if month_peak else 0.0
         full_peak_on_owner = (
@@ -327,11 +355,15 @@ def _month_peaks(days, dt):
     if not days:
         return {}
 
-    last_day_index = days[-1]["day_index"]
+    period_bounds = {}
+    for day in days:
+        key = _billing_period_key(day)
+        bounds = period_bounds.setdefault(key, [day["day_index"], day["day_index"]])
+        bounds[1] = day["day_index"]
     peaks = {}
     for day in days:
-        month_start = _month_start_day(day["day_index"])
-        month_end = min(month_start + 29, last_day_index)
+        month_start = _billing_period_key(day)
+        first_day_index, month_end = period_bounds[month_start]
         best = peaks.setdefault(
             month_start,
             {
@@ -339,7 +371,8 @@ def _month_peaks(days, dt):
                 "day_index": None,
                 "step": None,
                 "time": "00:00",
-                "month_start_day_index": month_start,
+                "billing_period": month_start,
+                "month_start_day_index": first_day_index,
                 "month_end_day_index": month_end,
             },
         )
@@ -355,6 +388,10 @@ def _month_peaks(days, dt):
                     }
                 )
     return peaks
+
+
+def _billing_period_key(day):
+    return day.get("billing_period") or f"period-{_month_start_day(day['day_index']):03d}"
 
 
 def _month_start_day(day_index):

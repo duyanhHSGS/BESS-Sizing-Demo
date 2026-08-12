@@ -227,6 +227,7 @@ def episode_for_period(period: BrainPeriod, config: BrainConfig) -> tuple[BrainE
             timesteps.append(BrainTimestepInput(net, tariff, is_working))
             labels.append(
                 {
+                    "billing_period": period.key,
                     "day_index": day.day_index,
                     "date_iso": day.date_iso,
                     "day_type": day.day_type,
