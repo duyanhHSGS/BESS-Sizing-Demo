@@ -22,6 +22,9 @@ class Brain2Decision:
     remaining_cheap_steps: int
     normal_action: float
     expensive_action: float
+    base_action: float
+    aggressiveness: float
+    final_clipped_action: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,10 +40,11 @@ class Brain2Agent:
       reaches its configured maximum SOC exactly when the cheap window ends.
 
     After the cheap window:
-      Request one constant action in normal-price time and one larger constant action in
-      expensive-price time. The two actions are proportional to their tariff prices and
-      are solved once from the configured usable battery energy so an unclipped battery
-      that leaves the cheap window full reaches minimum SOC exactly at midnight.
+      Request one constant base action in normal-price time and one larger constant base
+      action in expensive-price time. The two base actions are proportional to their tariff
+      prices and are solved once from the configured usable battery energy. Brain 2 then
+      multiplies each non-cheap discharge request by ``aggressiveness`` (default 1.1) and
+      clips the final requested action to [-1, +1]. Cheap-window charging is not multiplied.
 
     If the ideal charge/discharge schedule needs more than the battery power limit,
     Brain 2 saturates its request at -1/+1 instead of crashing. BrainEnv remains the
@@ -59,6 +63,7 @@ class Brain2Agent:
     cheap_end_minute: float
     expensive_start_minute: float
     expensive_end_minute: float
+    aggressiveness: float = 2
 
     usable_capacity_kwh: float = field(init=False)
     normal_action: float = field(init=False)
@@ -82,6 +87,7 @@ class Brain2Agent:
             "cheap_end_minute",
             "expensive_start_minute",
             "expensive_end_minute",
+            "aggressiveness",
         )
         values: dict[str, float] = {}
         for name in numeric_names:
@@ -103,11 +109,14 @@ class Brain2Agent:
         cheap_end = values["cheap_end_minute"]
         expensive_start = values["expensive_start_minute"]
         expensive_end = values["expensive_end_minute"]
+        aggressiveness = values["aggressiveness"]
 
         if capacity_kwh <= 0.0:
             raise ValueError("Brain2 battery_capacity_kwh must be greater than 0")
         if power_kw <= 0.0:
             raise ValueError("Brain2 battery_power_kw must be greater than 0")
+        if aggressiveness < 0.0:
+            raise ValueError("Brain2 aggressiveness must be greater than or equal to 0")
         if minimum_soc < 0.0 or maximum_soc > 1.0 or maximum_soc <= minimum_soc:
             raise ValueError(
                 "Brain2 SOC limits must satisfy 0 <= minimum_state_of_charge "
@@ -259,6 +268,9 @@ class Brain2Agent:
                     remaining_cheap_steps=remaining_cheap_steps,
                     normal_action=self.normal_action,
                     expensive_action=self.expensive_action,
+                    base_action=0.0,
+                    aggressiveness=self.aggressiveness,
+                    final_clipped_action=0.0,
                 )
 
             timestep_hours = self.timestep_minutes / 60.0
@@ -290,6 +302,9 @@ class Brain2Agent:
                 remaining_cheap_steps=remaining_cheap_steps,
                 normal_action=self.normal_action,
                 expensive_action=self.expensive_action,
+                base_action=action,
+                aggressiveness=self.aggressiveness,
+                final_clipped_action=action,
             )
 
         remaining_cheap_steps = 0
@@ -312,21 +327,23 @@ class Brain2Agent:
                 remaining_cheap_steps=remaining_cheap_steps,
                 normal_action=self.normal_action,
                 expensive_action=self.expensive_action,
+                base_action=0.0,
+                aggressiveness=self.aggressiveness,
+                final_clipped_action=0.0,
             )
 
         if expensive_start_step <= current_step < expensive_end_step:
             tariff_period = "expensive"
-            action = self.expensive_action
+            base_action = self.expensive_action
             reason_code = "weighted_expensive_discharge"
-            reason = (
-                "Expensive time gets the larger constant tariff-weighted discharge action."
-            )
+            reason = "Expensive time gets the larger constant tariff-weighted base discharge request."
         else:
             tariff_period = "normal"
-            action = self.normal_action
+            base_action = self.normal_action
             reason_code = "weighted_normal_discharge"
-            reason = "Normal time gets the smaller constant tariff-weighted discharge action."
+            reason = "Normal time gets the smaller constant tariff-weighted base discharge request."
 
+        action = max(-1.0, min(1.0, base_action * self.aggressiveness))
         return Brain2Decision(
             action=action,
             label="DISCHARGE",
@@ -340,4 +357,7 @@ class Brain2Agent:
             remaining_cheap_steps=remaining_cheap_steps,
             normal_action=self.normal_action,
             expensive_action=self.expensive_action,
+            base_action=base_action,
+            aggressiveness=self.aggressiveness,
+            final_clipped_action=action,
         )
