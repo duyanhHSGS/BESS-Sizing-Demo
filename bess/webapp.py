@@ -18,7 +18,7 @@ from bess.evaluation.oracle.oracle_lp import build_oracle_lp
 from bess.integrations import thingsboard_connector
 from bess.shadow import brain_live_runs, brain_shadow_runs, shadow_jobs
 from bess.training.brain3_checkpoints import get_checkpoint_report, list_checkpoints, list_compatible_checkpoints, list_resume_checkpoints
-from bess.training.brain3_launcher import TrainingLaunchError, UnsupportedAlgorithm, start_training
+from bess.training.brain3_launcher import TrainingLaunchError, UnsupportedAlgorithm, preview_training, start_training
 from bess.training.training_datasets import DatasetError, list_datasets
 from bess.training.training_jobs import MANAGER
 
@@ -128,6 +128,14 @@ def training_datasets():
 @app.get("/api/training/checkpoints")
 def training_checkpoints():
     return jsonify({"deployments": list_checkpoints(), "resume": list_resume_checkpoints()})
+
+
+@app.post("/api/training/preview")
+def training_preview():
+    try:
+        return jsonify(preview_training(request.get_json(silent=True) or {}, dict(PARAMETERS)))
+    except (DatasetError, TrainingLaunchError, UnsupportedAlgorithm, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 422
 
 
 @app.get("/api/training/checkpoints/<checkpoint_name>/report")

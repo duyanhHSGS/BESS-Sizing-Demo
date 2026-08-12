@@ -227,6 +227,7 @@ def main() -> None:
         else args.eval_every
     )
     best_validation = float(resume_payload["best_validation"]) if resume_payload else float("-inf")
+    best_step = int(resume_payload.get("best_step", 0)) if resume_payload else 0
     curve = list(resume_payload["curve"]) if resume_payload else []
     best_deployment = resume_payload.get("best_deployment") if resume_payload else None
     if best_deployment is not None:
@@ -241,19 +242,37 @@ def main() -> None:
         _, _, period_losses = _decision_rollout(agent, period, config, held_steps, learn=True)
         losses.extend(period_losses)
         if agent.environment_steps >= next_evaluation or agent.environment_steps >= args.steps:
+            interval_evaluation_due = agent.environment_steps >= next_evaluation
             validation = _evaluate(agent, validation_periods, config, held_steps)
+            is_new_best = validation["savings_vnd"] > best_validation
+            if is_new_best:
+                best_validation = validation["savings_vnd"]
+                best_step = agent.environment_steps
             point = {
                 "type": "validation",
                 "steps": agent.environment_steps,
+                "gradient_steps": agent.gradient_steps,
+                "replay_size": len(agent.replay),
+                "replay_capacity": agent.replay.capacity,
+                "effective_learning_start": max(agent.batch_size, agent.learning_starts),
                 "validation_savings_vnd": validation["savings_vnd"],
+                "best_validation_savings_vnd": best_validation,
+                "best_step": best_step,
+                "is_new_best": is_new_best,
                 "mean_loss": float(np.mean(losses)) if losses else None,
                 "epsilon": agent.epsilon,
+                "training_epsilon": agent.epsilon,
+                "validation_epsilon": 0.0,
+                "validation_exploration": False,
+                "target_sync_interval": agent.target_sync_interval,
+                "target_sync_progress": agent.gradient_steps % agent.target_sync_interval,
+                "evaluation_trigger": "interval" if interval_evaluation_due else "final budget",
+                "evaluation_target_steps": next_evaluation if interval_evaluation_due else args.steps,
             }
             print(json.dumps(point), flush=True)
             curve.append(point)
             losses.clear()
-            if validation["savings_vnd"] > best_validation:
-                best_validation = validation["savings_vnd"]
+            if is_new_best:
                 best_deployment = copy.deepcopy(
                     _deployment(
                         agent,
@@ -262,6 +281,7 @@ def main() -> None:
                         {
                             "tag": args.tag,
                             "best_validation_savings_vnd": best_validation,
+                            "best_validation_step": best_step,
                             "training_periods": len(train_periods),
                             "validation_periods": len(validation_periods),
                             "test_periods": len(test_periods),
@@ -290,6 +310,7 @@ def main() -> None:
                     "order_cursor": order_cursor,
                     "next_evaluation": next_evaluation,
                     "best_validation": best_validation,
+                    "best_step": best_step,
                     "best_deployment": best_deployment,
                     "curve": curve,
                 },
@@ -306,6 +327,7 @@ def main() -> None:
         "algorithm": "brain3_dqn",
         "steps": agent.environment_steps,
         "best_validation_savings_vnd": best_validation,
+        "best_validation_step": best_step,
         "environment_fingerprint": config.fingerprint(),
         "dataset_fingerprint": dataset_fingerprint,
         "training_contract": training_contract,
