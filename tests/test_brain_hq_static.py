@@ -66,4 +66,4 @@ def test_oracle_and_brains_share_whole_billing_period_membership() -> None:
     cache = (PROJECT_ROOT / "bess" / "evaluation" / "oracle" / "oracle_cache.py").read_text(encoding="utf-8")
     assert "_canonical_billing_days" in oracle
     assert 'day["billing_period"] = billing_period' in oracle
-    assert "CACHE_VERSION = 4" in cache
+    assert "CACHE_VERSION = 5" in cache

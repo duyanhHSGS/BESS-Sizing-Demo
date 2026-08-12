@@ -16,7 +16,7 @@ import torch
 from bess.brain.brain3_agent import BRAIN3_ACTIONS, Brain3Agent
 from bess.brain.brain_env import BrainEnvironmentStepResult
 from bess.brain.runtime import episode_for_period, load_csv_days, make_env, split_billing_periods
-from bess.core.config import BrainConfig
+from bess.core.config import BrainConfig, ENVIRONMENT_CONTRACT_VERSION
 
 
 def _args() -> argparse.Namespace:
@@ -112,8 +112,9 @@ def _deployment(agent: Brain3Agent, config: BrainConfig, args: argparse.Namespac
             "native_dt_minutes": config.timestep_hours * 60.0,
             "control_dt_minutes": args.control_dt_minutes,
             "native_steps_per_action": round(args.control_dt_minutes / (config.timestep_hours * 60.0)),
+            "environment_contract_version": ENVIRONMENT_CONTRACT_VERSION,
             "environment_fingerprint": config.fingerprint(),
-            "environment": asdict(config),
+            "environment": {**asdict(config), "initial_soc": config.initial_soc},
         },
     }
 
@@ -163,6 +164,7 @@ def main() -> None:
     training_fingerprint = hashlib.sha256(
         json.dumps(
             {
+                "environment_contract_version": ENVIRONMENT_CONTRACT_VERSION,
                 "environment": config.fingerprint(),
                 "dataset": dataset_fingerprint,
                 "training": training_contract,
@@ -328,6 +330,7 @@ def main() -> None:
         "steps": agent.environment_steps,
         "best_validation_savings_vnd": best_validation,
         "best_validation_step": best_step,
+        "environment_contract_version": ENVIRONMENT_CONTRACT_VERSION,
         "environment_fingerprint": config.fingerprint(),
         "dataset_fingerprint": dataset_fingerprint,
         "training_contract": training_contract,

@@ -10,7 +10,7 @@ DEFAULT_PARAMETERS = {
     "battery_wear_cost": "500",
     "minimum_soc": "0.20",
     "maximum_soc": "0.90",
-    "required_final_soc": "0.50",
+    "required_final_soc": "0.20",
     "billing_mode": "2tc",
     "billing_sunday": True,
     "billing_expensive": "2251",

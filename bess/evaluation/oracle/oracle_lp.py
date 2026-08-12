@@ -146,7 +146,7 @@ def _solve_month(
         capacity,
         charge_efficiency,
         discharge_efficiency,
-        required_final_soc,
+        minimum_soc,
     )
     a_ub, b_ub = _build_inequalities(
         lil_matrix,
@@ -199,14 +199,14 @@ def _build_equalities(
     capacity,
     charge_efficiency,
     discharge_efficiency,
-    required_final_soc,
+    initial_soc,
 ):
     a_eq = lil_matrix((1 + steps * 2, variable_count))
     b_eq = [0.0] * (1 + steps * 2)
 
     row = 0
     a_eq[row, idx.soc(0)] = 1.0
-    b_eq[row] = required_final_soc
+    b_eq[row] = initial_soc
     row += 1
 
     charge_soc_gain = charge_efficiency * dt / capacity

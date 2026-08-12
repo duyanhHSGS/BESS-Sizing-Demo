@@ -19,10 +19,11 @@ def test_brain1_and_brain2_share_runtime_but_own_independent_worlds() -> None:
         dict(DEFAULT_PARAMETERS),
         PROJECT_ROOT / "checkpoints",
     )
-    assert set(results) <= {"brain1", "brain2"}
+    assert set(results) == {"brain1", "brain2"}
     assert all(result["trace"] for result in results.values())
+    assert all(result["trace"][0]["soc_before"] == 0.20 for result in results.values())
     assert all(result["kpi"]["ending_soc_compliant"] for result in results.values())
-    assert isinstance(warnings, list)
+    assert not any(warning.startswith("brain2:") for warning in warnings)
 
 
 def test_runtime_trace_preserves_requested_and_executed_actions() -> None:

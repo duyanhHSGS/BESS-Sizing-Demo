@@ -8,6 +8,9 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
+ENVIRONMENT_CONTRACT_VERSION = 2
+
+
 def _number(parameters: dict[str, Any], key: str) -> float:
     value = float(parameters[key])
     if not math.isfinite(value):
@@ -63,6 +66,11 @@ class BrainConfig:
         )
         config.validate()
         return config
+
+    @property
+    def initial_soc(self) -> float:
+        """Canonical owned-episode starting SOC: always start at the configured minimum."""
+        return self.minimum_soc
 
     def validate(self) -> None:
         if self.battery_capacity_kwh <= 0 or self.battery_power_kw <= 0:

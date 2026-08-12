@@ -174,11 +174,12 @@ def test_schedule_rule_ignores_load_peak_working_day_and_tariff_eye_for_action()
     assert agent.act(baseline) == pytest.approx(agent.act(weird_other_eyes))
 
 
-def test_late_cheap_state_that_cannot_reach_full_fails_loudly_instead_of_clamping():
-    agent = make_agent()
+def test_late_cheap_state_that_cannot_reach_full_saturates_instead_of_crashing():
+    decision = make_agent().decide(observation_at(345.0, 0.0))
 
-    with pytest.raises(RuntimeError, match="cannot reach maximum SOC"):
-        agent.act(observation_at(345.0, 0.0))
+    assert decision.action == -1.0
+    assert decision.reason_code == "adaptive_cheap_fill_power_limited"
+    assert decision.requested_battery_power_kw == pytest.approx(-450.0)
 
 
 @pytest.mark.parametrize(
@@ -191,8 +192,8 @@ def test_late_cheap_state_that_cannot_reach_full_fails_loudly_instead_of_clampin
         ({"cheap_end_minute": 355.0}, "align exactly"),
         ({"cheap_start_minute": 300.0, "cheap_end_minute": 285.0}, "cheap window"),
         ({"expensive_start_minute": 300.0, "expensive_end_minute": 495.0}, "must not overlap"),
-        ({"cheap_tariff_vnd_per_kwh": 1400.0}, "0 < cheap < normal < expensive"),
-        ({"normal_tariff_vnd_per_kwh": 3000.0}, "0 < cheap < normal < expensive"),
+        ({"cheap_tariff_vnd_per_kwh": 1400.0}, "0 <= cheap < normal < expensive"),
+        ({"normal_tariff_vnd_per_kwh": 3000.0}, "0 <= cheap < normal < expensive"),
         ({"battery_capacity_kwh": math.inf}, "finite"),
     ],
 )
@@ -201,22 +202,27 @@ def test_invalid_configuration_fails_loudly(overrides, message):
         make_agent(**overrides)
 
 
-def test_configuration_rejects_battery_that_cannot_fill_during_cheap_window():
-    with pytest.raises(ValueError, match="cannot fill"):
-        make_agent(battery_capacity_kwh=2000.0, battery_power_kw=100.0)
+def test_configuration_that_cannot_fill_during_cheap_window_saturates_at_max_charge():
+    agent = make_agent(battery_capacity_kwh=2000.0, battery_power_kw=100.0)
+    decision = agent.decide(observation_at(0.0, 0.0))
+
+    assert decision.action == -1.0
+    assert decision.reason_code == "adaptive_cheap_fill_power_limited"
 
 
-def test_configuration_rejects_weighting_that_would_require_action_above_one():
-    with pytest.raises(ValueError, match="action above \+1"):
-        make_agent(
-            battery_capacity_kwh=1000.0,
-            battery_power_kw=100.0,
-            minimum_state_of_charge=0.0,
-            maximum_state_of_charge=0.60,
-            cheap_tariff_vnd_per_kwh=1.0,
-            normal_tariff_vnd_per_kwh=2.0,
-            expensive_tariff_vnd_per_kwh=200.0,
-        )
+def test_weighted_discharge_that_exceeds_power_limit_saturates_instead_of_crashing():
+    agent = make_agent(
+        battery_capacity_kwh=1000.0,
+        battery_power_kw=100.0,
+        minimum_state_of_charge=0.0,
+        maximum_state_of_charge=0.60,
+        cheap_tariff_vnd_per_kwh=1.0,
+        normal_tariff_vnd_per_kwh=2.0,
+        expensive_tariff_vnd_per_kwh=200.0,
+    )
+
+    assert 0.0 <= agent.normal_action <= 1.0
+    assert agent.expensive_action == 1.0
 
 
 @pytest.mark.parametrize(
@@ -271,12 +277,7 @@ def test_action_is_always_inside_brain_env_action_bounds_for_valid_schedule_stat
 
     for minute in range(0, 1440, 15):
         for soc in (0.0, 0.25, 0.5, 0.75, 1.0):
-            try:
-                action = agent.act(observation_at(float(minute), soc))
-            except RuntimeError:
-                # A deliberately impossible late-cheap catch-up state must fail loudly,
-                # never silently emit an illegal action.
-                continue
+            action = agent.act(observation_at(float(minute), soc))
             assert -1.0 <= action <= 1.0
 
 

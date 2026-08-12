@@ -301,7 +301,7 @@ def _settings_snapshot(parameters: dict[str, Any], timestep_hours: float) -> dic
         ),
         "minimum_soc": _finite_float(parameters.get("minimum_soc"), "Minimum SOC"),
         "maximum_soc": _finite_float(parameters.get("maximum_soc"), "Maximum SOC"),
-        "initial_soc": _finite_float(parameters.get("required_final_soc"), "Required final SOC"),
+        "initial_soc": _finite_float(parameters.get("minimum_soc"), "Minimum SOC"),
         "timestep_hours": timestep_hours,
         "battery_wear_vnd_per_kwh": _finite_float(
             parameters.get("battery_wear_cost"), "Battery wear cost", minimum=0.0

@@ -41,6 +41,10 @@ class Brain2Agent:
       expensive-price time. The two actions are proportional to their tariff prices and
       are solved once from the configured usable battery energy so an unclipped battery
       that leaves the cheap window full reaches minimum SOC exactly at midnight.
+
+    If the ideal charge/discharge schedule needs more than the battery power limit,
+    Brain 2 saturates its request at -1/+1 instead of crashing. BrainEnv remains the
+    final authority for terminal-SOC reachability, SOC limits, and no-export physics.
     """
 
     battery_capacity_kwh: float
@@ -111,9 +115,9 @@ class Brain2Agent:
             )
         if timestep_minutes <= 0.0:
             raise ValueError("Brain2 timestep_minutes must be greater than 0")
-        if not (0.0 < cheap_tariff < normal_tariff < expensive_tariff):
+        if not (0.0 <= cheap_tariff < normal_tariff < expensive_tariff):
             raise ValueError(
-                "Brain2 tariffs must satisfy 0 < cheap < normal < expensive"
+                "Brain2 tariffs must satisfy 0 <= cheap < normal < expensive"
             )
 
         steps_per_day_float = 1440.0 / timestep_minutes
@@ -156,13 +160,6 @@ class Brain2Agent:
 
         usable_capacity_kwh = capacity_kwh * (maximum_soc - minimum_soc)
         timestep_hours = timestep_minutes / 60.0
-        maximum_cheap_charge_kwh = power_kw * timestep_hours * cheap_steps
-        if usable_capacity_kwh > maximum_cheap_charge_kwh + 1e-9:
-            raise ValueError(
-                "Brain2 cannot fill the entire usable battery inside the cheap window "
-                "at the configured battery power"
-            )
-
         discharge_normal_steps = 0
         discharge_expensive_steps = 0
         for step in range(cheap_end_step, steps_per_day):
@@ -183,13 +180,6 @@ class Brain2Agent:
         )
         normal_action = action_scale * normal_tariff
         expensive_action = action_scale * expensive_tariff
-
-        if normal_action > 1.0 + 1e-12 or expensive_action > 1.0 + 1e-12:
-            raise ValueError(
-                "Brain2 weighted discharge schedule requires an action above +1; "
-                "the configured battery cannot follow this tariff weighting and still "
-                "reach minimum SOC at midnight"
-            )
 
         object.__setattr__(self, "usable_capacity_kwh", usable_capacity_kwh)
         object.__setattr__(self, "normal_action", min(1.0, normal_action))
@@ -275,18 +265,21 @@ class Brain2Agent:
             required_battery_kwh_per_step = remaining_room_kwh / remaining_cheap_steps
             required_charge_kw = required_battery_kwh_per_step / timestep_hours
             required_action = required_charge_kw / self.battery_power_kw
-            if required_action > 1.0 + 1e-12:
-                raise RuntimeError(
-                    "Brain2 cannot reach maximum SOC by the end of the cheap window "
-                    "from the current SOC without requesting action below -1"
-                )
+            power_limited = required_action > 1.0
             action = -min(1.0, required_action)
             return Brain2Decision(
                 action=action,
                 label="CHARGE",
-                reason_code="adaptive_cheap_fill",
+                reason_code=(
+                    "adaptive_cheap_fill_power_limited"
+                    if power_limited
+                    else "adaptive_cheap_fill"
+                ),
                 reason=(
-                    "Spread the remaining usable battery room evenly across the remaining "
+                    "The exact cheap-window fill target now needs more than maximum battery power, "
+                    "so request maximum charging and let BrainEnv enforce physical and terminal-SOC limits."
+                    if power_limited
+                    else "Spread the remaining usable battery room evenly across the remaining "
                     "cheap timesteps so the planned SOC reaches full at cheap-window end."
                 ),
                 tariff_period=tariff_period,

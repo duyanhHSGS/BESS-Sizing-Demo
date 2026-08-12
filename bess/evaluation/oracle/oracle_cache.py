@@ -14,7 +14,7 @@ from bess.evaluation.benchmark import selected_data_path
 
 BASE_DIR = PROJECT_ROOT
 CACHE_DIR = BASE_DIR / "user_data" / "oracle_lp_cache"
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 
 ORACLE_PARAMETER_KEYS = (
     "selected_data_csv",
@@ -91,7 +91,9 @@ def get_or_build_oracle_lp(
 
 def selected_csv_has_cache(parameters: dict[str, Any]) -> bool:
     prefix = _csv_cache_prefix(parameters)
-    return CACHE_DIR.exists() and any(CACHE_DIR.glob(f"{prefix}-*.json"))
+    if not CACHE_DIR.exists():
+        return False
+    return any(_read_cache(path) is not None for path in CACHE_DIR.glob(f"{prefix}-*.json"))
 
 
 def exact_cache_exists(parameters: dict[str, Any]) -> bool:

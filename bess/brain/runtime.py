@@ -251,7 +251,7 @@ def episode_for_period(period: BrainPeriod, config: BrainConfig) -> tuple[BrainE
 
 def make_env(episode: BrainEpisode, config: BrainConfig) -> BrainEnv:
     return BrainEnv(
-        initial_state_of_charge=config.required_final_soc,
+        initial_state_of_charge=config.initial_soc,
         minimum_state_of_charge=config.minimum_soc,
         maximum_state_of_charge=config.maximum_soc,
         battery_capacity_kwh=config.battery_capacity_kwh,

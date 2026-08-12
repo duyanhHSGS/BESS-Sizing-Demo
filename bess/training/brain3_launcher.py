@@ -11,6 +11,7 @@ from typing import Any
 
 from bess.paths import PROJECT_ROOT
 from bess.brain.runtime import load_csv_days, split_billing_periods
+from bess.core.config import ENVIRONMENT_CONTRACT_VERSION
 from bess.training.training_datasets import detect_resolution_minutes, get_dataset_path
 from bess.training.training_jobs import JobManager
 
@@ -230,9 +231,11 @@ def preview_training(payload: dict, parameters: dict) -> dict[str, Any]:
             "checkpoint_rule": "Maximum total validation savings wins the deployment checkpoint",
         },
         "environment": {
+            "environment_contract_version": ENVIRONMENT_CONTRACT_VERSION,
             "battery_capacity_kwh": resolved["frozen_parameters"].get("battery_capacity_kWh"),
             "battery_power_kw": resolved["frozen_parameters"].get("battery_power_limit_kW"),
             "minimum_soc": resolved["frozen_parameters"].get("minimum_soc"),
+            "initial_soc": resolved["frozen_parameters"].get("minimum_soc"),
             "maximum_soc": resolved["frozen_parameters"].get("maximum_soc"),
             "required_final_soc": resolved["frozen_parameters"].get("required_final_soc"),
             "charge_efficiency": resolved["frozen_parameters"].get("charge_efficiency"),
