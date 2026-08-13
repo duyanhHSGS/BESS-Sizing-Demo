@@ -1,118 +1,117 @@
 from __future__ import annotations
 
-import numpy as np
+import math
 
-from bess.agents.sadrbc import SADRBCConfig
-from bess.core.bess_env import BESSEnv
-from bess.core.scenario_gen import DayData, MonthData
-
+from bess.core.bess_env import BrainEnv, BrainEpisode, BrainTimestepInput
 
 DT_HOURS = 0.25
-STEPS_PER_DAY = 96
+BATTERY_CAPACITY_KWH = 1250.0
+BATTERY_POWER_KW = 450.0
+ETA_CHARGE = 0.9
+ETA_DISCHARGE = 0.9
+SOC_MIN = 0.20
+SOC_MAX = 0.90
+DEMAND_FEE_VND_PER_KW = 285_000.0
+WEAR_VND_PER_KWH = 50.0
 
 
-def _config() -> SADRBCConfig:
-    return SADRBCConfig({
-        "E_cap_kWh": 1250.0,
-        "P_rated_kW": 450.0,
-        "eta_ch": 0.9,
-        "eta_dis": 0.9,
-        "soc_min": 0.20,
-        "soc_max": 0.90,
-        "soc_eod": 0.50,
-        "dt_hours": DT_HOURS,
-        "price_off": 904.0,
-        "price_mid": 1332.0,
-        "price_peak": 2251.0,
-        "T_cap": 285000.0,
-        "off_windows": "00:00-06:00",
-        "peak_windows": "17:30-22:30",
-    })
-
-
-def _month(load_kw: float) -> MonthData:
-    day = DayData(
-        load=np.full(STEPS_PER_DAY, load_kw, dtype=np.float64),
-        pv=np.zeros(STEPS_PER_DAY, dtype=np.float64),
-        day_type="working",
-        weather="test",
-        day_index=0,
-        date_iso="2026-08-10",
+def _env(
+    *,
+    tariff_vnd_per_kwh: float,
+    load_kw: float = 100.0,
+    initial_soc: float = 0.50,
+) -> BrainEnv:
+    episode = BrainEpisode(
+        timesteps=(
+            BrainTimestepInput(load_kw, tariff_vnd_per_kwh, True),
+            BrainTimestepInput(load_kw, tariff_vnd_per_kwh, True),
+        ),
+        steps_per_day=2,
+        power_scale_kw=1500.0,
     )
-    return MonthData(days=[day], source="test")
-
-
-def _env(*, load_kw: float = 100.0, initial_peak_kw: float = 2000.0) -> BESSEnv:
-    env = BESSEnv(
-        _config(),
-        reference_power_kw=1500.0,
-        initial_running_peak_kw=initial_peak_kw,
-        discount_factor=0.995,
-        control_interval_minutes=15.0,
-        degradation_cost_vnd_per_kwh=50.0,
-        reward_mode="factory_dispatch_v1",
+    env = BrainEnv(
+        initial_state_of_charge=initial_soc,
+        minimum_state_of_charge=SOC_MIN,
+        maximum_state_of_charge=SOC_MAX,
+        battery_capacity_kwh=BATTERY_CAPACITY_KWH,
+        battery_power_kw=BATTERY_POWER_KW,
+        timestep_hours=DT_HOURS,
+        charge_efficiency=ETA_CHARGE,
+        discharge_efficiency=ETA_DISCHARGE,
+        demand_charge_vnd_per_kw=DEMAND_FEE_VND_PER_KW,
+        battery_wear_vnd_per_kwh=WEAR_VND_PER_KWH,
+        episode=episode,
     )
-    env.reset(_month(load_kw), initial_state_of_charge=0.50)
+    env.reset()
     return env
 
 
-def _reward_at_step(step: int, action: float, *, load_kw: float = 100.0) -> float:
-    env = _env(load_kw=load_kw)
-    env.current_timestep_index = step
-    _, reward, _, _ = env.step(action)
-    return reward
+def _first_reward(tariff_vnd_per_kwh: float, action: float, *, load_kw: float) -> float:
+    env = _env(tariff_vnd_per_kwh=tariff_vnd_per_kwh, load_kw=load_kw)
+    result = env.step(action)
+    return result.reward.timestep_savings_vnd
 
 
-def test_factory_reward_teaches_tariff_direction() -> None:
-    # 00:00 cheap, 12:00 normal, 18:00 expensive for this tariff config.
-    cheap_step = 0
-    normal_step = 48
-    expensive_step = 72
+def test_brain_reward_follows_tariff_direction() -> None:
+    cheap = 904.0
+    normal = 1332.0
+    expensive = 2251.0
 
-    cheap_charge = _reward_at_step(cheap_step, -1.0)
-    normal_charge = _reward_at_step(normal_step, -1.0)
-    expensive_charge = _reward_at_step(expensive_step, -1.0)
+    cheap_charge = _first_reward(cheap, -1.0, load_kw=100.0)
+    normal_charge = _first_reward(normal, -1.0, load_kw=100.0)
+    expensive_charge = _first_reward(expensive, -1.0, load_kw=100.0)
 
-    # Start with enough load and SOC so a +1 action can actually discharge.
-    cheap_discharge = _reward_at_step(cheap_step, +1.0, load_kw=1000.0)
-    normal_discharge = _reward_at_step(normal_step, +1.0, load_kw=1000.0)
-    expensive_discharge = _reward_at_step(expensive_step, +1.0, load_kw=1000.0)
+    cheap_discharge = _first_reward(cheap, +1.0, load_kw=1000.0)
+    normal_discharge = _first_reward(normal, +1.0, load_kw=1000.0)
+    expensive_discharge = _first_reward(expensive, +1.0, load_kw=1000.0)
 
-    assert cheap_charge > 0.0
-    assert normal_charge < 0.0
+    assert cheap_charge < 0.0
+    assert normal_charge < cheap_charge
     assert expensive_charge < normal_charge
 
-    assert cheap_discharge < 0.0
-    assert normal_discharge > 0.0
+    assert cheap_discharge > 0.0
+    assert normal_discharge > cheap_discharge
     assert expensive_discharge > normal_discharge
 
 
-def test_factory_reward_inventory_value_sits_between_break_even_values() -> None:
-    env = _env()
-    cfg = env.config
-    wear = env.degradation_cost_vnd_per_kwh
+def test_brain_reward_subtracts_symmetric_battery_wear() -> None:
+    expected_throughput_kwh = BATTERY_POWER_KW * DT_HOURS
+    expected_wear_vnd = expected_throughput_kwh * WEAR_VND_PER_KWH
 
-    cheap_charge_break_even = (cfg.price_off + wear) / cfg.eta_ch
-    normal_discharge_break_even = (cfg.price_mid - wear) * cfg.eta_dis
+    charge_env = _env(tariff_vnd_per_kwh=1332.0, load_kw=100.0)
+    charge = charge_env.step(-1.0)
+    discharge_env = _env(tariff_vnd_per_kwh=1332.0, load_kw=1000.0)
+    discharge = discharge_env.step(+1.0)
 
-    assert cheap_charge_break_even < env._inventory_value_vnd_per_stored_kwh
-    assert env._inventory_value_vnd_per_stored_kwh < normal_discharge_break_even
+    assert math.isclose(
+        charge.bess.cost.battery_wear_cost_vnd,
+        expected_wear_vnd,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
+    assert math.isclose(
+        discharge.bess.cost.battery_wear_cost_vnd,
+        expected_wear_vnd,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
 
 
-def test_factory_reward_crushes_cheap_charging_that_creates_new_demand_peak() -> None:
-    env = _env(load_kw=100.0, initial_peak_kw=100.0)
+def test_brain_reward_penalizes_charging_that_creates_new_demand_peak() -> None:
+    env = _env(tariff_vnd_per_kwh=904.0, load_kw=100.0)
 
-    # A 30-minute demand block is two 15-minute samples. Charging at rated
-    # power makes grid import 550 kW for the whole block, raising PMax by
-    # 450 kW. The demand-charge punishment must dominate the cheap-charge
-    # arbitrage encouragement.
-    _, first_reward, first_done, _ = env.step(-1.0)
-    _, second_reward, second_done, info = env.step(-1.0)
+    first = env.step(-1.0)
+    second = env.step(-1.0)
 
-    assert not first_done
-    assert not second_done
-    assert first_reward > 0.0
-    assert second_reward < 0.0
-    assert first_reward + second_reward < 0.0
-    assert info["peak_delta"] > 0.0
-    assert info["d_run"] > 100.0
+    assert not first.done
+    assert second.done
+    assert first.reward.timestep_savings_vnd < 0.0
+    assert second.reward.timestep_savings_vnd < first.reward.timestep_savings_vnd
+    assert (
+        first.reward.timestep_savings_vnd + second.reward.timestep_savings_vnd
+        < 0.0
+    )
+    assert first.bess.cost.demand_peak_increase_kw == 0.0
+    assert second.bess.cost.demand_peak_increase_kw > 0.0
+    assert second.bess.physics.grid_import_kw > 100.0
+    assert second.bess.meter.monthly_peak_kw > second.raw.meter.monthly_peak_kw

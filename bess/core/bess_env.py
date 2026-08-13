@@ -1,624 +1,1603 @@
-"""bess.core.bess_env.py  CMDP environment for reactive or real-forecast BESS dispatch.
+# CANONICAL PROJECT ENVIRONMENT
+# ============================================================
+# WHAT THIS BESS BRAIN CAN SEE — HUMAN LANGUAGE
+#
+# Eye 1 + Eye 2: What time of day is it?
+#   - Time is represented by TWO numbers (sin + cos) so midnight wraps around smoothly.
+#
+# Eye 3: How much electricity does the factory need from the grid right now?
+#   - This file receives NET LOAD directly. PV does not exist as a separate input here.
+#   - Any PV effect must already be included in net_load_kw before it reaches this env.
+#
+# Eye 4: How full is the battery?
+#   - 0.0 = at minimum allowed SOC, 1.0 = at maximum allowed SOC.
+#
+# Eye 5: How expensive is electricity right now?
+#   - Current tariff divided by the biggest tariff in the tariff schedule.
+#
+# Eye 6: How scary is the monthly demand peak so far?
+#   - The highest monthly peak seen so far, normalized by the episode power ruler.
+#
+# Eye 7: Is this a working day?
+#   - 1.0 = yes, 0.0 = no.
+#
+# TOTAL: 7 numbers go into the brain.
+#
+# WHAT THIS BESS BRAIN CAN DO — ONE BABY LEVER
+#
+# The brain outputs ONE action number from -1.0 to +1.0.
+#   -1.0 = ask for maximum charging
+#    0.0 = do nothing
+#   +1.0 = ask for maximum discharging
+#
+# Requested battery power = action * battery rated power.
+# Example with a 450 kW battery:
+#   action -1.0 -> requested power -450 kW (charge)
+#   action -0.5 -> requested power -225 kW (charge)
+#   action  0.0 -> requested power    0 kW (nap)
+#   action +0.5 -> requested power +225 kW (discharge)
+#   action +1.0 -> requested power +450 kW (discharge)
+#
+# TWO SEPARATE GUARDS — DO NOT MIX THEM:
+#
+# BATTERY POLICE:
+#   - Pure battery-side only.
+#   - Knows SOC, SOC min/max, battery capacity, and timestep.
+#   - Clips requested BATTERY-SIDE power so the battery cannot cross SOC min/max.
+#   - Does NOT know net load, grid, factory, tariff, PV, or efficiency.
+#
+# GRID GUARD:
+#   - Outside-world no-export rule only.
+#   - Knows net load and discharge efficiency.
+#   - Converts battery-side discharge into outside delivered power and clips it so
+#     delivered power cannot exceed net load.
+#   - Charging is untouched by the no-export guard.
+#
+# OUTSIDE ELECTRICAL PHYSICS:
+#   - Converts FINAL battery-side power into the power seen by the factory/grid.
+#   - Discharge: outside gets battery_power * discharge_efficiency.
+#   - Charge: grid must provide battery_charge / charge_efficiency.
+#   - Final grid import = non-negative net load - signed outside battery power.
+#   - Grid import must never become negative; Grid Guard must run first.
+#
+# SOC PHYSICS:
+#   - Uses the FINAL battery-side power after both guards.
+#   - Battery-side power changes stored battery energy exactly; efficiency does NOT
+#     change SOC in this model. Efficiency belongs only to outside electrical physics.
+#
+# UTILITY ELECTRICITY METER:
+#   - Sees ONLY final grid_import_kw from physics.
+#   - Integrates energy inside fixed, clock-aligned, non-overlapping 30-minute blocks.
+#   - A monthly demand peak changes only when a complete 30-minute block finishes.
+#   - Knows NOTHING about tariff, money, battery wear, reward, or learning.
+#
+# MONEY ACCOUNTANT:
+#   - Sees only finished accounting facts: grid energy, battery throughput, and
+#     monthly-peak increase, plus their prices.
+#   - Energy cost = grid energy * tariff.
+#   - Wear cost = BATTERY-SIDE throughput * wear rate. No efficiency appears here.
+#   - Demand cost = increase in the completed 30-minute monthly peak * demand fee.
+#   - Operating cost = energy + demand + wear. No reward, learning, or physical control.
+#
+# This is the canonical environment for every controller and measured-data workflow.
+# ============================================================
 
-Design follows the two-layer framework in CoSoLyThuyet_DRL_BESS_Sizing.html
-(Hu et al. 2026): the 13-input variant sees real-time measurements only.
-The 17-input variant adds four externally prepared, causal look-ahead
-predictions. Both output one continuous action in [-1, 1].
-
-HARD-CONSTRAINT SAFETY PROJECTION (never learned, always enforced):
-  * zero export : discharge is capped at the net load, so
-                  grid[t] = eff_load + cg - d >= 0 for ANY policy output.
-  * SOC bounds  : charge/discharge are capped by the energy head-room in
-                  [SOC_min, SOC_max] at the current step.
-  * P_rated     : |p_bess| <= P_rated on the AC side.
-The RL problem is therefore unconstrained for the learner; the projection
-makes the 4 critical scenarios in CLAUDE.md structurally satisfiable.
-
-SPARSE DEMAND-CHARGE SHAPING:
-  The monthly demand charge T_cap * max_b D_b (D = fixed, clock-aligned
-  30-minute meter-block average of grid import) is path-dependent and fires
-  once a month. We shape it into a
-  dense signal by charging the MARGINAL increment of the running monthly
-  peak at each step:  pen_t = T_cap * max(0, D_t - D_run).
-  Summed over the month this telescopes to exactly T_cap * (D_peak - D_run0).
-  The running monthly peak starts from an explicit shaping floor rather than 0:
-  any realistic monthly peak exceeds that floor, so the telescoped sum differs from the
-  true bill only by a policy-independent constant  but the first-day ramp
-  no longer produces huge spurious penalty spikes that destabilise the
-  value function.
-
-DENSE INVENTORY-VALUE ARBITRAGE REWARD:
-  PPO should learn the factory dispatch pattern without hard-coded clock rules.
-  Battery energy is therefore assigned one constant internal inventory value
-  (VND per stored kWh) derived from cheap-charge and normal-discharge break-even
-  economics, including the configured symmetric wear cost.  Each native step
-  receives actual grid-energy savings plus the change in that inventory value.
-  This makes economically valid cheap charging and normal/peak discharging
-  immediately learnable while making non-cheap grid charging and cheap-period
-  discharging unattractive.  A terminal inventory settlement cancels the net
-  episode inventory change, so total episode reward still matches real energy
-  economics rather than paying the agent for merely ending with a fuller battery.
-
-COUNTERFACTUAL VARIANCE REDUCTION:
-  The raw bill is dominated by the policy-independent no-BESS cost of the
-  random load/PV realisation, which buries the controllable signal
-  (~5% of the bill) under return variance. The reward therefore pays only
-  the DELTA against a no-BESS counterfactual running in lock-step:
-    energy term = -tariff * (cg - d)          (charging cost vs. displaced buy)
-    peak term   = -(pen_actual - pen_nobess)  (both telescope; the shared
-                                               uncontrollable ramp cancels)
-  Subtracting policy-independent terms changes no gradients in expectation
-  but shrinks advantage variance by an order of magnitude.
-
-ACTION PROJECTION:
-  The environment enforces physical feasibility only: SOC bounds, rated power,
-  and zero export. Demand economics are learned from the actual fixed 30-minute
-  meter-block reward instead of being hard-coded as a per-sample peak guard.
-"""
 from __future__ import annotations
 
-import numpy as np
-
-from bess.core.common import tariff_vector, validate_control_interval_minutes
-from bess.core.scenario_gen import MonthData
-from bess.core.settings import PPO_GAMMA
-from bess.core.timebase import demand_window_steps, dt_from_steps_per_day, steps_per_day_from_dt
-
-REACTIVE_OBSERVATION_DIM = 13
-FORECAST_OBSERVATION_DIM = 17             # forecast-informed variant (+4 features)
-REWARD_SCALE_VND = 1e6          # rewards in millions of VND
+import math
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 
 
-class BESSEnv:
-    """Month-long episode using the selected data resolution."""
+OBSERVATION_DIM = 7
+ACTION_DIM = 1
+ACTION_MIN = -1.0
+ACTION_MAX = 1.0
+BrainObservation = tuple[float, float, float, float, float, float, float]
 
-    def __init__(self, config, reference_power_kw: float = 500.0,
-                 degradation_cost_vnd_per_kwh: float = 50.0,
-                 initial_peak_fraction_of_reference: float = 0.6,
-                 initial_running_peak_kw: float | None = None,
-                 discount_factor: float = PPO_GAMMA,
-                 control_interval_minutes: float | None = None,
-                 forecast_enabled: bool = False,
-                 steps_per_day: int | None = None,
-                 native_timestep_hours: float | None = None,
-                 record_trajectory: bool = True,
-                 extra_observation_dimensions: int = 0,
-                 reward_mode: str = "legacy_soc_potential"):
-        # Native timestep duration is the source of truth. It may represent
-        # 15-minute, 1-minute, 0.5-minute, or other day-tiling data.
-        configured_timestep_hours = float(getattr(config, "dt", 0.0))
-        self.native_timestep_hours = (
-            float(native_timestep_hours)
-            if native_timestep_hours is not None
-            else configured_timestep_hours
+# Lower-level callers use this fallback; owned episodes provide a site-aware ruler.
+POWER_SCALE_KW = 1000.0
+DEMAND_BLOCK_HOURS = 0.5
+MONEY_RELATIVE_TOLERANCE = 1e-12
+MONEY_ABSOLUTE_TOLERANCE_VND = 1e-6
+
+
+def _money_values_close(
+    left_vnd: float,
+    right_vnd: float,
+    *accounting_scale_values_vnd: float,
+) -> bool:
+    """Compare derived money values at the scale of their source totals.
+
+    Savings can be a tiny difference between two large accumulated operating
+    costs. Comparing only the two small savings values makes harmless binary
+    floating-point cancellation look like an accounting failure.
+    """
+    left = float(left_vnd)
+    right = float(right_vnd)
+    scale = max(
+        abs(left),
+        abs(right),
+        *(abs(float(value)) for value in accounting_scale_values_vnd),
+        1.0,
+    )
+    tolerance_vnd = max(
+        MONEY_ABSOLUTE_TOLERANCE_VND,
+        MONEY_RELATIVE_TOLERANCE * scale,
+    )
+    return abs(left - right) <= tolerance_vnd
+
+
+def action_to_requested_battery_power_kw(action: float, battery_power_kw: float) -> float:
+    """Turn the brain's one action into requested BATTERY-SIDE power in kW.
+
+    Negative = charge, zero = idle, positive = discharge.
+    The returned value is only a request; Battery Police and Grid Guard may reduce it.
+    """
+    if battery_power_kw <= 0.0:
+        raise ValueError("battery_power_kw must be greater than 0")
+    # Keep this pure helper defensive; BrainEnv itself rejects out-of-range actions.
+    clipped_action = min(ACTION_MAX, max(ACTION_MIN, float(action)))
+    return clipped_action * float(battery_power_kw)
+
+
+def police_battery_power(
+    *,
+    requested_battery_power_kw: float,
+    state_of_charge: float,
+    minimum_state_of_charge: float,
+    maximum_state_of_charge: float,
+    battery_capacity_kwh: float,
+    timestep_hours: float,
+) -> float:
+    """Battery Police: enforce SOC limits using pure BATTERY-SIDE quantities only.
+
+    Returns the SOC-safe battery-side power in kW.
+
+    Sign convention:
+      negative power = charge battery
+      positive power = discharge battery
+
+    This function deliberately knows NOTHING about net load, grid power,
+    factory power, PV, tariff, or efficiency.
+    """
+    minimum_soc = float(minimum_state_of_charge)
+    maximum_soc = float(maximum_state_of_charge)
+    capacity_kwh = float(battery_capacity_kwh)
+    dt_hours = float(timestep_hours)
+    current_soc = float(state_of_charge)
+    requested_power_kw = float(requested_battery_power_kw)
+
+    if not all(
+        math.isfinite(value)
+        for value in (
+            minimum_soc,
+            maximum_soc,
+            capacity_kwh,
+            dt_hours,
+            current_soc,
+            requested_power_kw,
         )
-        if self.native_timestep_hours <= 0.0:
-            raise ValueError("BESS config must provide a positive native timestep in hours")
-
-        derived_steps_per_day = steps_per_day_from_dt(self.native_timestep_hours)
-        if steps_per_day is not None and int(steps_per_day) != derived_steps_per_day:
-            raise ValueError(
-                f"steps_per_day={steps_per_day} disagrees with "
-                f"native_timestep_hours={self.native_timestep_hours:g}; "
-                f"expected {derived_steps_per_day} steps/day"
-            )
-
-        self.steps_per_day = derived_steps_per_day
-        self.control_interval_minutes = (
-            float(control_interval_minutes)
-            if control_interval_minutes is not None
-            else self.native_timestep_hours * 60.0
-        )
-        self.native_samples_per_action = 1
-        config.set_dt(self.native_timestep_hours)
-        self._configure_action_hold_interval()
-        self.samples_per_demand_block = demand_window_steps(self.native_timestep_hours)
-        self.config = config
-        self.reference_power_kw = float(reference_power_kw)
-        self.degradation_cost_vnd_per_kwh = float(degradation_cost_vnd_per_kwh)
-
-        # Start the shaping peak below the site's realistic optimum so the agent
-        # actually receives a learning signal when it creates a new monthly peak.
-        self.initial_running_peak_kw = (
-            float(initial_running_peak_kw)
-            if initial_running_peak_kw is not None
-            else float(initial_peak_fraction_of_reference) * self.reference_power_kw
-        )
-        self.discount_factor = float(discount_factor)
-        self.record_trajectory = bool(record_trajectory)
-        if reward_mode not in {"legacy_soc_potential", "factory_dispatch_v1"}:
-            raise ValueError(f"Unsupported BESS reward_mode: {reward_mode}")
-        self.reward_mode = reward_mode
-        # Forecast mode accepts only externally prepared causal predictions.
-        # Missing predictions are an error; future actuals are never used here.
-        self.forecast_enabled = bool(forecast_enabled)
-        self.base_observation_dimensions = FORECAST_OBSERVATION_DIM if self.forecast_enabled else REACTIVE_OBSERVATION_DIM
-        self.extra_observation_dimensions = int(extra_observation_dimensions)
-        self.observation_dimensions = self.base_observation_dimensions + self.extra_observation_dimensions
-        normal_day_tariff = tariff_vector(config)
-        self._normal_day_tariff = normal_day_tariff
-        # Sunday can use a separate tariff with peak pricing removed.
-        from bess.core.common import TOU_RULES, cfg_no_peak
-        if TOU_RULES.get("sunday_no_peak"):
-            sunday_tariff = tariff_vector(cfg_no_peak(config))
-            self._sunday_tariff = sunday_tariff
-        else:
-            self._sunday_tariff = self._normal_day_tariff
-        self.current_day_tariff = self._normal_day_tariff
-        self.month_data: MonthData | None = None
-        # trajectory logs (filled during an episode)
-        self.grid_import_history: list[np.ndarray] = []
-        self.state_of_charge_history: list[np.ndarray] = []
-        self.battery_power_history: list[np.ndarray] = []
-        self._static_observation_cache: np.ndarray | None = None
-        self._refresh_physics_coefficients()
-
-    def _refresh_physics_coefficients(self) -> None:
-        config = self.config
-        self._inverse_reference_power = 1.0 / self.reference_power_kw
-        self._inverse_peak_tariff_price = 1.0 / config.price_peak
-        self._state_of_charge_gain_per_charge_kw = self.native_timestep_hours * config.eta_ch / config.E_cap
-        self._state_of_charge_loss_per_discharge_kw = self.native_timestep_hours / (config.eta_dis * config.E_cap)
-        self._discharge_power_per_soc_fraction = config.E_cap * config.eta_dis / self.native_timestep_hours
-        self._charge_power_per_soc_fraction = config.E_cap / (config.eta_ch * self.native_timestep_hours)
-        # Dense arbitrage teaching signal.  Pick one constant stored-energy
-        # shadow value between the cheap-charge and normal-discharge break-even
-        # values after symmetric throughput wear.  When cheap->normal cycling is
-        # genuinely profitable, both the charge leg and discharge leg therefore
-        # receive positive immediate reward; otherwise the math correctly refuses
-        # to pretend that an unprofitable cycle is good.
-        cheap_charge_break_even = (
-            config.price_off + self.degradation_cost_vnd_per_kwh
-        ) / config.eta_ch
-        normal_discharge_break_even = (
-            config.price_mid - self.degradation_cost_vnd_per_kwh
-        ) * config.eta_dis
-        self._inventory_value_vnd_per_stored_kwh = 0.5 * (
-            cheap_charge_break_even + normal_discharge_break_even
+    ):
+        raise ValueError("Battery Police inputs must all be finite numbers")
+    if maximum_soc <= minimum_soc:
+        raise ValueError("maximum_state_of_charge must be greater than minimum_state_of_charge")
+    if capacity_kwh <= 0.0:
+        raise ValueError("battery_capacity_kwh must be greater than 0")
+    if dt_hours <= 0.0:
+        raise ValueError("timestep_hours must be greater than 0")
+    if current_soc < minimum_soc or current_soc > maximum_soc:
+        raise ValueError(
+            "state_of_charge must already be inside "
+            "[minimum_state_of_charge, maximum_state_of_charge]"
         )
 
-    def _reset_demand_meter_block(self) -> None:
-        """Reset the current fixed 30-minute meter integration block."""
-        self._demand_block_sample_count = 0
-        self._demand_block_grid_import_sum_kw = 0.0
-        self._no_bess_demand_block_grid_import_sum_kw = 0.0
+    if requested_power_kw > 0.0:
+        # Pure battery-side discharge limit: how much stored energy exists above SOC_min?
+        available_battery_energy_kwh = (current_soc - minimum_soc) * capacity_kwh
+        maximum_soc_safe_discharge_kw = available_battery_energy_kwh / dt_hours
+        return min(requested_power_kw, maximum_soc_safe_discharge_kw)
 
-    # ------------------------------------------------------------------
-    def _configure_action_hold_interval(self) -> None:
-        native_timestep_minutes = self.native_timestep_hours * 60.0
-        validated_control_interval_minutes = validate_control_interval_minutes(
-            native_timestep_minutes,
-            self.control_interval_minutes,
+    if requested_power_kw < 0.0:
+        # Pure battery-side charge limit: how much empty battery room exists below SOC_max?
+        available_battery_room_kwh = (maximum_soc - current_soc) * capacity_kwh
+        maximum_soc_safe_charge_kw = available_battery_room_kwh / dt_hours
+        return -min(-requested_power_kw, maximum_soc_safe_charge_kw)
+
+    return 0.0
+
+
+def grid_guard_no_export(
+    *,
+    battery_power_kw: float,
+    net_load_kw: float,
+    discharge_efficiency: float,
+) -> float:
+    """Grid Guard: enforce no export while keeping power expressed battery-side.
+
+    ``battery_power_kw`` is already a BATTERY-SIDE number.
+    Positive battery power is discharge. Only discharge can create export.
+
+    Example with efficiency=0.9:
+      +100 battery kW -> +90 kW delivered outside the battery.
+
+    The guard clips battery-side discharge so outside delivered power never exceeds
+    the non-negative net load. Charging passes through unchanged.
+    """
+    battery_side_power_kw = float(battery_power_kw)
+    final_net_load_kw = float(net_load_kw)
+    efficiency = float(discharge_efficiency)
+
+    if not all(
+        math.isfinite(value)
+        for value in (
+            battery_side_power_kw,
+            final_net_load_kw,
+            efficiency,
         )
-        self.native_samples_per_action = int(round(validated_control_interval_minutes / native_timestep_minutes))
+    ):
+        raise ValueError("Grid Guard inputs must all be finite numbers")
+    if efficiency <= 0.0 or efficiency > 1.0:
+        raise ValueError("discharge_efficiency must be greater than 0 and at most 1")
 
-    # ------------------------------------------------------------------
-    def reset(self, month_data: MonthData, initial_state_of_charge: float | None = None,
-              static_observation_cache: np.ndarray | None = None) -> np.ndarray:
-        self.month_data = month_data
-        if month_data.days:
-            data_steps_per_day = len(month_data.days[0].load)
-            if data_steps_per_day <= 0:
-                raise ValueError("month contains an empty day")
-            if data_steps_per_day != self.steps_per_day:
-                self.steps_per_day = data_steps_per_day
-                self.native_timestep_hours = dt_from_steps_per_day(self.steps_per_day)
-                self.config.set_dt(self.native_timestep_hours)
-                self.samples_per_demand_block = demand_window_steps(self.native_timestep_hours)
-                self._configure_action_hold_interval()
-                self._normal_day_tariff = tariff_vector(self.config)
-                from bess.core.common import TOU_RULES, cfg_no_peak
-                self._sunday_tariff = (
-                    tariff_vector(cfg_no_peak(self.config))
-                    if TOU_RULES.get("sunday_no_peak")
-                    else self._normal_day_tariff
-                )
-                self._refresh_physics_coefficients()
-        self.current_day_index = 0
-        self.current_timestep_index = 0
-        self.state_of_charge = float(initial_state_of_charge if initial_state_of_charge is not None else self.config.SOC_eod)
-        self._episode_initial_state_of_charge = self.state_of_charge
-        self.running_monthly_peak_kw = self.initial_running_peak_kw    # running monthly 30-min peak (kW)
-        self.previous_grid_import_kw = 0.0               # previous-step grid import (kW)
-        self.no_bess_running_monthly_peak_kw = self.initial_running_peak_kw  # counterfactual no-BESS running peak
-        self.previous_no_bess_grid_import_kw = 0.0
-        if self.record_trajectory:
-            self.grid_import_history = [np.zeros(self.steps_per_day) for _ in month_data.days]
-            self.state_of_charge_history = [np.zeros(self.steps_per_day + 1) for _ in month_data.days]
-            self.battery_power_history = [np.zeros(self.steps_per_day) for _ in month_data.days]
-        else:
-            self.grid_import_history = []
-            self.state_of_charge_history = []
-            self.battery_power_history = []
-        self._reset_demand_meter_block()
-        self._month_progress_per_day = 1.0 / max(1, len(month_data.days))
-        if self.record_trajectory:
-            self.state_of_charge_history[0][0] = self.state_of_charge
-        self._set_current_day_tariff()
-        self._validate_current_day_forecast()
-        if static_observation_cache is None:
-            self._build_static_observation_cache()
-        else:
-            expected_cache_shape = (self.steps_per_day, self.observation_dimensions)
-            if static_observation_cache.shape != expected_cache_shape:
-                raise ValueError(
-                    "static observation cache has incompatible shape"
-                )
-            self._static_observation_cache = static_observation_cache
-        return self._build_observation()
+    # Charging cannot create export, so no-export does not modify charge power.
+    if battery_side_power_kw <= 0.0:
+        return battery_side_power_kw
 
-    def _set_current_day_tariff(self):
-        from bess.core.common import is_sunday
-        current_day = self.month_data.days[self.current_day_index]
-        self.current_day_tariff = self._sunday_tariff if is_sunday(current_day) else self._normal_day_tariff
+    # net_load_kw is the already-prepared outside-world demand signal.
+    # If it is negative, there is zero demand available for battery discharge.
+    non_negative_net_load_kw = max(0.0, final_net_load_kw)
 
-    def _validate_current_day_forecast(self):
-        if not self.forecast_enabled:
-            return
-        current_day = self.month_data.days[self.current_day_index]
-        forecast_values = getattr(current_day, "forecast", None)
-        expected_forecast_shape = (self.steps_per_day, 4)
-        if (
-            forecast_values is None
-            or np.asarray(forecast_values).shape != expected_forecast_shape
-        ):
-            raise ValueError(
-                "forecast mode requires real causal predictions shaped "
-                f"{expected_forecast_shape}"
-            )
-        if not np.isfinite(forecast_values).all():
-            raise ValueError("forecast predictions contain non-finite values")
+    # outside_delivered_kw = battery_side_discharge_kw * discharge_efficiency
+    # Therefore battery_side_discharge_kw may be at most net_load / efficiency.
+    maximum_no_export_battery_discharge_kw = non_negative_net_load_kw / efficiency
+    return min(battery_side_power_kw, maximum_no_export_battery_discharge_kw)
 
-    def _build_static_observation_cache(self):
-        """Cache observation fields that cannot change within the day."""
-        current_day = self.month_data.days[self.current_day_index]
-        observation_cache = np.empty((self.steps_per_day, self.observation_dimensions), dtype=np.float32)
-        inverse_reference_power = self._inverse_reference_power
-        working_day_flag = 1.0 if current_day.day_type == "working" else 0.0
-        month_progress = self.current_day_index * self._month_progress_per_day
-        time_until_tariff_change, time_since_tariff_change = self._compute_tariff_transition_fractions()
-        for timestep_index in range(self.steps_per_day):
-            load_kw = current_day.load[timestep_index]
-            pv_kw = current_day.pv[timestep_index]
-            net_load_kw = max(0.0, load_kw - pv_kw)
-            pv_surplus_kw = max(0.0, pv_kw - load_kw)
-            time_of_day_angle = 2.0 * np.pi * timestep_index / self.steps_per_day
-            observation_cache[timestep_index, 0] = np.sin(time_of_day_angle)
-            observation_cache[timestep_index, 1] = np.cos(time_of_day_angle)
-            observation_cache[timestep_index, 2] = net_load_kw * inverse_reference_power
-            observation_cache[timestep_index, 3] = pv_kw * inverse_reference_power
-            observation_cache[timestep_index, 4] = pv_surplus_kw * inverse_reference_power
-            observation_cache[timestep_index, 5] = 0.0
-            observation_cache[timestep_index, 6] = self.current_day_tariff[timestep_index] * self._inverse_peak_tariff_price
-            # Smooth countdown to the next tariff change (1/steps_per_day per step
-            # remaining), instead of an abrupt one-hour-ahead step: gives the
-            # agent an anticipatory ramp toward price drops/rises rather than
-            # a signal that only differs from field 6 in the single hour
-            # immediately before a transition.
-            observation_cache[timestep_index, 7] = time_until_tariff_change[timestep_index]
-            observation_cache[timestep_index, 8] = 0.0
-            observation_cache[timestep_index, 9] = 0.0
-            observation_cache[timestep_index, 10] = working_day_flag
-            observation_cache[timestep_index, 11] = month_progress
-            # Time-since-last-tariff-change, the complementary smooth ramp to
-            # field 7. Replaces the old timestep/steps_per_day sawtooth, which duplicated
-            # the sin/cos time-of-day encoding (fields 0/1) but discontinuously
-            # jumped 0.99->0.0 exactly at midnight -- the boundary where the
-            # cheap off-peak window begins.
-            observation_cache[timestep_index, 12] = time_since_tariff_change[timestep_index]
-            if self.forecast_enabled:
-                observation_cache[timestep_index, 13:17] = self._get_forecast_features(timestep_index)
-        self._static_observation_cache = observation_cache
 
-    def _compute_tariff_transition_fractions(self):
-        """Per-step (steps-until-next-tariff-change, steps-since-last-change),
-        each normalized by steps_per_day and clipped to [0, 1]."""
-        tariff_by_timestep = self.current_day_tariff
-        steps_per_day = self.steps_per_day
-        steps_until_change = np.empty(steps_per_day, dtype=np.float64)
-        steps_until_change[steps_per_day - 1] = 1.0
-        for timestep_index in range(steps_per_day - 2, -1, -1):
-            if tariff_by_timestep[timestep_index + 1] != tariff_by_timestep[timestep_index]:
-                steps_until_change[timestep_index] = 1.0
-            else:
-                steps_until_change[timestep_index] = steps_until_change[timestep_index + 1] + 1.0
-        steps_since_change = np.empty(steps_per_day, dtype=np.float64)
-        steps_since_change[0] = 0.0
-        for timestep_index in range(1, steps_per_day):
-            if tariff_by_timestep[timestep_index] != tariff_by_timestep[timestep_index - 1]:
-                steps_since_change[timestep_index] = 0.0
-            else:
-                steps_since_change[timestep_index] = steps_since_change[timestep_index - 1] + 1.0
-        time_until_change = np.clip(steps_until_change / steps_per_day, 0.0, 1.0)
-        time_since_change = np.clip(steps_since_change / steps_per_day, 0.0, 1.0)
-        return time_until_change, time_since_change
+def battery_power_to_outside_power_kw(
+    *,
+    battery_power_kw: float,
+    charge_efficiency: float,
+    discharge_efficiency: float,
+) -> float:
+    """Convert FINAL battery-side power into signed outside-world power.
 
-    def _get_forecast_features(self, timestep_index):
-        """Real model predictions: next-hour and following-two-hour
-        effective load/PV means, already normalized by reference_power_kw."""
-        return self.month_data.days[self.current_day_index].forecast[timestep_index]
+    Sign convention stays the same on both sides:
+      positive = battery supplies power outward (discharge)
+      negative = outside world must supply power inward (charge)
 
-    # ------------------------------------------------------------------
-    def _build_observation(self) -> np.ndarray:
-        timestep_index = self.current_timestep_index
-        # A fresh array is required because callers retain the current
-        # observation until after step() has produced the next one.
-        observation = self._static_observation_cache[timestep_index].copy()
-        observation[5] = self.state_of_charge
-        observation[8] = self.running_monthly_peak_kw * self._inverse_reference_power
-        observation[9] = self.previous_grid_import_kw * self._inverse_reference_power
-        self._fill_extra_observation_features(observation, timestep_index)
-        return observation
+    Battery-side energy is exact in this model. Efficiency only changes what the
+    factory/grid sees outside the battery.
 
-    def _fill_extra_observation_features(self, observation: np.ndarray, timestep_index: int) -> None:
-        """Subclass hook for code-native controller context fields."""
+    Examples with 90% efficiency:
+      +100 battery kW discharge -> +90 outside kW delivered
+      -100 battery kW charge    -> -111.111... outside kW demanded
+    """
+    battery_side_power_kw = float(battery_power_kw)
+    charge_eta = float(charge_efficiency)
+    discharge_eta = float(discharge_efficiency)
 
-    # ------------------------------------------------------------------
-    def project_action(self, action: float, load_kw: float, pv_kw: float):
-        """Turn the requested policy action into safe battery power values.
+    if not all(
+        math.isfinite(value)
+        for value in (
+            battery_side_power_kw,
+            charge_eta,
+            discharge_eta,
+        )
+    ):
+        raise ValueError("Outside physics inputs must all be finite numbers")
+    if charge_eta <= 0.0 or charge_eta > 1.0:
+        raise ValueError("charge_efficiency must be greater than 0 and at most 1")
+    if discharge_eta <= 0.0 or discharge_eta > 1.0:
+        raise ValueError("discharge_efficiency must be greater than 0 and at most 1")
 
-        Returns ``(discharge_kw, grid_charge_kw, pv_charge_kw)``.
-        All three values are non-negative AC kW.
-        """
-        config = self.config
-        net_load_kw = max(0.0, load_kw - pv_kw)
-        pv_surplus_kw = max(0.0, pv_kw - load_kw)
-        requested_battery_power_kw = (
-            float(np.clip(action, -1.0, 1.0)) * config.P_rated_nominal
+    if battery_side_power_kw > 0.0:
+        return battery_side_power_kw * discharge_eta
+    if battery_side_power_kw < 0.0:
+        return battery_side_power_kw / charge_eta
+    return 0.0
+
+
+def grid_import_from_outside_power_kw(
+    *,
+    net_load_kw: float,
+    outside_battery_power_kw: float,
+) -> float:
+    """Calculate final grid import from prepared net load and outside battery power.
+
+    ``outside_battery_power_kw`` uses the same sign convention:
+      positive discharge reduces grid import
+      negative charge increases grid import
+
+    No export is allowed. Grid Guard must have clipped discharge before this function.
+    """
+    prepared_net_load_kw = float(net_load_kw)
+    outside_power_kw = float(outside_battery_power_kw)
+
+    if not math.isfinite(prepared_net_load_kw) or not math.isfinite(outside_power_kw):
+        raise ValueError("Grid physics inputs must all be finite numbers")
+
+    non_negative_net_load_kw = max(0.0, prepared_net_load_kw)
+    grid_import_kw = non_negative_net_load_kw - outside_power_kw
+
+    numerical_tolerance = 1e-12
+    if grid_import_kw < -numerical_tolerance:
+        raise RuntimeError(
+            "Outside battery discharge would export power; run Grid Guard before grid physics"
+        )
+    if grid_import_kw < 0.0:
+        return 0.0
+    return grid_import_kw
+
+
+def next_battery_state_of_charge(
+    *,
+    state_of_charge: float,
+    battery_power_kw: float,
+    battery_capacity_kwh: float,
+    timestep_hours: float,
+    minimum_state_of_charge: float,
+    maximum_state_of_charge: float,
+) -> float:
+    """Apply FINAL battery-side power to SOC with no efficiency term.
+
+    Positive battery power removes stored energy.
+    Negative battery power adds stored energy.
+    """
+    current_soc = float(state_of_charge)
+    battery_side_power_kw = float(battery_power_kw)
+    capacity_kwh = float(battery_capacity_kwh)
+    dt_hours = float(timestep_hours)
+    minimum_soc = float(minimum_state_of_charge)
+    maximum_soc = float(maximum_state_of_charge)
+
+    if not all(
+        math.isfinite(value)
+        for value in (
+            current_soc,
+            battery_side_power_kw,
+            capacity_kwh,
+            dt_hours,
+            minimum_soc,
+            maximum_soc,
+        )
+    ):
+        raise ValueError("SOC physics inputs must all be finite numbers")
+    if capacity_kwh <= 0.0:
+        raise ValueError("battery_capacity_kwh must be greater than 0")
+    if dt_hours <= 0.0:
+        raise ValueError("timestep_hours must be greater than 0")
+    if maximum_soc <= minimum_soc:
+        raise ValueError("maximum_state_of_charge must be greater than minimum_state_of_charge")
+
+    next_soc = current_soc - (battery_side_power_kw * dt_hours / capacity_kwh)
+
+    numerical_tolerance = 1e-12
+    if next_soc < minimum_soc - numerical_tolerance or next_soc > maximum_soc + numerical_tolerance:
+        raise RuntimeError(
+            "Final battery-side power would push SOC outside the legal range; "
+            "run Battery Police before SOC physics"
+        )
+    if next_soc < minimum_soc:
+        return minimum_soc
+    if next_soc > maximum_soc:
+        return maximum_soc
+    return next_soc
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicsStepResult:
+    """Everything that physically happened during one BESS timestep.
+
+    All battery-power fields use the battery-side sign convention:
+      negative = charge
+      positive = discharge
+
+    Outside-world power is deliberately split into non-negative directional fields
+    so callers never need to decode a signed "outside battery power" value.
+    """
+
+    requested_battery_kw: float
+    battery_after_police_kw: float
+    final_battery_kw: float
+    battery_to_factory_kw: float
+    grid_to_battery_kw: float
+    conversion_loss_kw: float
+    grid_import_kw: float
+    battery_throughput_kwh: float
+    starting_soc: float
+    next_soc: float
+
+
+def run_physics_step(
+    *,
+    action: float,
+    net_load_kw: float,
+    state_of_charge: float,
+    minimum_state_of_charge: float,
+    maximum_state_of_charge: float,
+    battery_capacity_kwh: float,
+    battery_power_kw: float,
+    timestep_hours: float,
+    charge_efficiency: float,
+    discharge_efficiency: float,
+) -> PhysicsStepResult:
+    """Run exactly one physical BESS timestep, with no billing and no reward.
+
+    Order is intentionally explicit:
+      1. Brain action -> requested battery-side power.
+      2. Battery Police -> SOC-safe battery-side power.
+      3. Grid Guard -> no-export-safe final battery-side power.
+      4. Outside conversion -> directional power flows and conversion loss.
+      5. Battery physics -> next SOC from final battery-side power.
+      6. Grid physics -> final grid import.
+
+    This function is only the boss/orchestrator. The individual physical laws stay
+    inside the existing helper functions so there is one source of truth per rule.
+    """
+    requested_battery_kw = action_to_requested_battery_power_kw(
+        action,
+        battery_power_kw,
+    )
+
+    battery_after_police_kw = police_battery_power(
+        requested_battery_power_kw=requested_battery_kw,
+        state_of_charge=state_of_charge,
+        minimum_state_of_charge=minimum_state_of_charge,
+        maximum_state_of_charge=maximum_state_of_charge,
+        battery_capacity_kwh=battery_capacity_kwh,
+        timestep_hours=timestep_hours,
+    )
+
+    final_battery_kw = grid_guard_no_export(
+        battery_power_kw=battery_after_police_kw,
+        net_load_kw=net_load_kw,
+        discharge_efficiency=discharge_efficiency,
+    )
+
+    outside_battery_power_kw = battery_power_to_outside_power_kw(
+        battery_power_kw=final_battery_kw,
+        charge_efficiency=charge_efficiency,
+        discharge_efficiency=discharge_efficiency,
+    )
+
+    if final_battery_kw > 0.0:
+        battery_to_factory_kw = outside_battery_power_kw
+        grid_to_battery_kw = 0.0
+        conversion_loss_kw = final_battery_kw - battery_to_factory_kw
+    elif final_battery_kw < 0.0:
+        battery_to_factory_kw = 0.0
+        grid_to_battery_kw = -outside_battery_power_kw
+        battery_charge_kw = -final_battery_kw
+        conversion_loss_kw = grid_to_battery_kw - battery_charge_kw
+    else:
+        battery_to_factory_kw = 0.0
+        grid_to_battery_kw = 0.0
+        conversion_loss_kw = 0.0
+
+    next_soc = next_battery_state_of_charge(
+        state_of_charge=state_of_charge,
+        battery_power_kw=final_battery_kw,
+        battery_capacity_kwh=battery_capacity_kwh,
+        timestep_hours=timestep_hours,
+        minimum_state_of_charge=minimum_state_of_charge,
+        maximum_state_of_charge=maximum_state_of_charge,
+    )
+
+    grid_import_kw = grid_import_from_outside_power_kw(
+        net_load_kw=net_load_kw,
+        outside_battery_power_kw=outside_battery_power_kw,
+    )
+    battery_throughput_kwh = abs(final_battery_kw) * float(timestep_hours)
+
+    return PhysicsStepResult(
+        requested_battery_kw=requested_battery_kw,
+        battery_after_police_kw=battery_after_police_kw,
+        final_battery_kw=final_battery_kw,
+        battery_to_factory_kw=battery_to_factory_kw,
+        grid_to_battery_kw=grid_to_battery_kw,
+        conversion_loss_kw=conversion_loss_kw,
+        grid_import_kw=grid_import_kw,
+        battery_throughput_kwh=battery_throughput_kwh,
+        starting_soc=float(state_of_charge),
+        next_soc=next_soc,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ElectricityMeterState:
+    """Memory carried by the fixed 30-minute utility demand meter.
+
+    ``block_energy_kwh`` and ``block_elapsed_hours`` describe only the currently
+    open 30-minute block. ``monthly_peak_kw`` is the highest COMPLETED block
+    demand seen in the current month.
+    """
+
+    block_energy_kwh: float = 0.0
+    block_elapsed_hours: float = 0.0
+    monthly_peak_kw: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class ElectricityMeterStepResult:
+    """Named answer to: what did the utility meter see on this timestep?"""
+
+    grid_import_kw: float
+    sample_energy_kwh: float
+    accumulated_block_energy_kwh: float
+    accumulated_block_elapsed_hours: float
+    block_completed: bool
+    completed_block_demand_kw: float | None
+    previous_monthly_peak_kw: float
+    monthly_peak_kw: float
+    new_monthly_peak: bool
+    next_state: ElectricityMeterState
+
+
+def _validate_meter_timestep(timestep_hours: float) -> int:
+    """Return samples per fixed 30-minute block, rejecting awkward resolutions."""
+    dt_hours = float(timestep_hours)
+    if not math.isfinite(dt_hours) or dt_hours <= 0.0:
+        raise ValueError("timestep_hours must be a finite number greater than 0")
+
+    samples_per_block = DEMAND_BLOCK_HOURS / dt_hours
+    rounded_samples_per_block = round(samples_per_block)
+    if rounded_samples_per_block < 1 or not math.isclose(
+        samples_per_block,
+        rounded_samples_per_block,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        raise ValueError("timestep_hours must divide a fixed 30-minute demand block exactly")
+    return int(rounded_samples_per_block)
+
+
+def run_electricity_meter_step(
+    *,
+    grid_import_kw: float,
+    timestep_hours: float,
+    meter_state: ElectricityMeterState,
+) -> ElectricityMeterStepResult:
+    """Feed one grid-import sample into the fixed, non-overlapping 30-minute meter.
+
+    The meter knows nothing about battery physics, tariff, billing, wear, reward,
+    learning algorithms, or episodes. It only integrates grid-import energy inside one fixed
+    30-minute block and updates the monthly maximum when that block completes.
+    """
+    _validate_meter_timestep(timestep_hours)
+
+    grid_kw = float(grid_import_kw)
+    dt_hours = float(timestep_hours)
+    if not math.isfinite(grid_kw):
+        raise ValueError("grid_import_kw must be finite")
+    if grid_kw < 0.0:
+        raise ValueError("grid_import_kw must not be negative")
+    if not isinstance(meter_state, ElectricityMeterState):
+        raise TypeError("meter_state must be an ElectricityMeterState")
+
+    previous_block_energy_kwh = float(meter_state.block_energy_kwh)
+    previous_block_elapsed_hours = float(meter_state.block_elapsed_hours)
+    previous_monthly_peak_kw = float(meter_state.monthly_peak_kw)
+    if not all(
+        math.isfinite(value)
+        for value in (
+            previous_block_energy_kwh,
+            previous_block_elapsed_hours,
+            previous_monthly_peak_kw,
+        )
+    ):
+        raise ValueError("Electricity meter state values must all be finite")
+    if previous_block_energy_kwh < 0.0:
+        raise ValueError("meter_state.block_energy_kwh must not be negative")
+    if previous_block_elapsed_hours < 0.0 or previous_block_elapsed_hours >= DEMAND_BLOCK_HOURS:
+        raise ValueError("meter_state.block_elapsed_hours must be inside [0, 0.5)")
+    if previous_block_elapsed_hours == 0.0 and previous_block_energy_kwh != 0.0:
+        raise ValueError("an empty meter block cannot already contain energy")
+    if previous_monthly_peak_kw < 0.0:
+        raise ValueError("meter_state.monthly_peak_kw must not be negative")
+
+    # A carried state must sit exactly on this timestep's sample grid. This keeps
+    # the meter fixed/clock-aligned instead of silently inventing partial samples.
+    elapsed_samples = previous_block_elapsed_hours / dt_hours
+    if not math.isclose(elapsed_samples, round(elapsed_samples), rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError("meter_state.block_elapsed_hours is not aligned to timestep_hours")
+
+    sample_energy_kwh = grid_kw * dt_hours
+    accumulated_block_energy_kwh = previous_block_energy_kwh + sample_energy_kwh
+    accumulated_block_elapsed_hours = previous_block_elapsed_hours + dt_hours
+
+    numerical_tolerance = 1e-12
+    if accumulated_block_elapsed_hours > DEMAND_BLOCK_HOURS + numerical_tolerance:
+        raise RuntimeError("meter state would overrun the fixed 30-minute demand block")
+
+    block_completed = math.isclose(
+        accumulated_block_elapsed_hours,
+        DEMAND_BLOCK_HOURS,
+        rel_tol=0.0,
+        abs_tol=numerical_tolerance,
+    )
+
+    completed_block_demand_kw: float | None = None
+    monthly_peak_kw = previous_monthly_peak_kw
+    new_monthly_peak = False
+
+    if block_completed:
+        completed_block_demand_kw = accumulated_block_energy_kwh / DEMAND_BLOCK_HOURS
+        new_monthly_peak = completed_block_demand_kw > previous_monthly_peak_kw
+        monthly_peak_kw = max(previous_monthly_peak_kw, completed_block_demand_kw)
+        next_state = ElectricityMeterState(monthly_peak_kw=monthly_peak_kw)
+    else:
+        next_state = ElectricityMeterState(
+            block_energy_kwh=accumulated_block_energy_kwh,
+            block_elapsed_hours=accumulated_block_elapsed_hours,
+            monthly_peak_kw=monthly_peak_kw,
         )
 
-        if requested_battery_power_kw >= 0.0:  # positive action = discharge
-            available_discharge_power_kw = max(
-                0.0,
-                (self.state_of_charge - config.SOC_min) * self._discharge_power_per_soc_fraction,
-            )
-            discharge_kw = min(
-                requested_battery_power_kw,
-                config.P_rated_nominal,
-                net_load_kw,
-                available_discharge_power_kw,
-            )
-            return discharge_kw, 0.0, 0.0
+    return ElectricityMeterStepResult(
+        grid_import_kw=grid_kw,
+        sample_energy_kwh=sample_energy_kwh,
+        accumulated_block_energy_kwh=accumulated_block_energy_kwh,
+        accumulated_block_elapsed_hours=accumulated_block_elapsed_hours,
+        block_completed=block_completed,
+        completed_block_demand_kw=completed_block_demand_kw,
+        previous_monthly_peak_kw=previous_monthly_peak_kw,
+        monthly_peak_kw=monthly_peak_kw,
+        new_monthly_peak=new_monthly_peak,
+        next_state=next_state,
+    )
 
-        available_charge_power_kw = max(
-            0.0,
-            (config.SOC_max - self.state_of_charge) * self._charge_power_per_soc_fraction,
+
+def reset_electricity_meter_for_new_day(meter_state: ElectricityMeterState) -> ElectricityMeterState:
+    """Start a new clock day: clear the open block, preserve the monthly peak."""
+    if not isinstance(meter_state, ElectricityMeterState):
+        raise TypeError("meter_state must be an ElectricityMeterState")
+    monthly_peak_kw = float(meter_state.monthly_peak_kw)
+    if not math.isfinite(monthly_peak_kw) or monthly_peak_kw < 0.0:
+        raise ValueError("meter_state.monthly_peak_kw must be finite and non-negative")
+    return ElectricityMeterState(monthly_peak_kw=monthly_peak_kw)
+
+
+def reset_electricity_meter_for_new_month() -> ElectricityMeterState:
+    """Start a new billing month with an empty block and zero monthly peak."""
+    return ElectricityMeterState()
+
+
+@dataclass(frozen=True, slots=True)
+class OperatingCostStepResult:
+    """Boring accounting result for one timestep.
+    It sees Grid pov! battery throughput! ZERO physic logic aurafarming.
+    """
+    grid_energy_kwh: float
+    battery_throughput_kwh: float
+    demand_peak_increase_kw: float
+    electricity_energy_cost_vnd: float
+    demand_cost_vnd: float
+    battery_wear_cost_vnd: float
+    operating_cost_vnd: float
+
+
+def calculate_operating_cost_step(
+    *,
+    grid_energy_kwh: float,
+    battery_throughput_kwh: float,
+    previous_monthly_peak_kw: float,
+    monthly_peak_kw: float,
+    tariff_vnd_per_kwh: float,
+    demand_charge_vnd_per_kw: float,
+    battery_wear_vnd_per_kwh: float,
+) -> OperatingCostStepResult:
+    """Price finished accounting facts only: grid energy, peak increase, throughput."""
+    grid_kwh = float(grid_energy_kwh)
+    throughput_kwh = float(battery_throughput_kwh)
+    previous_peak_kw = float(previous_monthly_peak_kw)
+    current_peak_kw = float(monthly_peak_kw)
+    tariff = float(tariff_vnd_per_kwh)
+    demand_fee = float(demand_charge_vnd_per_kw)
+    wear_rate = float(battery_wear_vnd_per_kwh)
+
+    values = (
+        grid_kwh,
+        throughput_kwh,
+        previous_peak_kw,
+        current_peak_kw,
+        tariff,
+        demand_fee,
+        wear_rate,
+    )
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("Operating-cost inputs must all be finite numbers")
+    if grid_kwh < 0.0:
+        raise ValueError("grid_energy_kwh must not be negative")
+    if throughput_kwh < 0.0:
+        raise ValueError("battery_throughput_kwh must not be negative")
+    if previous_peak_kw < 0.0 or current_peak_kw < 0.0:
+        raise ValueError("monthly demand peaks must not be negative")
+    if tariff < 0.0:
+        raise ValueError("tariff_vnd_per_kwh must not be negative")
+    if demand_fee < 0.0:
+        raise ValueError("demand_charge_vnd_per_kw must not be negative")
+    if wear_rate < 0.0:
+        raise ValueError("battery_wear_vnd_per_kwh must not be negative")
+
+    numerical_tolerance = 1e-12
+    if current_peak_kw < previous_peak_kw - numerical_tolerance:
+        raise ValueError("monthly_peak_kw must not go backwards")
+    demand_peak_increase_kw = max(0.0, current_peak_kw - previous_peak_kw)
+
+    electricity_energy_cost_vnd = grid_kwh * tariff
+    demand_cost_vnd = demand_peak_increase_kw * demand_fee
+    battery_wear_cost_vnd = throughput_kwh * wear_rate
+    operating_cost_vnd = electricity_energy_cost_vnd + demand_cost_vnd + battery_wear_cost_vnd
+
+    return OperatingCostStepResult(
+        grid_energy_kwh=grid_kwh,
+        battery_throughput_kwh=throughput_kwh,
+        demand_peak_increase_kw=demand_peak_increase_kw,
+        electricity_energy_cost_vnd=electricity_energy_cost_vnd,
+        demand_cost_vnd=demand_cost_vnd,
+        battery_wear_cost_vnd=battery_wear_cost_vnd,
+        operating_cost_vnd=operating_cost_vnd,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MonthlyOperatingCostResult:
+    """Independent whole-month look-back from grid and battery power histories."""
+
+    total_grid_energy_kwh: float
+    battery_throughput_kwh: float
+    monthly_peak_kw: float
+    electricity_energy_cost_vnd: float
+    demand_cost_vnd: float
+    battery_wear_cost_vnd: float
+    operating_cost_vnd: float
+
+
+def calculate_month_operating_cost_from_history(
+    *,
+    grid_import_kw: Sequence[float],
+    battery_power_kw: Sequence[float],
+    tariff_vnd_per_kwh: Sequence[float],
+    timestep_hours: float,
+    demand_charge_vnd_per_kw: float,
+    battery_wear_vnd_per_kwh: float,
+) -> MonthlyOperatingCostResult:
+    """Recalculate a complete month directly from raw grid and battery histories."""
+    dt_hours = float(timestep_hours)
+    samples_per_block = _validate_meter_timestep(dt_hours)
+    demand_fee = float(demand_charge_vnd_per_kw)
+    wear_rate = float(battery_wear_vnd_per_kwh)
+
+    if not math.isfinite(demand_fee) or demand_fee < 0.0:
+        raise ValueError("demand_charge_vnd_per_kw must be finite and non-negative")
+    if not math.isfinite(wear_rate) or wear_rate < 0.0:
+        raise ValueError("battery_wear_vnd_per_kwh must be finite and non-negative")
+
+    sample_count = len(grid_import_kw)
+    if sample_count == 0:
+        raise ValueError("month history must contain at least one timestep")
+    if len(battery_power_kw) != sample_count or len(tariff_vnd_per_kwh) != sample_count:
+        raise ValueError("grid, battery, and tariff month histories must have equal length")
+    if sample_count % samples_per_block != 0:
+        raise ValueError("complete month history must end on a 30-minute demand-block boundary")
+
+    total_grid_energy_kwh = 0.0
+    battery_throughput_kwh = 0.0
+    electricity_energy_cost_vnd = 0.0
+    monthly_peak_kw = 0.0
+    block_grid_energy_kwh = 0.0
+    block_sample_count = 0
+
+    # One O(N) pass, no temporary month-sized arrays.
+    for grid_value, battery_value, tariff_value in zip(
+        grid_import_kw,
+        battery_power_kw,
+        tariff_vnd_per_kwh,
+    ):
+        grid_kw = float(grid_value)
+        battery_kw = float(battery_value)
+        tariff = float(tariff_value)
+        if not all(math.isfinite(value) for value in (grid_kw, battery_kw, tariff)):
+            raise ValueError("month history values must all be finite")
+        if grid_kw < 0.0:
+            raise ValueError("grid_import_kw history must not contain negative values")
+        if tariff < 0.0:
+            raise ValueError("tariff history must not contain negative values")
+
+        grid_energy_kwh = grid_kw * dt_hours
+        total_grid_energy_kwh += grid_energy_kwh
+        electricity_energy_cost_vnd += grid_energy_kwh * tariff
+        battery_throughput_kwh += abs(battery_kw) * dt_hours
+
+        block_grid_energy_kwh += grid_energy_kwh
+        block_sample_count += 1
+        if block_sample_count == samples_per_block:
+            completed_block_demand_kw = block_grid_energy_kwh / DEMAND_BLOCK_HOURS
+            monthly_peak_kw = max(monthly_peak_kw, completed_block_demand_kw)
+            block_grid_energy_kwh = 0.0
+            block_sample_count = 0
+
+    demand_cost_vnd = monthly_peak_kw * demand_fee
+    battery_wear_cost_vnd = battery_throughput_kwh * wear_rate
+    operating_cost_vnd = electricity_energy_cost_vnd + demand_cost_vnd + battery_wear_cost_vnd
+
+    return MonthlyOperatingCostResult(
+        total_grid_energy_kwh=total_grid_energy_kwh,
+        battery_throughput_kwh=battery_throughput_kwh,
+        monthly_peak_kw=monthly_peak_kw,
+        electricity_energy_cost_vnd=electricity_energy_cost_vnd,
+        demand_cost_vnd=demand_cost_vnd,
+        battery_wear_cost_vnd=battery_wear_cost_vnd,
+        operating_cost_vnd=operating_cost_vnd,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class BessWorldStepResult:
+    """One timestep in the real world where the battery exists."""
+
+    timestep_index: int
+    physics: PhysicsStepResult
+    meter: ElectricityMeterStepResult
+    cost: OperatingCostStepResult
+
+
+@dataclass(slots=True)
+class BessWorld:
+    """Stateful battery universe: battery physics -> meter -> shared accountant."""
+
+    state_of_charge: float
+    minimum_state_of_charge: float
+    maximum_state_of_charge: float
+    battery_capacity_kwh: float
+    battery_power_kw: float
+    timestep_hours: float
+    charge_efficiency: float
+    discharge_efficiency: float
+    demand_charge_vnd_per_kw: float
+    battery_wear_vnd_per_kwh: float
+    meter_state: ElectricityMeterState = field(
+        default_factory=ElectricityMeterState,
+        init=False,
+    )
+    timestep_index: int = field(default=0, init=False)
+    total_electricity_energy_cost_vnd: float = field(default=0.0, init=False)
+    total_demand_cost_vnd: float = field(default=0.0, init=False)
+    total_battery_wear_cost_vnd: float = field(default=0.0, init=False)
+
+    def __post_init__(self) -> None:
+        values = (
+            self.state_of_charge,
+            self.minimum_state_of_charge,
+            self.maximum_state_of_charge,
+            self.battery_capacity_kwh,
+            self.battery_power_kw,
+            self.timestep_hours,
+            self.charge_efficiency,
+            self.discharge_efficiency,
+            self.demand_charge_vnd_per_kw,
+            self.battery_wear_vnd_per_kwh,
         )
-        requested_charge_power_kw = min(
-            -requested_battery_power_kw,
-            config.P_rated_nominal,
-            available_charge_power_kw,
+        if not all(math.isfinite(float(value)) for value in values):
+            raise ValueError("BessWorld configuration values must all be finite")
+        if self.battery_power_kw <= 0.0:
+            raise ValueError("battery_power_kw must be greater than 0")
+        if self.demand_charge_vnd_per_kw < 0.0:
+            raise ValueError("demand_charge_vnd_per_kw must not be negative")
+        if self.battery_wear_vnd_per_kwh < 0.0:
+            raise ValueError("battery_wear_vnd_per_kwh must not be negative")
+
+        # Reuse the existing laws as validators instead of inventing a second set of rules.
+        _validate_meter_timestep(self.timestep_hours)
+        police_battery_power(
+            requested_battery_power_kw=0.0,
+            state_of_charge=self.state_of_charge,
+            minimum_state_of_charge=self.minimum_state_of_charge,
+            maximum_state_of_charge=self.maximum_state_of_charge,
+            battery_capacity_kwh=self.battery_capacity_kwh,
+            timestep_hours=self.timestep_hours,
         )
-        pv_charge_kw = min(requested_charge_power_kw, pv_surplus_kw)  # free PV first
-
-        # Grid charging is limited only by physical feasibility here. The
-        # fixed-block demand charge belongs in the reward/billing model, not in
-        # a stricter per-sample rule that can delete valid optimal schedules.
-        grid_charge_kw = requested_charge_power_kw - pv_charge_kw
-        return 0.0, grid_charge_kw, pv_charge_kw
-
-    # ------------------------------------------------------------------
-    def _step_native_timestep(self, action: float):
-        """Run one native data step, such as one minute or 15 minutes."""
-        config = self.config
-        current_day = self.month_data.days[self.current_day_index]
-        timestep_index = self.current_timestep_index
-        load_kw = float(current_day.load[timestep_index])
-        pv_kw = float(current_day.pv[timestep_index])
-        net_load_kw = max(0.0, load_kw - pv_kw)
-
-        discharge_kw, grid_charge_kw, pv_charge_kw = self.project_action(
-            action,
-            load_kw,
-            pv_kw,
-        )
-        battery_power_kw = discharge_kw - (grid_charge_kw + pv_charge_kw)
-        self._last_battery_power_kw = battery_power_kw
-        grid_import_kw = net_load_kw + grid_charge_kw - discharge_kw
-
-        total_charge_kw = grid_charge_kw + pv_charge_kw
-        state_of_charge_before_native_step = self.state_of_charge
-        self.state_of_charge = (
-            self.state_of_charge
-            + total_charge_kw * self._state_of_charge_gain_per_charge_kw
-            - discharge_kw * self._state_of_charge_loss_per_discharge_kw
-        )
-        # Numerical guard only; project_action already keeps SOC in bounds.
-        self.state_of_charge = min(config.SOC_max, max(config.SOC_min, self.state_of_charge))
-        inventory_value_delta_vnd = (
-            (self.state_of_charge - state_of_charge_before_native_step)
-            * config.E_cap
-            * self._inventory_value_vnd_per_stored_kwh
+        battery_power_to_outside_power_kw(
+            battery_power_kw=0.0,
+            charge_efficiency=self.charge_efficiency,
+            discharge_efficiency=self.discharge_efficiency,
         )
 
-        # --- actual electricity cost -----------------------------------
-        electricity_cost_vnd = self.current_day_tariff[timestep_index] * grid_import_kw * self.native_timestep_hours
-
-        # --- fixed 30-minute meter integration block --------------------
-        self._demand_block_sample_count += 1
-        self._demand_block_grid_import_sum_kw += grid_import_kw
-        self._no_bess_demand_block_grid_import_sum_kw += net_load_kw
-
-        demand_peak_penalty_vnd = 0.0
-        no_bess_peak_penalty_vnd = 0.0
-        if self._demand_block_sample_count == self.samples_per_demand_block:
-            block_demand_kw = self._demand_block_grid_import_sum_kw / self.samples_per_demand_block
-            no_bess_block_demand_kw = self._no_bess_demand_block_grid_import_sum_kw / self.samples_per_demand_block
-
-            demand_peak_penalty_vnd = config.T_cap * max(
-                0.0,
-                block_demand_kw - self.running_monthly_peak_kw,
-            )
-            self.running_monthly_peak_kw = max(self.running_monthly_peak_kw, block_demand_kw)
-
-            no_bess_peak_penalty_vnd = config.T_cap * max(
-                0.0,
-                no_bess_block_demand_kw - self.no_bess_running_monthly_peak_kw,
-            )
-            self.no_bess_running_monthly_peak_kw = max(self.no_bess_running_monthly_peak_kw, no_bess_block_demand_kw)
-            self._reset_demand_meter_block()
-
-        battery_wear_cost_vnd = (
-            self.degradation_cost_vnd_per_kwh
-            * (discharge_kw + grid_charge_kw + pv_charge_kw)
-            * self.native_timestep_hours
-        )
-
-        # --- reward pieces: BESS world minus no-BESS world -------------
-        battery_energy_cost_delta_vnd = (
-            self.current_day_tariff[timestep_index] * (grid_charge_kw - discharge_kw) * self.native_timestep_hours
-        )
-        demand_peak_cost_delta_vnd = demand_peak_penalty_vnd - no_bess_peak_penalty_vnd
-
-        # --- logs -------------------------------------------------------
-        if self.record_trajectory:
-            self.grid_import_history[self.current_day_index][timestep_index] = grid_import_kw
-            self.battery_power_history[self.current_day_index][timestep_index] = battery_power_kw
-            self.state_of_charge_history[self.current_day_index][timestep_index + 1] = self.state_of_charge
-        self.previous_grid_import_kw = grid_import_kw
-        self.previous_no_bess_grid_import_kw = net_load_kw
-
-        # --- move time forward -----------------------------------------
-        self.current_timestep_index += 1
-        episode_done = False
-        if self.current_timestep_index >= self.steps_per_day:
-            self.current_timestep_index = 0
-            self.current_day_index += 1
-            self.previous_grid_import_kw = 0.0  # billing windows do not straddle days
-            self.previous_no_bess_grid_import_kw = 0.0
-            self._reset_demand_meter_block()
-            if self.current_day_index >= len(self.month_data.days):
-                episode_done = True
-            else:
-                if self.record_trajectory:
-                    self.state_of_charge_history[self.current_day_index][0] = self.state_of_charge
-                self._set_current_day_tariff()
-                self._validate_current_day_forecast()
-                self._build_static_observation_cache()
-
-        next_observation = None if episode_done else self._build_observation()
+    @property
+    def total_operating_cost_vnd(self) -> float:
         return (
-            next_observation,
-            episode_done,
-            grid_import_kw,
-            electricity_cost_vnd,
-            battery_energy_cost_delta_vnd,
-            inventory_value_delta_vnd,
-            demand_peak_cost_delta_vnd,
-            battery_wear_cost_vnd,
-            demand_peak_penalty_vnd,
-            no_bess_peak_penalty_vnd,
+            self.total_electricity_energy_cost_vnd
+            + self.total_demand_cost_vnd
+            + self.total_battery_wear_cost_vnd
         )
 
-    def step(self, action: float):
-        """Apply one PPO decision over one control interval.
+    def step(
+        self,
+        *,
+        action: float,
+        net_load_kw: float,
+        tariff_vnd_per_kwh: float,
+    ) -> BessWorldStepResult:
+        """Advance the battery universe exactly once, committing only after validation."""
+        action_value = float(action)
+        if not math.isfinite(action_value):
+            raise ValueError("action must be finite")
 
-        The same requested action is held for every native data row inside the
-        control interval, while battery physics and billing still update on
-        every native row.
-        """
-        state_of_charge_before_action = self.state_of_charge
-        decision_tariff_vnd_per_kwh = self.current_day_tariff[self.current_timestep_index]
-        total_electricity_cost_vnd = 0.0
-        total_battery_energy_cost_delta_vnd = 0.0
-        total_inventory_value_delta_vnd = 0.0
-        total_demand_peak_cost_delta_vnd = 0.0
-        total_battery_wear_cost_vnd = 0.0
-        total_demand_peak_penalty_vnd = 0.0
-        total_no_bess_peak_penalty_vnd = 0.0
-        next_observation = None
-        episode_done = False
-        grid_import_kw = 0.0
-        native_samples_processed = 0
-        battery_throughput_kwh = 0.0
-        sum_absolute_battery_power_kw = 0.0
+        physics = run_physics_step(
+            action=action_value,
+            net_load_kw=net_load_kw,
+            state_of_charge=self.state_of_charge,
+            minimum_state_of_charge=self.minimum_state_of_charge,
+            maximum_state_of_charge=self.maximum_state_of_charge,
+            battery_capacity_kwh=self.battery_capacity_kwh,
+            battery_power_kw=self.battery_power_kw,
+            timestep_hours=self.timestep_hours,
+            charge_efficiency=self.charge_efficiency,
+            discharge_efficiency=self.discharge_efficiency,
+        )
+        meter = run_electricity_meter_step(
+            grid_import_kw=physics.grid_import_kw,
+            timestep_hours=self.timestep_hours,
+            meter_state=self.meter_state,
+        )
+        cost = calculate_operating_cost_step(
+            grid_energy_kwh=meter.sample_energy_kwh,
+            battery_throughput_kwh=physics.battery_throughput_kwh,
+            previous_monthly_peak_kw=meter.previous_monthly_peak_kw,
+            monthly_peak_kw=meter.monthly_peak_kw,
+            tariff_vnd_per_kwh=tariff_vnd_per_kwh,
+            demand_charge_vnd_per_kw=self.demand_charge_vnd_per_kw,
+            battery_wear_vnd_per_kwh=self.battery_wear_vnd_per_kwh,
+        )
 
-        for _ in range(self.native_samples_per_action):
-            (
-                next_observation,
-                episode_done,
-                grid_import_kw,
-                electricity_cost_vnd,
-                battery_energy_cost_delta_vnd,
-                inventory_value_delta_vnd,
-                demand_peak_cost_delta_vnd,
-                battery_wear_cost_vnd,
-                demand_peak_penalty_vnd,
-                no_bess_peak_penalty_vnd,
-            ) = self._step_native_timestep(action)
+        result = BessWorldStepResult(
+            timestep_index=self.timestep_index,
+            physics=physics,
+            meter=meter,
+            cost=cost,
+        )
 
-            native_samples_processed += 1
-            battery_throughput_kwh += abs(self._last_battery_power_kw) * self.native_timestep_hours
-            sum_absolute_battery_power_kw += abs(self._last_battery_power_kw)
-            total_electricity_cost_vnd += electricity_cost_vnd
-            total_battery_energy_cost_delta_vnd += battery_energy_cost_delta_vnd
-            total_inventory_value_delta_vnd += inventory_value_delta_vnd
-            total_demand_peak_cost_delta_vnd += demand_peak_cost_delta_vnd
-            total_battery_wear_cost_vnd += battery_wear_cost_vnd
-            total_demand_peak_penalty_vnd += demand_peak_penalty_vnd
-            total_no_bess_peak_penalty_vnd += no_bess_peak_penalty_vnd
+        # Commit only after physics, metering, and money all produced valid results.
+        self.state_of_charge = physics.next_soc
+        self.meter_state = meter.next_state
+        self.total_electricity_energy_cost_vnd += cost.electricity_energy_cost_vnd
+        self.total_demand_cost_vnd += cost.demand_cost_vnd
+        self.total_battery_wear_cost_vnd += cost.battery_wear_cost_vnd
+        self.timestep_index += 1
+        return result
 
-            if episode_done:
-                break
 
-        terminal_inventory_settlement_vnd = 0.0
-        if self.reward_mode == "factory_dispatch_v1":
-            if episode_done:
-                # The dense inventory term only redistributes reward through time.
-                # Settle the episode-level SOC change so PPO cannot earn fake money
-                # merely by finishing with more stored energy than it started with.
-                terminal_inventory_settlement_vnd = -(
-                    (self.state_of_charge - self._episode_initial_state_of_charge)
-                    * self.config.E_cap
-                    * self._inventory_value_vnd_per_stored_kwh
+@dataclass(frozen=True, slots=True)
+class RawWorldStepResult:
+    """One timestep in the ghost world where the battery does not exist."""
+
+    timestep_index: int
+    grid_import_kw: float
+    meter: ElectricityMeterStepResult
+    cost: OperatingCostStepResult
+
+
+@dataclass(slots=True)
+class RawWorld:
+    """No-battery ghost universe: raw factory net load -> meter -> shared accountant."""
+
+    timestep_hours: float
+    demand_charge_vnd_per_kw: float
+    meter_state: ElectricityMeterState = field(
+        default_factory=ElectricityMeterState,
+        init=False,
+    )
+    timestep_index: int = field(default=0, init=False)
+    total_electricity_energy_cost_vnd: float = field(default=0.0, init=False)
+    total_demand_cost_vnd: float = field(default=0.0, init=False)
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(float(self.demand_charge_vnd_per_kw)):
+            raise ValueError("demand_charge_vnd_per_kw must be finite")
+        if self.demand_charge_vnd_per_kw < 0.0:
+            raise ValueError("demand_charge_vnd_per_kw must not be negative")
+        _validate_meter_timestep(self.timestep_hours)
+
+    @property
+    def total_operating_cost_vnd(self) -> float:
+        return self.total_electricity_energy_cost_vnd + self.total_demand_cost_vnd
+
+    def step(
+        self,
+        *,
+        net_load_kw: float,
+        tariff_vnd_per_kwh: float,
+    ) -> RawWorldStepResult:
+        """Advance the no-battery universe exactly once."""
+        prepared_net_load_kw = float(net_load_kw)
+        if not math.isfinite(prepared_net_load_kw):
+            raise ValueError("net_load_kw must be finite")
+
+        # Ghost-world physics has exactly one fact: without a battery, the grid sees
+        # the non-negative prepared factory net load. There is no SOC or efficiency here.
+        grid_import_kw = max(prepared_net_load_kw, 0.0)
+        meter = run_electricity_meter_step(
+            grid_import_kw=grid_import_kw,
+            timestep_hours=self.timestep_hours,
+            meter_state=self.meter_state,
+        )
+        cost = calculate_operating_cost_step(
+            grid_energy_kwh=meter.sample_energy_kwh,
+            battery_throughput_kwh=0.0,
+            previous_monthly_peak_kw=meter.previous_monthly_peak_kw,
+            monthly_peak_kw=meter.monthly_peak_kw,
+            tariff_vnd_per_kwh=tariff_vnd_per_kwh,
+            demand_charge_vnd_per_kw=self.demand_charge_vnd_per_kw,
+            battery_wear_vnd_per_kwh=0.0,
+        )
+
+        result = RawWorldStepResult(
+            timestep_index=self.timestep_index,
+            grid_import_kw=grid_import_kw,
+            meter=meter,
+            cost=cost,
+        )
+
+        self.meter_state = meter.next_state
+        self.total_electricity_energy_cost_vnd += cost.electricity_energy_cost_vnd
+        self.total_demand_cost_vnd += cost.demand_cost_vnd
+        self.timestep_index += 1
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class BrainStepResult:
+    """Bundled accounting truth from the two synchronized universes for one timestep."""
+
+    timestep_index: int
+    bess: BessWorldStepResult
+    raw: RawWorldStepResult
+    electricity_energy_savings_vnd: float
+    demand_savings_vnd: float
+    battery_wear_cost_vnd: float
+    net_battery_savings_vnd: float
+    cumulative_electricity_energy_savings_vnd: float
+    cumulative_demand_savings_vnd: float
+    cumulative_battery_wear_cost_vnd: float
+    cumulative_net_battery_savings_vnd: float
+
+
+@dataclass(frozen=True, slots=True)
+class BrainTimestepInput:
+    """Exogenous facts for one environment timestep. The brain cannot change these."""
+
+    net_load_kw: float
+    tariff_vnd_per_kwh: float
+    is_working_day: bool
+
+    def __post_init__(self) -> None:
+        net_load_kw = float(self.net_load_kw)
+        tariff_vnd_per_kwh = float(self.tariff_vnd_per_kwh)
+        if not math.isfinite(net_load_kw) or not math.isfinite(tariff_vnd_per_kwh):
+            raise ValueError("Brain timestep net load and tariff must be finite")
+        if tariff_vnd_per_kwh < 0.0:
+            raise ValueError("Brain timestep tariff_vnd_per_kwh must not be negative")
+        if type(self.is_working_day) is not bool:
+            raise TypeError("Brain timestep is_working_day must be a bool")
+
+        object.__setattr__(self, "net_load_kw", net_load_kw)
+        object.__setattr__(self, "tariff_vnd_per_kwh", tariff_vnd_per_kwh)
+
+
+@dataclass(frozen=True, slots=True)
+class BrainEpisode:
+    """One standalone billing-month episode owned completely by BrainEnv."""
+
+    timesteps: tuple[BrainTimestepInput, ...]
+    steps_per_day: int
+    power_scale_kw: float = POWER_SCALE_KW
+    tariff_normalization_vnd_per_kwh: float | None = None
+
+    def __post_init__(self) -> None:
+        timesteps = tuple(self.timesteps)
+        if not timesteps:
+            raise ValueError("BrainEpisode must contain at least one timestep")
+        if any(not isinstance(step, BrainTimestepInput) for step in timesteps):
+            raise TypeError("BrainEpisode.timesteps must contain only BrainTimestepInput values")
+        if isinstance(self.steps_per_day, bool) or not isinstance(self.steps_per_day, int):
+            raise TypeError("BrainEpisode.steps_per_day must be an integer")
+        if self.steps_per_day <= 0:
+            raise ValueError("BrainEpisode.steps_per_day must be greater than 0")
+
+        power_scale_kw = float(self.power_scale_kw)
+        if not math.isfinite(power_scale_kw) or power_scale_kw <= 0.0:
+            raise ValueError("BrainEpisode.power_scale_kw must be finite and greater than 0")
+
+        tariff_normalization = self.tariff_normalization_vnd_per_kwh
+        if tariff_normalization is not None:
+            tariff_normalization = float(tariff_normalization)
+            if not math.isfinite(tariff_normalization) or tariff_normalization <= 0.0:
+                raise ValueError(
+                    "BrainEpisode.tariff_normalization_vnd_per_kwh must be "
+                    "finite and greater than 0 when provided"
                 )
-            reward_timing_credit_vnd = (
-                total_inventory_value_delta_vnd + terminal_inventory_settlement_vnd
-            )
-        else:
-            stored_energy_value_vnd_per_soc_fraction = (
-                self.config.E_cap
-                * self.config.eta_dis
-                * decision_tariff_vnd_per_kwh
-            )
-            stored_energy_value_before_vnd = (
-                state_of_charge_before_action - self.config.SOC_min
-            ) * stored_energy_value_vnd_per_soc_fraction
-            stored_energy_value_after_vnd = (
-                self.state_of_charge - self.config.SOC_min
-            ) * stored_energy_value_vnd_per_soc_fraction
-            reward_timing_credit_vnd = (
-                self.discount_factor * stored_energy_value_after_vnd
-                - stored_energy_value_before_vnd
-            )
 
-        reward = (
-            -total_battery_energy_cost_delta_vnd
-            - total_demand_peak_cost_delta_vnd
-            - total_battery_wear_cost_vnd
-            + reward_timing_credit_vnd
-        ) / REWARD_SCALE_VND
+        object.__setattr__(self, "timesteps", timesteps)
+        object.__setattr__(self, "power_scale_kw", power_scale_kw)
+        object.__setattr__(
+            self,
+            "tariff_normalization_vnd_per_kwh",
+            tariff_normalization,
+        )
 
-        return next_observation, reward, episode_done, {
-            # Keep these public info keys unchanged so other code does not break.
-            "grid_kw": grid_import_kw,
-            "energy_cost": total_electricity_cost_vnd,
-            "energy_delta": total_battery_energy_cost_delta_vnd,
-            "peak_delta": total_demand_peak_cost_delta_vnd,
-            "deg_cost": total_battery_wear_cost_vnd,
-            "peak_pen": total_demand_peak_penalty_vnd,
-            "peak_pen_nb": total_no_bess_peak_penalty_vnd,
-            # Compatibility key retained for existing diagnostics.  In the new
-            # PPO factory reward it is the inventory timing credit; legacy users
-            # still receive the historical gamma/SOC potential value here.
-            "shaping": reward_timing_credit_vnd,
-            "inventory_delta": total_inventory_value_delta_vnd,
-            "inventory_terminal_settlement": terminal_inventory_settlement_vnd,
-            "inventory_value_vnd_per_stored_kwh": self._inventory_value_vnd_per_stored_kwh,
-            "native_rows": native_samples_processed,
-            "d_run": self.running_monthly_peak_kw,
-            "throughput_kwh": battery_throughput_kwh,
-            "mean_abs_p_bess_kw": (
-                sum_absolute_battery_power_kw / max(1, native_samples_processed)
+    @property
+    def maximum_tariff_vnd_per_kwh(self) -> float:
+        return max(step.tariff_vnd_per_kwh for step in self.timesteps)
+
+    @property
+    def tariff_normalization_denominator_vnd_per_kwh(self) -> float:
+        if self.tariff_normalization_vnd_per_kwh is not None:
+            return self.tariff_normalization_vnd_per_kwh
+        maximum_tariff = self.maximum_tariff_vnd_per_kwh
+        return maximum_tariff if maximum_tariff > 0.0 else 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class BrainRewardResult:
+    """Reward is money saved: this timestep and this billing month so far."""
+
+    timestep_savings_vnd: float
+    monthly_savings_vnd: float
+
+
+@dataclass(frozen=True, slots=True)
+class BrainEnvironmentStepResult(BrainStepResult):
+    """Complete brain-facing transition from one action."""
+
+    requested_action: float
+    projected_action: float
+    requested_battery_kw: float
+    projected_battery_kw: float
+    horizon_adjusted: bool
+    next_observation: BrainObservation | None
+    reward: BrainRewardResult
+    done: bool
+
+    @property
+    def info(self) -> BrainStepResult:
+        """The full diagnostics are this same immutable transition object."""
+        return self
+
+
+class BrainEnv:
+    """Canonical environment: advance BESS and no-battery worlds together."""
+
+    def __init__(
+        self,
+        *,
+        initial_state_of_charge: float,
+        minimum_state_of_charge: float,
+        maximum_state_of_charge: float,
+        battery_capacity_kwh: float,
+        battery_power_kw: float,
+        timestep_hours: float,
+        charge_efficiency: float,
+        discharge_efficiency: float,
+        demand_charge_vnd_per_kw: float,
+        battery_wear_vnd_per_kwh: float,
+        episode: BrainEpisode | None = None,
+        required_final_soc: float | None = None,
+    ) -> None:
+        self.bess_world = BessWorld(
+            state_of_charge=initial_state_of_charge,
+            minimum_state_of_charge=minimum_state_of_charge,
+            maximum_state_of_charge=maximum_state_of_charge,
+            battery_capacity_kwh=battery_capacity_kwh,
+            battery_power_kw=battery_power_kw,
+            timestep_hours=timestep_hours,
+            charge_efficiency=charge_efficiency,
+            discharge_efficiency=discharge_efficiency,
+            demand_charge_vnd_per_kw=demand_charge_vnd_per_kw,
+            battery_wear_vnd_per_kwh=battery_wear_vnd_per_kwh,
+        )
+        self.raw_world = RawWorld(
+            timestep_hours=timestep_hours,
+            demand_charge_vnd_per_kw=demand_charge_vnd_per_kw,
+        )
+        if episode is not None and not isinstance(episode, BrainEpisode):
+            raise TypeError("episode must be a BrainEpisode or None")
+        self.episode = episode
+        self._initial_state_of_charge = float(initial_state_of_charge)
+        self.required_final_soc = None if required_final_soc is None else float(required_final_soc)
+        if self.required_final_soc is not None and not (
+            minimum_state_of_charge <= self.required_final_soc <= maximum_state_of_charge
+        ):
+            raise ValueError("required_final_soc must be inside the configured SOC limits")
+        self._future_charge_soc: tuple[float, ...] = ()
+        self._future_discharge_soc: tuple[float, ...] = ()
+        if episode is not None and self.required_final_soc is not None:
+            charge_per_step = battery_power_kw * timestep_hours / battery_capacity_kwh
+            discharge = [
+                min(battery_power_kw, max(0.0, step.net_load_kw) / discharge_efficiency)
+                * timestep_hours
+                / battery_capacity_kwh
+                for step in episode.timesteps
+            ]
+            count = len(episode.timesteps)
+            charge_suffix = [0.0] * (count + 1)
+            discharge_suffix = [0.0] * (count + 1)
+            for index in range(count - 1, -1, -1):
+                charge_suffix[index] = charge_suffix[index + 1] + charge_per_step
+                discharge_suffix[index] = discharge_suffix[index + 1] + discharge[index]
+            self._future_charge_soc = tuple(charge_suffix)
+            self._future_discharge_soc = tuple(discharge_suffix)
+            if self._initial_state_of_charge < self.required_final_soc - charge_suffix[0] - 1e-12:
+                raise ValueError("episode cannot charge enough to reach required_final_soc")
+            if self._initial_state_of_charge > self.required_final_soc + discharge_suffix[0] + 1e-12:
+                raise ValueError("episode load cannot absorb enough discharge to reach required_final_soc")
+
+    def _project_action_for_horizon(self, action: float, timestep_index: int) -> float:
+        """O(1) projection that keeps exact terminal SOC physically reachable."""
+        if self.episode is None or self.required_final_soc is None:
+            return action
+        next_index = timestep_index + 1
+        minimum_next_soc = max(
+            self.bess_world.minimum_state_of_charge,
+            self.required_final_soc - self._future_charge_soc[next_index],
+        )
+        maximum_next_soc = min(
+            self.bess_world.maximum_state_of_charge,
+            self.required_final_soc + self._future_discharge_soc[next_index],
+        )
+        current_soc = self.bess_world.state_of_charge
+        capacity = self.bess_world.battery_capacity_kwh
+        dt = self.bess_world.timestep_hours
+        minimum_power = (current_soc - maximum_next_soc) * capacity / dt
+        maximum_power = (current_soc - minimum_next_soc) * capacity / dt
+        requested_power = action * self.bess_world.battery_power_kw
+        projected_power = min(max(requested_power, minimum_power), maximum_power)
+        return min(1.0, max(-1.0, projected_power / self.bess_world.battery_power_kw))
+
+    @property
+    def electricity_energy_savings_vnd(self) -> float:
+        return (
+            self.raw_world.total_electricity_energy_cost_vnd
+            - self.bess_world.total_electricity_energy_cost_vnd
+        )
+
+    @property
+    def demand_savings_vnd(self) -> float:
+        return self.raw_world.total_demand_cost_vnd - self.bess_world.total_demand_cost_vnd
+
+    @property
+    def battery_wear_cost_vnd(self) -> float:
+        return self.bess_world.total_battery_wear_cost_vnd
+
+    @property
+    def net_battery_savings_vnd(self) -> float:
+        return self.raw_world.total_operating_cost_vnd - self.bess_world.total_operating_cost_vnd
+
+    def reset(self) -> BrainObservation:
+        """Start the owned billing-month episode from timestep zero and return its first observation."""
+        if self.episode is None:
+            raise RuntimeError("BrainEnv.reset() requires a configured BrainEpisode")
+
+        self.bess_world.state_of_charge = self._initial_state_of_charge
+        self.bess_world.meter_state = ElectricityMeterState()
+        self.bess_world.timestep_index = 0
+        self.bess_world.total_electricity_energy_cost_vnd = 0.0
+        self.bess_world.total_demand_cost_vnd = 0.0
+        self.bess_world.total_battery_wear_cost_vnd = 0.0
+
+        self.raw_world.meter_state = ElectricityMeterState()
+        self.raw_world.timestep_index = 0
+        self.raw_world.total_electricity_energy_cost_vnd = 0.0
+        self.raw_world.total_demand_cost_vnd = 0.0
+
+        return self.current_observation()
+
+    def current_observation(self) -> BrainObservation:
+        """Build the seven-eye observation for the current owned episode timestep."""
+        if self.episode is None:
+            raise RuntimeError("BrainEnv.current_observation() requires a configured BrainEpisode")
+        if self.bess_world.timestep_index != self.raw_world.timestep_index:
+            raise RuntimeError("BessWorld and RawWorld timestep indexes must stay in lockstep")
+
+        timestep_index = self.bess_world.timestep_index
+        if timestep_index >= len(self.episode.timesteps):
+            raise RuntimeError("episode is finished; reset before requesting another observation")
+
+        timestep = self.episode.timesteps[timestep_index]
+        return build_observation(
+            timestep_index=timestep_index,
+            steps_per_day=self.episode.steps_per_day,
+            net_load_kw=timestep.net_load_kw,
+            state_of_charge=self.bess_world.state_of_charge,
+            minimum_state_of_charge=self.bess_world.minimum_state_of_charge,
+            maximum_state_of_charge=self.bess_world.maximum_state_of_charge,
+            tariff_vnd_per_kwh=timestep.tariff_vnd_per_kwh,
+            maximum_tariff_vnd_per_kwh=(
+                self.episode.tariff_normalization_denominator_vnd_per_kwh
             ),
-        }
+            monthly_peak_kw=self.bess_world.meter_state.monthly_peak_kw,
+            is_working_day=timestep.is_working_day,
+            power_scale_kw=self.episode.power_scale_kw,
+        )
+
+    def step(
+        self,
+        action: float,
+        *,
+        net_load_kw: float | None = None,
+        tariff_vnd_per_kwh: float | None = None,
+    ) -> BrainStepResult | BrainEnvironmentStepResult:
+        """Advance once transactionally.
+
+        With ``episode=...`` configured, this is the real brain-facing environment step:
+        action -> physics -> meter -> money -> savings reward -> next observation.
+
+        Without an episode, explicit net-load/tariff arguments power the human playground
+        and return the lower-level ``BrainStepResult``.
+
+        Any failure restores both worlds completely. A rejected HTTP step therefore
+        cannot advance the backend counter without producing a matching trace entry.
+        """
+        bess_snapshot = (
+            self.bess_world.state_of_charge,
+            self.bess_world.meter_state,
+            self.bess_world.timestep_index,
+            self.bess_world.total_electricity_energy_cost_vnd,
+            self.bess_world.total_demand_cost_vnd,
+            self.bess_world.total_battery_wear_cost_vnd,
+        )
+        raw_snapshot = (
+            self.raw_world.meter_state,
+            self.raw_world.timestep_index,
+            self.raw_world.total_electricity_energy_cost_vnd,
+            self.raw_world.total_demand_cost_vnd,
+        )
+        try:
+            return self._step_unchecked(
+                action,
+                net_load_kw=net_load_kw,
+                tariff_vnd_per_kwh=tariff_vnd_per_kwh,
+            )
+        except Exception:
+            (
+                self.bess_world.state_of_charge,
+                self.bess_world.meter_state,
+                self.bess_world.timestep_index,
+                self.bess_world.total_electricity_energy_cost_vnd,
+                self.bess_world.total_demand_cost_vnd,
+                self.bess_world.total_battery_wear_cost_vnd,
+            ) = bess_snapshot
+            (
+                self.raw_world.meter_state,
+                self.raw_world.timestep_index,
+                self.raw_world.total_electricity_energy_cost_vnd,
+                self.raw_world.total_demand_cost_vnd,
+            ) = raw_snapshot
+            raise
+
+    def _step_unchecked(
+        self,
+        action: float,
+        *,
+        net_load_kw: float | None = None,
+        tariff_vnd_per_kwh: float | None = None,
+    ) -> BrainStepResult | BrainEnvironmentStepResult:
+        """Compute and commit one step; the public wrapper owns rollback."""
+        if self.bess_world.timestep_index != self.raw_world.timestep_index:
+            raise RuntimeError("BessWorld and RawWorld timestep indexes must stay in lockstep")
+
+        action_value = float(action)
+        if not math.isfinite(action_value):
+            raise ValueError("action must be finite")
+        if action_value < ACTION_MIN or action_value > ACTION_MAX:
+            raise ValueError("action must be inside [-1, 1]")
+
+        timestep_index = self.bess_world.timestep_index
+        episode_mode = self.episode is not None
+        previous_monthly_savings_vnd = self.net_battery_savings_vnd
+
+        if episode_mode:
+            assert self.episode is not None
+            if net_load_kw is not None or tariff_vnd_per_kwh is not None:
+                raise TypeError(
+                    "Do not pass net_load_kw or tariff_vnd_per_kwh when BrainEnv owns a BrainEpisode"
+                )
+            if timestep_index >= len(self.episode.timesteps):
+                raise RuntimeError("episode is finished; reset before stepping again")
+            timestep = self.episode.timesteps[timestep_index]
+            net_load_value = timestep.net_load_kw
+            tariff_value = timestep.tariff_vnd_per_kwh
+        else:
+            if net_load_kw is None or tariff_vnd_per_kwh is None:
+                raise TypeError(
+                    "BrainEnv without an episode requires net_load_kw and tariff_vnd_per_kwh"
+                )
+            net_load_value = float(net_load_kw)
+            tariff_value = float(tariff_vnd_per_kwh)
+            if not math.isfinite(net_load_value) or not math.isfinite(tariff_value):
+                raise ValueError("BrainEnv step inputs must all be finite")
+            if tariff_value < 0.0:
+                raise ValueError("tariff_vnd_per_kwh must not be negative")
+
+        requested_action = action_value
+        projected_action = self._project_action_for_horizon(action_value, timestep_index)
+
+        # The public step wrapper snapshots both universes before either mutates.
+        bess_result = self.bess_world.step(
+            action=projected_action,
+            net_load_kw=net_load_value,
+            tariff_vnd_per_kwh=tariff_value,
+        )
+        raw_result = self.raw_world.step(
+            net_load_kw=net_load_value,
+            tariff_vnd_per_kwh=tariff_value,
+        )
+
+        if self.bess_world.timestep_index != self.raw_world.timestep_index:
+            raise RuntimeError("BessWorld and RawWorld advanced out of lockstep")
+        if (
+            raw_result.cost.battery_throughput_kwh != 0.0
+            or raw_result.cost.battery_wear_cost_vnd != 0.0
+        ):
+            raise RuntimeError("RawWorld must never contain battery throughput or battery wear")
+
+        electricity_energy_savings_vnd = (
+            raw_result.cost.electricity_energy_cost_vnd
+            - bess_result.cost.electricity_energy_cost_vnd
+        )
+        demand_savings_vnd = raw_result.cost.demand_cost_vnd - bess_result.cost.demand_cost_vnd
+        battery_wear_cost_vnd = bess_result.cost.battery_wear_cost_vnd
+        net_battery_savings_vnd = (
+            raw_result.cost.operating_cost_vnd - bess_result.cost.operating_cost_vnd
+        )
+
+        reconstructed_net_savings_vnd = (
+            electricity_energy_savings_vnd + demand_savings_vnd - battery_wear_cost_vnd
+        )
+        if not _money_values_close(
+            net_battery_savings_vnd,
+            reconstructed_net_savings_vnd,
+            raw_result.cost.operating_cost_vnd,
+            bess_result.cost.operating_cost_vnd,
+        ):
+            raise RuntimeError("Battery savings accounting invariant failed")
+
+        cumulative_net_savings_vnd = self.net_battery_savings_vnd
+        reconstructed_cumulative_net_savings_vnd = (
+            self.electricity_energy_savings_vnd
+            + self.demand_savings_vnd
+            - self.battery_wear_cost_vnd
+        )
+        if not _money_values_close(
+            cumulative_net_savings_vnd,
+            reconstructed_cumulative_net_savings_vnd,
+            self.raw_world.total_operating_cost_vnd,
+            self.bess_world.total_operating_cost_vnd,
+        ):
+            raise RuntimeError("Cumulative battery savings accounting invariant failed")
+
+        base_result = BrainStepResult(
+            timestep_index=timestep_index,
+            bess=bess_result,
+            raw=raw_result,
+            electricity_energy_savings_vnd=electricity_energy_savings_vnd,
+            demand_savings_vnd=demand_savings_vnd,
+            battery_wear_cost_vnd=battery_wear_cost_vnd,
+            net_battery_savings_vnd=net_battery_savings_vnd,
+            cumulative_electricity_energy_savings_vnd=self.electricity_energy_savings_vnd,
+            cumulative_demand_savings_vnd=self.demand_savings_vnd,
+            cumulative_battery_wear_cost_vnd=self.battery_wear_cost_vnd,
+            cumulative_net_battery_savings_vnd=cumulative_net_savings_vnd,
+        )
+
+        if not episode_mode:
+            return base_result
+
+        monthly_savings_vnd = cumulative_net_savings_vnd
+        monthly_delta_vnd = monthly_savings_vnd - previous_monthly_savings_vnd
+        if not _money_values_close(
+            monthly_delta_vnd,
+            net_battery_savings_vnd,
+            self.raw_world.total_operating_cost_vnd,
+            self.bess_world.total_operating_cost_vnd,
+        ):
+            raise RuntimeError("Monthly savings must advance by exactly the timestep savings")
+
+        assert self.episode is not None
+        done = self.bess_world.timestep_index >= len(self.episode.timesteps)
+        if done and self.required_final_soc is not None and not math.isclose(
+            self.bess_world.state_of_charge,
+            self.required_final_soc,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            raise RuntimeError("BrainEnv episode ended without the required final SOC")
+        next_observation = None if done else self.current_observation()
+
+        return BrainEnvironmentStepResult(
+            timestep_index=base_result.timestep_index,
+            bess=base_result.bess,
+            raw=base_result.raw,
+            electricity_energy_savings_vnd=base_result.electricity_energy_savings_vnd,
+            demand_savings_vnd=base_result.demand_savings_vnd,
+            battery_wear_cost_vnd=base_result.battery_wear_cost_vnd,
+            net_battery_savings_vnd=base_result.net_battery_savings_vnd,
+            cumulative_electricity_energy_savings_vnd=(
+                base_result.cumulative_electricity_energy_savings_vnd
+            ),
+            cumulative_demand_savings_vnd=base_result.cumulative_demand_savings_vnd,
+            cumulative_battery_wear_cost_vnd=base_result.cumulative_battery_wear_cost_vnd,
+            cumulative_net_battery_savings_vnd=base_result.cumulative_net_battery_savings_vnd,
+            requested_action=requested_action,
+            projected_action=projected_action,
+            requested_battery_kw=requested_action * self.bess_world.battery_power_kw,
+            projected_battery_kw=projected_action * self.bess_world.battery_power_kw,
+            horizon_adjusted=not math.isclose(
+                requested_action, projected_action, rel_tol=0.0, abs_tol=1e-12
+            ),
+            next_observation=next_observation,
+            reward=BrainRewardResult(
+                timestep_savings_vnd=net_battery_savings_vnd,
+                monthly_savings_vnd=monthly_savings_vnd,
+            ),
+            done=done,
+        )
+
+
+def build_observation(
+    *,
+    timestep_index: int,
+    steps_per_day: int,
+    net_load_kw: float,
+    state_of_charge: float,
+    minimum_state_of_charge: float,
+    maximum_state_of_charge: float,
+    tariff_vnd_per_kwh: float,
+    maximum_tariff_vnd_per_kwh: float,
+    monthly_peak_kw: float,
+    is_working_day: bool,
+    power_scale_kw: float = POWER_SCALE_KW,
+) -> BrainObservation:
+    """Build the tiny 7-eye observation the agent gets to see."""
+    if steps_per_day <= 0:
+        raise ValueError("steps_per_day must be greater than 0")
+    if power_scale_kw <= 0.0:
+        raise ValueError("power_scale_kw must be greater than 0")
+    if maximum_tariff_vnd_per_kwh <= 0.0:
+        raise ValueError("maximum_tariff_vnd_per_kwh must be greater than 0")
+    if maximum_state_of_charge <= minimum_state_of_charge:
+        raise ValueError("maximum_state_of_charge must be greater than minimum_state_of_charge")
+
+    time_angle = 2.0 * math.pi * (timestep_index % steps_per_day) / steps_per_day
+    time_sin = math.sin(time_angle)
+    time_cos = math.cos(time_angle)
+
+    # PV is already baked into this value before it enters brain_env.
+    # No separate load/PV arithmetic exists in this env.
+    grid_facing_net_load_kw = max(float(net_load_kw), 0.0)
+
+    # Owned episodes provide a site-aware ruler from measured load and battery power.
+    normalized_net_load = grid_facing_net_load_kw / power_scale_kw
+
+    normalized_state_of_charge = (
+        (float(state_of_charge) - float(minimum_state_of_charge))
+        / (float(maximum_state_of_charge) - float(minimum_state_of_charge))
+    )
+    normalized_state_of_charge = min(1.0, max(0.0, normalized_state_of_charge))
+
+    # Current tariff is normalized against the configured maximum tariff.
+    normalized_tariff = max(float(tariff_vnd_per_kwh), 0.0) / float(maximum_tariff_vnd_per_kwh)
+
+    # Peak and net load share the same site-aware power ruler.
+    normalized_monthly_peak = max(float(monthly_peak_kw), 0.0) / power_scale_kw
+
+    working_day = 1.0 if is_working_day else 0.0
+
+    return (
+        time_sin,
+        time_cos,
+        normalized_net_load,
+        normalized_state_of_charge,
+        normalized_tariff,
+        normalized_monthly_peak,
+        working_day,
+    )

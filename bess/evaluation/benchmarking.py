@@ -132,31 +132,6 @@ def run_and_save(
         )
         break
 
-    # Give the standalone SADRBC contestant the same causal forecast contract
-    # when a selected portable forecast checkpoint supplies one. Otherwise it
-    # deliberately falls back to the seeded noisy contract in baselines.py.
-    for checkpoint in checkpoints:
-        if checkpoint.get("meta", {}).get("obs_variant") != "fc":
-            continue
-        forecast_agent, _, forecast_meta = dispatch_runner.load_policy(checkpoint["name"])
-        forecast_p_ref = float(
-            forecast_meta.get("p_ref_kw") or dispatch_runner._policy_reference_kw(month)
-        )
-        dispatch_runner.prepare_policy_forecast(
-            checkpoint["name"], forecast_agent, forecast_meta, month, forecast_p_ref
-        )
-        from bess.forecasting.sadrbc_forecast import SADRBCForecastSpec
-
-        contract = forecast_meta.get("sadrbc_forecast", {}) or {}
-        sadrbc_forecast_spec = SADRBCForecastSpec(
-            seed=int(contract.get("seed", 13_0013)),
-            load_sigma=float(contract.get("load_sigma", 0.05)),
-            pv_sigma=float(contract.get("pv_sigma", 0.15)),
-            rho=float(contract.get("rho", 0.90)),
-            replan_minutes=int(contract.get("replan_minutes", 60)),
-        )
-        sadrbc_p_ref = forecast_p_ref
-        break
 
     _check_cancelled(cancelled)
     progress("Running no-BESS baseline", 0, total_stages, "No-BESS")

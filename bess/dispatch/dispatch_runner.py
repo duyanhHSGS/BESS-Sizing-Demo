@@ -23,17 +23,12 @@ from bess.evaluation.benchmark import (
     selected_data_path,
 )
 from bess.training.training_checkpoints import CHECKPOINT_DIR, _load_checkpoint_meta
-from bess.forecasting.weather_forecast import (
-    FORECAST_DIR,
-    WeatherError,
-    attach_forecast_artifact,
-    attach_forecast_bundle,
-)
 from bess.evaluation.baselines import run_drl_policy, run_sadrbc, validate_dispatch_sampling
 
 
 BASE_DIR = PROJECT_ROOT
 
+from bess.core.bess_env import OBSERVATION_DIM
 from bess.core.common import (  # noqa: E402
     TOU_RULES,
     ensure_inside_directory,
@@ -160,27 +155,37 @@ def load_policy(checkpoint_name: str, checkpoint_dir: Path = CHECKPOINT_DIR):
             "sampling delta-t metadata; retrain it before Dispatch"
         )
 
-    if algo == "ppo":
-        obs_dim = int(meta.get("obs_dim") or (17 if meta.get("obs_variant") == "fc" else 13))
-        agent = PPOAgent(obs_dim=obs_dim)
-    elif algo == "ppo2":
+    if algo == "ppo2":
         obs_dim = int(meta.get("obs_dim") or 17)
         agent = PPO2InferenceAgent(obs_dim=obs_dim)
-    elif algo == "pro":
-        obs_dim = int(meta.get("obs_dim") or (17 if meta.get("obs_variant") == "fc" else 13))
-        agent = PROAgent(obs_dim=obs_dim)
     else:
-        import torch
+        raw = None
+        if algo in {"grepo", "grepro"}:
+            import torch
 
-        raw = torch.load(path, map_location="cpu")
-        obs_dim = int(raw.get("obs_dim") or meta.get("obs_dim") or 13)
-        agent_class = GREPROAgent if algo == "grepro" else GREPOAgent
-        agent = agent_class(
-            obs_dim=obs_dim,
-            n_group=int(meta.get("group") or meta.get("n_group") or 6),
-            std=float(raw.get("std") or meta.get("std") or 0.30),
-            beta=float(meta.get("beta") or 0.5),
+            raw = torch.load(path, map_location="cpu")
+        obs_dim = int(
+            (raw or {}).get("obs_dim")
+            or meta.get("obs_dim")
+            or OBSERVATION_DIM
         )
+        if obs_dim != OBSERVATION_DIM:
+            raise DispatchRunWarning(
+                f"{checkpoint_name}: legacy {obs_dim}-eye checkpoint is incompatible "
+                f"with the current {OBSERVATION_DIM}-eye BrainEnv; retrain it"
+            )
+        if algo == "ppo":
+            agent = PPOAgent(obs_dim=OBSERVATION_DIM)
+        elif algo == "pro":
+            agent = PROAgent(obs_dim=OBSERVATION_DIM)
+        else:
+            agent_class = GREPROAgent if algo == "grepro" else GREPOAgent
+            agent = agent_class(
+                obs_dim=OBSERVATION_DIM,
+                n_group=int(meta.get("group") or meta.get("n_group") or 6),
+                std=float((raw or {}).get("std") or meta.get("std") or 0.30),
+                beta=float(meta.get("beta") or 0.5),
+            )
     agent.load(path)
     return agent, algo, meta
 
@@ -192,66 +197,31 @@ def prepare_policy_forecast(
     month: MonthData,
     p_ref_kw: float,
 ) -> None:
-    """Attach forecast inputs for Dispatch and Benchmarking alike."""
-    if meta.get("obs_variant") != "fc":
-        return
-    embedded = getattr(agent, "forecast_bundle", None)
-    if embedded is not None:
-        try:
-            attach_forecast_bundle(month.days, embedded)
-            return
-        except WeatherError as exc:
-            raise DispatchRunWarning(
-                f"{checkpoint_name}: embedded forecast does not match the selected dataset ({exc})"
-            ) from exc
+    """Reject the removed forecast-eye policy contract.
 
-    artifact_value = meta.get("forecast_artifact")
-    basename = Path(str(artifact_value or "forecast_missing.csv")).name
-    candidates = []
-    if artifact_value:
-        configured = Path(str(artifact_value))
-        candidates.append(configured if configured.is_absolute() else BASE_DIR / configured)
-    candidates.append(FORECAST_DIR / basename)
-    for candidate in candidates:
-        try:
-            local = ensure_inside_sizing_demo(candidate)
-        except ValueError:
-            continue
-        if not local.is_file():
-            continue
-        try:
-            attach_forecast_artifact(month.days, local, p_ref_kw)
-            return
-        except (OSError, ValueError, WeatherError) as exc:
-            raise DispatchRunWarning(
-                f"{checkpoint_name}: local forecast sidecar is incompatible ({exc})"
-            ) from exc
-    raise DispatchRunWarning(
-        f"{checkpoint_name}: this older 17-input checkpoint is not self-contained. "
-        f"Copy user_data/forecasts/{basename} from the training computer, then retry. "
-        "Do not substitute newly invented forecasts for a scientific comparison."
-    )
+    Forecasts may still be used by external planners such as SADRBC, but they
+    are never appended to the canonical seven-eye BrainEnv observation.
+    """
+    del agent, month, p_ref_kw
+    if meta.get("obs_variant") == "fc":
+        raise DispatchRunWarning(
+            f"{checkpoint_name}: legacy forecast-eye checkpoints are incompatible "
+            "with the fixed 7-eye BrainEnv; retrain this policy"
+        )
 
 
 def forecast_portability_error(meta: dict) -> str | None:
-    if meta.get("obs_variant") != "fc" or meta.get("forecast_embedded"):
+    if meta.get("reference_env") == "ppo2_senior_15m_v1":
         return None
-    artifact_value = meta.get("forecast_artifact")
-    basename = Path(str(artifact_value or "forecast_missing.csv")).name
-    candidates = [FORECAST_DIR / basename]
-    if artifact_value:
-        configured = Path(str(artifact_value))
-        candidates.insert(0, configured if configured.is_absolute() else BASE_DIR / configured)
-    for candidate in candidates:
-        try:
-            if ensure_inside_sizing_demo(candidate).is_file():
-                return None
-        except ValueError:
-            continue
-    return (
-        f"Older 17-input checkpoint needs user_data/forecasts/{basename} "
-        "from its training computer."
-    )
+    obs_dim = meta.get("obs_dim")
+    if meta.get("obs_variant") == "fc":
+        return "Legacy forecast-eye checkpoint is incompatible with the fixed 7-eye BrainEnv; retrain it."
+    if obs_dim is not None and int(obs_dim) != OBSERVATION_DIM:
+        return (
+            f"Legacy {int(obs_dim)}-eye checkpoint is incompatible with the fixed "
+            f"{OBSERVATION_DIM}-eye BrainEnv; retrain it."
+        )
+    return None
 
 
 def run_policy_dispatch(
@@ -332,9 +302,7 @@ def run_policies(
         if checkpoint_name == "sadrbc_v13":
             continue
         try:
-            forecast_agent, _, forecast_meta = load_policy(
-                checkpoint_name, checkpoint_dir
-            )
+            _, _, forecast_meta = load_policy(checkpoint_name, checkpoint_dir)
             contract = forecast_meta.get("sadrbc_forecast", {}) or {}
             if contract and sadrbc_forecast_spec is None:
                 from bess.forecasting.sadrbc_forecast import SADRBCForecastSpec
@@ -349,16 +317,6 @@ def run_policies(
                 sadrbc_p_ref = float(
                     forecast_meta.get("p_ref_kw") or _policy_reference_kw(month)
                 )
-            if forecast_meta.get("obs_variant") != "fc":
-                continue
-            forecast_p_ref = float(
-                forecast_meta.get("p_ref_kw") or _policy_reference_kw(month)
-            )
-            prepare_policy_forecast(
-                checkpoint_name, forecast_agent, forecast_meta, month,
-                forecast_p_ref,
-            )
-            break
         except DispatchRunWarning:
             continue
     for policy_name in policy_names:

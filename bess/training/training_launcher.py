@@ -21,7 +21,6 @@ from bess.training.training_datasets import (
     require_min_days,
 )
 from bess.training.training_jobs import Job, JobManager
-from bess.forecasting.weather_forecast import forecast_artifact_path, weather_path, weather_status
 
 
 BASE_DIR = PROJECT_ROOT
@@ -186,7 +185,7 @@ def _training_tag(
     p_rated: float,
     algo: str,
     control_dt_minutes: int,
-    obs_variant: str = "base",
+    obs_variant: str = "brain7",
 ) -> str:
     explicit = sanitize_tag(payload.get("tag", ""))
     if explicit:
@@ -270,9 +269,18 @@ def build_training_command(
     else:
         val_days, test_days = _split_days(payload)
     dataset_id = str(payload.get("dataset_id", "dataset"))
-    obs_variant = str(payload.get("obs_variant", "base")).strip().lower()
-    if obs_variant not in {"base", "fc"}:
-        raise TrainingLaunchError("obs_variant must be base or fc")
+    default_obs_variant = "base" if algo == "ppo2" else "brain7"
+    obs_variant = str(payload.get("obs_variant", default_obs_variant)).strip().lower()
+    if algo == "ppo2":
+        if obs_variant != "base":
+            raise TrainingLaunchError(
+                "PPO2 senior-reference mode requires obs_variant=base"
+            )
+    elif obs_variant != "brain7":
+        raise TrainingLaunchError(
+            "The canonical BrainEnv has exactly seven eyes; use obs_variant=brain7. "
+            "Legacy base/fc observation contracts were removed."
+        )
     device = str(payload.get("device", "auto")).strip().lower()
     if device not in {"auto", "cpu", "cuda"}:
         raise TrainingLaunchError("Training device must be auto, cpu, or cuda")
@@ -285,8 +293,6 @@ def build_training_command(
         raise TrainingLaunchError(
             "PPO2 senior-reference mode requires the dataset itself and control interval to be exactly 15 minutes"
         )
-    if algo == "ppo2" and obs_variant != "base":
-        raise TrainingLaunchError("PPO2 senior-reference mode is forecast-free (obs_variant=base)")
     if algo == "ppo2" and device == "cuda":
         raise TrainingLaunchError("PPO2 senior-reference mode is CPU-only")
     tag = _training_tag(
@@ -325,13 +331,6 @@ def build_training_command(
     ]
     if algo != "ppo2":
         cmd.extend(["--oracle-cache", str(oracle_cache_path)])
-    if obs_variant == "fc":
-        status = weather_status(dataset_id)
-        if not status.get("ready"):
-            raise TrainingLaunchError(status.get("message") or "real weather is not ready")
-        weather_file = ensure_inside_base(weather_path(dataset_id), base_dir)
-        artifact = ensure_inside_base(forecast_artifact_path(tag), base_dir)
-        cmd.extend(["--weather-data", str(weather_file), "--forecast-artifact", str(artifact)])
     if algo == "ppo":
         gamma = _bounded_float(
             payload,

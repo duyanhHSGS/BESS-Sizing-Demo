@@ -289,11 +289,7 @@ def _build_rollouts(config: dict[str, Any], month: MonthData, progress: Callable
     control_minutes = validate_dispatch_sampling(meta, cfg.dt * 60.0)
     p_ref = float(meta.get("p_ref_kw") or _policy_reference_kw(month))
     weather_status = None
-    if meta.get("obs_variant") == "fc" and config.get("source_kind") == "thingsboard":
-        progress("Fetching real weather + generating causal forecasts", 0, len(month.days), config["policy"])
-        weather_status = shadow_weather.attach_live_forecasts(month.days, meta, p_ref)
-    else:
-        prepare_policy_forecast(config["policy"], agent, meta, month, p_ref)
+    prepare_policy_forecast(config["policy"], agent, meta, month, p_ref)
     policy = run_drl_policy(month, cfg, agent, p_ref_kw=p_ref)
     progress("Running shadow SADRBC", 0, len(month.days), "SADRBC v13")
     from bess.forecasting.sadrbc_forecast import SADRBCForecastSpec

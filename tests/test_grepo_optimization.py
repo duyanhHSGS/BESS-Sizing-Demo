@@ -8,9 +8,15 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from bess.core.bess_env import BESSEnv, REACTIVE_OBSERVATION_DIM
-from bess.core.common import load_system_config, make_bess_config
 from bess.agents.grepo_agent import GREPOAgent
+from bess.core.bess_env import OBSERVATION_DIM
+from bess.core.brain_runtime import (
+    BrainTrajectoryRecorder,
+    make_brain_env,
+    observation_array,
+    step_brain_control,
+)
+from bess.core.common import load_system_config, make_bess_config
 from bess.core.scenario_gen import DayData, MonthData
 
 
@@ -31,25 +37,37 @@ def _case(minutes=15):
     return cfg, MonthData(days=[day], source="grepo_test")
 
 
+def _make_env_factory(cfg):
+    def make_env(month, soc_init):
+        return make_brain_env(
+            month,
+            cfg,
+            power_scale_kw=1000.0,
+            initial_state_of_charge=soc_init,
+        )
+
+    return make_env
+
+
 class GREPOInferenceAndMathTests(unittest.TestCase):
-    def test_observation_and_network_contracts_are_unchanged(self):
-        agent = GREPOAgent(REACTIVE_OBSERVATION_DIM, device="cpu")
-        self.assertEqual(REACTIVE_OBSERVATION_DIM, 13)
-        self.assertEqual(agent.actor[0].in_features, 13)
+    def test_observation_and_network_contracts_are_brain7(self):
+        agent = GREPOAgent(OBSERVATION_DIM, device="cpu")
+        self.assertEqual(OBSERVATION_DIM, 7)
+        self.assertEqual(agent.actor[0].in_features, 7)
         self.assertEqual(agent.actor[0].out_features, 256)
         self.assertEqual(agent.actor[2].out_features, 128)
-        self.assertEqual(agent.critic[0].in_features, 13)
+        self.assertEqual(agent.critic[0].in_features, 7)
 
     def test_predict_action_matches_deterministic_act(self):
-        agent = GREPOAgent(REACTIVE_OBSERVATION_DIM, seed=7, device="cpu")
-        observation = np.linspace(-1.0, 1.0, REACTIVE_OBSERVATION_DIM, dtype=np.float32)
+        agent = GREPOAgent(OBSERVATION_DIM, seed=7, device="cpu")
+        observation = np.linspace(-1.0, 1.0, OBSERVATION_DIM, dtype=np.float32)
         expected, _, _ = agent.act(observation, deterministic=True)
         self.assertAlmostEqual(
             agent.predict_action(observation), expected, places=7
         )
 
     def test_vectorized_discounted_returns_match_scalar_reference(self):
-        agent = GREPOAgent(REACTIVE_OBSERVATION_DIM, gamma=0.97, device="cpu")
+        agent = GREPOAgent(OBSERVATION_DIM, gamma=0.97, device="cpu")
         rewards = np.random.default_rng(3).normal(
             size=(4, 37)
         ).astype(np.float32)
@@ -69,7 +87,7 @@ class GREPOInferenceAndMathTests(unittest.TestCase):
         )
 
     def test_normal_log_probability_matches_analytical_formula(self):
-        agent = GREPOAgent(REACTIVE_OBSERVATION_DIM, std=0.30, device="cpu")
+        agent = GREPOAgent(OBSERVATION_DIM, std=0.30, device="cpu")
         action = torch.tensor([[-0.7], [0.1], [1.2]], dtype=torch.float32)
         mean = torch.tensor([[-0.2], [0.0], [0.8]], dtype=torch.float32)
         expected = (
@@ -85,102 +103,101 @@ class GREPOInferenceAndMathTests(unittest.TestCase):
 class GREPOCollectorParityTests(unittest.TestCase):
     def test_lockstep_collector_matches_scalar_with_shared_noise(self):
         cfg, month = _case(minutes=15)
-
-        def make_env():
-            return BESSEnv(
-                cfg,
-                reference_power_kw=1000.0,
-                initial_running_peak_kw=300.0,
-                discount_factor=0.995,
-                control_interval_minutes=15.0,
-            )
-
+        make_env = _make_env_factory(cfg)
         agent = GREPOAgent(
-            REACTIVE_OBSERVATION_DIM, n_group=3, seed=11, epochs=1, device="cpu"
+            OBSERVATION_DIM, n_group=3, seed=11, epochs=1, device="cpu"
         )
         decisions = len(month.days[0].load)
         noise = np.random.default_rng(11).normal(
             size=(agent.n_group, decisions)
         ).astype(np.float32)
         optimized = agent.collect_group(
-            make_env, month, soc_init=0.55, d_run_init=300.0,
+            make_env,
+            month,
+            soc_init=0.55,
+            native_steps=1,
             noise_g=noise,
         )
         scalar = agent.collect_group_scalar_reference(
-            make_env, month, soc_init=0.55, d_run_init=300.0,
+            make_env,
+            month,
+            soc_init=0.55,
+            native_steps=1,
             noise_g=noise,
         )
         for actual, expected in zip(optimized, scalar):
             np.testing.assert_allclose(
                 actual, expected, rtol=0.0, atol=5e-6
             )
-        for actual_env, expected_env in zip(
-            agent._group_envs, agent._scalar_reference_envs
-        ):
-            self.assertAlmostEqual(actual_env.state_of_charge, expected_env.state_of_charge, places=6)
-            self.assertAlmostEqual(
-                actual_env.running_monthly_peak_kw,
-                expected_env.running_monthly_peak_kw,
-                delta=5e-6,
-            )
-            np.testing.assert_allclose(
-                actual_env.grid_import_history[0],
-                expected_env.grid_import_history[0],
-                rtol=0.0,
-                atol=5e-5,
-            )
 
-    def test_logging_disabled_preserves_physics_and_rewards(self):
+    def test_external_trajectory_recording_preserves_physics_and_rewards(self):
         cfg, month = _case(minutes=15)
-        recorded = BESSEnv(
-            cfg, reference_power_kw=1000.0, initial_running_peak_kw=300.0,
-            control_interval_minutes=15.0, record_trajectory=True,
+        recorded = make_brain_env(
+            month,
+            cfg,
+            power_scale_kw=1000.0,
+            initial_state_of_charge=0.55,
         )
-        unrecorded = BESSEnv(
-            cfg, reference_power_kw=1000.0, initial_running_peak_kw=300.0,
-            control_interval_minutes=15.0, record_trajectory=False,
+        unrecorded = make_brain_env(
+            month,
+            cfg,
+            power_scale_kw=1000.0,
+            initial_state_of_charge=0.55,
         )
-        obs_recorded = recorded.reset(month, initial_state_of_charge=0.55)
-        obs_unrecorded = unrecorded.reset(month, initial_state_of_charge=0.55)
+        obs_recorded = observation_array(recorded.reset())
+        obs_unrecorded = observation_array(unrecorded.reset())
         np.testing.assert_array_equal(obs_recorded, obs_unrecorded)
+
+        recorder = BrainTrajectoryRecorder(month, 0.55)
         actions = np.sin(
             np.linspace(0.0, 4.0 * np.pi, len(month.days[0].load))
         )
         for action in actions:
-            result_recorded = recorded.step(float(action))
-            result_unrecorded = unrecorded.step(float(action))
-            self.assertAlmostEqual(
-                result_recorded[1], result_unrecorded[1], places=12
+            recorded_transition = step_brain_control(
+                recorded,
+                float(action),
+                native_steps=1,
+                recorder=recorder,
             )
-            self.assertEqual(result_recorded[2], result_unrecorded[2])
-            for key in (
-                "grid_kw", "energy_delta", "peak_delta", "deg_cost",
-                "shaping", "d_run",
-            ):
-                self.assertAlmostEqual(
-                    result_recorded[3][key],
-                    result_unrecorded[3][key],
-                    places=12,
-                )
-            if not result_recorded[2]:
-                np.testing.assert_array_equal(
-                    result_recorded[0], result_unrecorded[0]
-                )
-        self.assertEqual(unrecorded.grid_import_history, [])
-        self.assertEqual(unrecorded.state_of_charge_history, [])
-        self.assertEqual(unrecorded.battery_power_history, [])
-        self.assertAlmostEqual(recorded.state_of_charge, unrecorded.state_of_charge, places=12)
-        self.assertAlmostEqual(recorded.running_monthly_peak_kw, unrecorded.running_monthly_peak_kw, places=12)
+            plain_transition = step_brain_control(
+                unrecorded,
+                float(action),
+                native_steps=1,
+            )
+            self.assertAlmostEqual(
+                recorded_transition.reward_vnd,
+                plain_transition.reward_vnd,
+                places=9,
+            )
+            self.assertEqual(recorded_transition.done, plain_transition.done)
+            self.assertAlmostEqual(
+                recorded.bess_world.state_of_charge,
+                unrecorded.bess_world.state_of_charge,
+                places=12,
+            )
+            self.assertAlmostEqual(
+                recorded.bess_world.meter_state.monthly_peak_kw,
+                unrecorded.bess_world.meter_state.monthly_peak_kw,
+                places=12,
+            )
+
+        self.assertTrue((recorder.grid_import_days[0] >= 0.0).all())
+        self.assertGreaterEqual(recorder.state_of_charge_days[0].min(), cfg.SOC_min - 1e-12)
+        self.assertLessEqual(recorder.state_of_charge_days[0].max(), cfg.SOC_max + 1e-12)
 
 
 class GREPOUpdateAndCheckpointTests(unittest.TestCase):
     def _finite_update_and_checkpoint(self, device):
         rng = np.random.default_rng(17)
         agent = GREPOAgent(
-            REACTIVE_OBSERVATION_DIM, n_group=2, seed=17, epochs=1, minibatch=16,
+            OBSERVATION_DIM,
+            n_group=2,
+            seed=17,
+            epochs=1,
+            minibatch=16,
             device=device,
         )
-        obs = rng.normal(size=(2, 24, REACTIVE_OBSERVATION_DIM)).astype(np.float32)
+        obs = rng.normal(size=(2, 24, OBSERVATION_DIM)).astype(np.float32)
         action = rng.normal(size=(2, 24)).astype(np.float32)
         mean = torch.zeros((48, 1), dtype=torch.float32)
         action_tensor = torch.from_numpy(action.reshape(48, 1))
@@ -193,7 +210,7 @@ class GREPOUpdateAndCheckpointTests(unittest.TestCase):
             for parameter in agent._params
         ))
 
-        agent.meta = {"contract": "unchanged"}
+        agent.meta = {"contract": "brain7", "obs_dim": OBSERVATION_DIM}
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "grepo.pt"
             agent.save(path)
@@ -206,9 +223,9 @@ class GREPOUpdateAndCheckpointTests(unittest.TestCase):
                 tensor.device.type == "cpu"
                 for tensor in checkpoint["actor"].values()
             ))
-            loaded = GREPOAgent(REACTIVE_OBSERVATION_DIM, device="cpu")
+            loaded = GREPOAgent(OBSERVATION_DIM, device="cpu")
             loaded.load(path)
-            probe = np.zeros(REACTIVE_OBSERVATION_DIM, dtype=np.float32)
+            probe = np.zeros(OBSERVATION_DIM, dtype=np.float32)
             self.assertEqual(
                 loaded.predict_action(probe), agent.predict_action(probe)
             )

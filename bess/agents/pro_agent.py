@@ -12,7 +12,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from bess.agents.ppo_agent import PPOAgent, RolloutBuffer
+from bess.agents.ppo_agent import (
+    PPOAgent,
+    RolloutBuffer,
+    _squashed_log_prob_from_latent,
+)
 from bess.core.settings import PPO_GAMMA, PPO_LAMBDA
 
 
@@ -23,9 +27,9 @@ class PROBuffer(RolloutBuffer):
         super().__init__(size, obs_dim)
         self.a_oracle = np.zeros((size, 1), np.float32)
 
-    def add(self, o, a, lp, r, v, d, a_oracle=0.0):
+    def add(self, o, a, lp, r, v, d, latent, a_oracle=0.0):
         index = self.ptr
-        super().add(o, a, lp, r, v, d)
+        super().add(o, a, lp, r, v, d, latent)
         self.a_oracle[index] = a_oracle
 
     def clear(self):
@@ -87,7 +91,7 @@ class PROAgent(PPOAgent):
         ret = adv + buf.val[:n]
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
         obs = torch.as_tensor(buf.obs[:n], device=self.device)
-        act = torch.as_tensor(buf.act[:n], device=self.device)
+        latent = torch.as_tensor(buf.latent[:n], device=self.device)
         logp_old = torch.as_tensor(buf.logp[:n], device=self.device)
         adv_t = torch.as_tensor(adv, device=self.device)
         ret_t = torch.as_tensor(ret, device=self.device)
@@ -110,7 +114,7 @@ class PROAgent(PPOAgent):
                     device=self.device,
                 )
                 dist = self.net.dist(obs[batch])
-                logp = dist.log_prob(act[batch]).sum(-1)
+                logp = _squashed_log_prob_from_latent(dist, latent[batch])
                 ratio = torch.exp(logp - logp_old[batch])
                 unclipped = ratio * adv_t[batch]
                 clipped = torch.clamp(
@@ -166,13 +170,6 @@ class PROAgent(PPOAgent):
             "oracle_coef": self.oracle_coef,
             "oracle_coef_decay": self.oracle_coef_decay,
         }
-        if self.forecast_bundle is not None:
-            payload["forecast_bundle"] = {
-                **self.forecast_bundle,
-                "values": torch.as_tensor(
-                    self.forecast_bundle["values"]
-                ).cpu(),
-            }
         torch.save(payload, path)
 
     def load(self, path):
@@ -180,7 +177,6 @@ class PROAgent(PPOAgent):
         if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
             self.net.load_state_dict(checkpoint["state_dict"])
             self.meta = checkpoint.get("meta", {}) or {}
-            self.forecast_bundle = checkpoint.get("forecast_bundle")
             self.oracle_coef = float(
                 checkpoint.get("oracle_coef", self.oracle_coef)
             )
@@ -192,6 +188,5 @@ class PROAgent(PPOAgent):
         else:
             self.net.load_state_dict(checkpoint)
             self.meta = {}
-            self.forecast_bundle = None
         self._sync_collector()
         self.net.eval()

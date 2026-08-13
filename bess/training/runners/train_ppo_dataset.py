@@ -10,8 +10,13 @@ from pathlib import Path
 import numpy as np
 
 from bess.evaluation.baselines import run_drl_policy, run_no_bess
-from bess.core.bess_env import BESSEnv
-from bess.evaluation.benchmark import _rolling_30_minute_average
+from bess.core.bess_env import OBSERVATION_DIM
+from bess.core.brain_runtime import (
+    make_brain_env,
+    native_steps_per_action,
+    observation_array,
+    step_brain_control,
+)
 from bess.core.common import RESULTS_DIR, score_month
 from bess.agents.ppo_agent import (
     PPOAgent,
@@ -29,7 +34,6 @@ from bess.training.training_common import (
 )
 from bess.training.training_reports import write_curve, write_report
 from bess.core.settings import PPO_GAMMA, PPO_LAMBDA
-from bess.forecasting.weather_forecast import build_forecast_bundle, fit_attach_forecasts
 
 
 ROLLOUT_DAYS = 32
@@ -83,9 +87,7 @@ def main() -> None:
     parser.add_argument("--oracle-cache", required=True)
     parser.add_argument("--val-days", type=int, default=30)
     parser.add_argument("--test-days", type=int, default=30)
-    parser.add_argument("--obs-variant", choices=("base", "fc"), default="base")
-    parser.add_argument("--weather-data", default="")
-    parser.add_argument("--forecast-artifact", default="")
+    parser.add_argument("--obs-variant", choices=("brain7",), default="brain7")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     args = parser.parse_args()
     if not math.isfinite(args.gamma) or not 0.0 < args.gamma <= 1.0:
@@ -110,19 +112,6 @@ def main() -> None:
     train_days = days[:-split_days]
     peak = max(float(day.load.max()) for day in days)
     p_ref = math.ceil(peak / 500.0) * 500.0
-    daily_peaks = [
-        max(_rolling_30_minute_average(np.maximum(0.0, day.load - day.pv), 24.0 / len(day.load)), default=0.0)
-        for day in train_days
-    ]
-    d_run0 = 0.5 * float(np.mean(daily_peaks))
-    forecast_model = None
-    if args.obs_variant == "fc":
-        if not args.weather_data or not args.forecast_artifact:
-            raise SystemExit("forecast mode requires --weather-data and --forecast-artifact")
-        forecast_model = fit_attach_forecasts(
-            days, Path(args.weather_data), len(train_days),
-            Path(args.forecast_artifact), p_ref,
-        )
 
     cfg, billing = build_training_bess_config(
         args.e_cap,
@@ -140,40 +129,28 @@ def main() -> None:
     train_months = month_blocks(train_days)
     val_month = MonthData(days=val_days, source="val")
     gamma = args.gamma
-    env = BESSEnv(
-        cfg,
-        reference_power_kw=p_ref,
-        initial_running_peak_kw=d_run0,
-        discount_factor=gamma,
-        control_interval_minutes=args.control_dt_minutes,
-        forecast_enabled=args.obs_variant == "fc",
-        degradation_cost_vnd_per_kwh=battery_wear_cost,
-        reward_mode="factory_dispatch_v1",
-    )
+    native_steps = native_steps_per_action(cfg.dt, args.control_dt_minutes)
     learner_device = resolve_ppo_device(args.device)
     agent = PPOAgent(
-        env.observation_dimensions,
+        OBSERVATION_DIM,
         gamma=gamma,
         lam=args.lambda_value,
         seed=args.seed,
         device=learner_device,
     )
-    assert env.discount_factor == agent.gamma
     agent.meta = {
         "p_ref_kw": p_ref,
         "e_cap_kwh": args.e_cap,
         "p_rated_kw": args.p_rated,
-        "obs_variant": args.obs_variant,
-        "obs_dim": env.observation_dimensions,
+        "obs_variant": "brain7",
+        "obs_dim": OBSERVATION_DIM,
         "battery_wear_cost": battery_wear_cost,
-        "reward_mode": env.reward_mode,
-        "inventory_value_vnd_per_stored_kwh": env._inventory_value_vnd_per_stored_kwh,
-        "d_run_init_kw": d_run0,
+        "reward_mode": "brain_savings_vnd_v1",
         "gamma": gamma,
         "lambda": args.lambda_value,
         "native_dt_minutes": csv_dt * 60.0,
-        "control_dt_minutes": env.control_interval_minutes,
-        "native_steps_per_action": env.native_samples_per_action,
+        "control_dt_minutes": args.control_dt_minutes,
+        "native_steps_per_action": native_steps,
         "billing_mode": billing,
         "device_requested": args.device,
         "device": learner_device,
@@ -182,15 +159,8 @@ def main() -> None:
         "train_csv": str(args.csv),
         "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
     }
-    if forecast_model:
-        agent.meta["forecast_model"] = forecast_model["model"]
-        agent.meta["forecast_artifact"] = forecast_model["artifact"]
-        agent.meta["forecast_model_artifact"] = forecast_model["model_artifact"]
-        agent.meta["weather_data"] = str(Path(args.weather_data))
-        agent.meta["forecast_embedded"] = True
-        agent.forecast_bundle = build_forecast_bundle(days)
-    decisions_per_day = len(days[0].load) // env.native_samples_per_action
-    buffer = RolloutBuffer(decisions_per_day * ROLLOUT_DAYS, env.observation_dimensions)
+    decisions_per_day = len(days[0].load) // native_steps
+    buffer = RolloutBuffer(decisions_per_day * ROLLOUT_DAYS, OBSERVATION_DIM)
 
     val_base = score_month(run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
     oracle_grids = load_cached_training_grids(
@@ -217,8 +187,7 @@ def main() -> None:
         "battery": {"e_cap_kwh": args.e_cap, "p_rated_kw": args.p_rated},
         "economics": {
             "battery_wear_cost": battery_wear_cost,
-            "reward_mode": env.reward_mode,
-            "inventory_value_vnd_per_stored_kwh": env._inventory_value_vnd_per_stored_kwh,
+            "reward_mode": "brain_savings_vnd_v1",
         },
         "training": {
             "requested_steps": args.steps,
@@ -227,14 +196,13 @@ def main() -> None:
             "lambda": args.lambda_value,
             "rollout_days": ROLLOUT_DAYS,
             "native_dt_minutes": csv_dt * 60.0,
-            "control_dt_minutes": env.control_interval_minutes,
-            "native_steps_per_action": env.native_samples_per_action,
+            "control_dt_minutes": args.control_dt_minutes,
+            "native_steps_per_action": native_steps,
             "device_requested": args.device,
             "device": learner_device,
         },
         "billing_mode": billing,
         "p_ref_kw": p_ref,
-        "d_run_init_kw": d_run0,
         "validation": {"no_bess_vnd": val_base, "oracle_vnd": val_oracle},
     }
     write_curve(curve_path, [])
@@ -244,8 +212,8 @@ def main() -> None:
         f"val {len(val_days)} / test {len(test_days)} | "
         f"gamma {gamma:g} | lambda {args.lambda_value:g} | "
         f"UI wear {battery_wear_cost:g} VND/kWh | "
-        f"learner {learner_device} (requested {args.device}) | "
-        f"native dt {csv_dt * 60:g}m | control dt {env.control_interval_minutes:g}m | "
+        f"learner {learner_device} (requested {args.device}) | BrainEnv eyes={OBSERVATION_DIM} | "
+        f"native dt {csv_dt * 60:g}m | control dt {args.control_dt_minutes:g}m | "
         f"p_ref {p_ref:.0f} | val no-BESS {val_base/1e6:.0f}M, oracle {val_oracle/1e6:.0f}M",
         flush=True,
     )
@@ -292,29 +260,49 @@ def main() -> None:
         for key in perf:
             perf[key] = 0 if key in ("decisions", "native_rows") else 0.0
 
+    def make_training_env(month):
+        return make_brain_env(
+            month,
+            cfg,
+            power_scale_kw=p_ref,
+            battery_wear_vnd_per_kwh=battery_wear_cost,
+        )
+
     month_index = 0
     augment_started = time.perf_counter()
-    first_month = train_months[0] if args.obs_variant == "fc" else augment_month(train_months[0], rng)
+    first_month = augment_month(train_months[0], rng)
     perf["augment"] += time.perf_counter() - augment_started
-    obs = env.reset(first_month)
+    env = make_training_env(first_month)
+    obs = observation_array(env.reset())
     steps = 0
     updates = 0
     started = time.time()
     rollout_started = time.perf_counter()
     while steps < args.steps:
         action, logp, latent, value = agent.act_with_latent(obs)
-        next_obs, reward, done, step_info = env.step(action)
+        transition = step_brain_control(
+            env,
+            action,
+            native_steps=native_steps,
+        )
+        done = transition.done
+        reward = transition.reward_million_vnd
         buffer.add(obs, action, logp, reward, value, float(done), latent=latent)
         steps += 1
         perf["decisions"] += 1
-        perf["native_rows"] += int(step_info["native_rows"])
+        perf["native_rows"] += len(transition.native_results)
         if done:
             month_index += 1
             augment_started = time.perf_counter()
             source_month = train_months[month_index % len(train_months)]
-            next_month = source_month if args.obs_variant == "fc" else augment_month(source_month, rng)
+            next_month = augment_month(source_month, rng)
             perf["augment"] += time.perf_counter() - augment_started
-            next_obs = env.reset(next_month)
+            env = make_training_env(next_month)
+            next_obs = observation_array(env.reset())
+        else:
+            if transition.next_observation is None:
+                raise RuntimeError("BrainEnv omitted next observation before episode end")
+            next_obs = observation_array(transition.next_observation)
         obs = next_obs
         if not buffer.full():
             continue
@@ -386,7 +374,7 @@ def main() -> None:
     persist_progress()
 
     test_month = MonthData(days=test_days, source="test")
-    best_agent = PPOAgent(env.observation_dimensions, device=learner_device)
+    best_agent = PPOAgent(OBSERVATION_DIM, device=learner_device)
     best_agent.load(RESULTS_DIR / f"policy_{tag}.pt")
     result = run_drl_policy(test_month, cfg, best_agent, p_ref_kw=p_ref)
     test_operating = _score_ppo_operating_month(

@@ -23,17 +23,21 @@ from pathlib import Path
 
 import numpy as np
 
+from bess.core.bess_env import OBSERVATION_DIM
+from bess.core.brain_runtime import (
+    make_brain_env,
+    native_steps_per_action,
+    observation_array,
+    step_brain_control,
+)
 from bess.core.common import RESULTS_DIR, score_month
-from bess.evaluation.benchmark import _rolling_30_minute_average
 from bess.core.scenario_gen import MonthData, DayData
-from bess.core.bess_env import BESSEnv
 from bess.agents.pro_agent import PROAgent, PROBuffer
 from bess.evaluation.baselines import run_no_bess, run_drl_policy
 from bess.evaluation.oracle.oracle_cache import load_cached_training_grids
 from bess.training.training_common import build_training_bess_config, load_training_days
 from bess.training.training_reports import write_curve, write_report
 from bess.core.settings import PPO_GAMMA
-from bess.forecasting.weather_forecast import build_forecast_bundle, fit_attach_forecasts
 
 VAL_EVERY = 10
 LOG_EVERY_ITERS = 4
@@ -103,9 +107,7 @@ def main():
                     help="Number of CSV days reserved for validation.")
     ap.add_argument("--test-days", type=int, default=30,
                     help="Number of CSV days reserved for test holdout.")
-    ap.add_argument("--obs-variant", choices=("base", "fc"), default="base")
-    ap.add_argument("--weather-data", default="")
-    ap.add_argument("--forecast-artifact", default="")
+    ap.add_argument("--obs-variant", choices=("brain7",), default="brain7")
     args = ap.parse_args()
     if not np.isfinite(args.gamma) or not 0.0 < args.gamma <= 1.0:
         raise SystemExit("gamma must be finite and in (0, 1]")
@@ -130,26 +132,7 @@ def main():
 
     peak = max(float(d.load.max()) for d in csv_days)
     p_ref = math.ceil(peak / 500.0) * 500.0
-    peaks = [
-        max(_rolling_30_minute_average(
-            np.maximum(0, d.load - d.pv), cfg.dt
-        ), default=0.0)
-        for d in csv_days[:-split_days]
-    ]
-    d_run0 = 0.5 * float(np.mean(peaks))
     train_days = csv_days[:-split_days]
-
-    # --- forecast model (optional) -----------------------------------------
-    forecast_model = None
-    if args.obs_variant == "fc":
-        if not args.weather_data or not args.forecast_artifact:
-            raise SystemExit(
-                "forecast mode requires --weather-data and --forecast-artifact"
-            )
-        forecast_model = fit_attach_forecasts(
-            csv_days, Path(args.weather_data), len(train_days),
-            Path(args.forecast_artifact), p_ref,
-        )
 
     # --- build oracle lookup -----------------------------------------------
     all_train_indexes = [int(d.day_index) for d in train_days]
@@ -160,19 +143,20 @@ def main():
     tag = args.tag or f"pro_{cfg.E_cap:.0f}kwh_{cfg.P_rated_nominal:.0f}kw"
 
     # --- environment & agent -----------------------------------------------
-    make_env = lambda: BESSEnv(  # noqa: E731
-        cfg,
-        reference_power_kw=p_ref,
-        discount_factor=args.gamma,
-        control_interval_minutes=args.control_dt_minutes,
-        forecast_enabled=args.obs_variant == "fc",
-        record_trajectory=False,
-    )
-    control_probe = make_env()
-    native_steps = len(train_days[0].load)
-    decisions_per_day = native_steps // control_probe.native_samples_per_action
+    native_rows_per_day = len(train_days[0].load)
+    native_hold_steps = native_steps_per_action(cfg.dt, args.control_dt_minutes)
+    decisions_per_day = native_rows_per_day // native_hold_steps
+
+    def make_env(month, soc_init):
+        return make_brain_env(
+            month,
+            cfg,
+            power_scale_kw=p_ref,
+            initial_state_of_charge=soc_init,
+        )
+
     agent = PROAgent(
-        control_probe.observation_dimensions,
+        OBSERVATION_DIM,
         oracle_coef=args.oracle_coef,
         oracle_coef_decay=args.oracle_decay,
         seed=args.seed,
@@ -187,23 +171,14 @@ def main():
         "p_rated_kw": cfg.P_rated_nominal,
         "billing_mode": billing_mode,
         "gamma": args.gamma,
-        "obs_variant": args.obs_variant,
-        "obs_dim": control_probe.observation_dimensions,
+        "obs_variant": "brain7",
+        "obs_dim": OBSERVATION_DIM,
         "native_dt_minutes": cfg.dt * 60.0,
         "control_dt_minutes": args.control_dt_minutes,
+        "native_steps_per_action": native_hold_steps,
         "oracle_coef": args.oracle_coef,
         "oracle_coef_decay": args.oracle_decay,
     }
-    if forecast_model:
-        agent.meta["forecast_model"] = forecast_model["model"]
-        agent.meta["forecast_artifact"] = forecast_model["artifact"]
-        agent.meta["forecast_model_artifact"] = forecast_model["model_artifact"]
-        agent.meta["weather_data"] = str(Path(args.weather_data))
-        agent.meta["forecast_embedded"] = True
-        agent.forecast_bundle = build_forecast_bundle(csv_days)
-    if d_run0 is not None:
-        agent.meta["d_run_init_kw"] = d_run0
-    agent.meta["native_steps_per_action"] = control_probe.native_samples_per_action
 
     # --- validation baselines ----------------------------------------------
     val_base = score_month(
@@ -245,8 +220,8 @@ def main():
             "seed": args.seed,
             "gamma": args.gamma,
             "native_dt_minutes": cfg.dt * 60.0,
-            "control_dt_minutes": control_probe.control_interval_minutes,
-            "native_steps_per_action": control_probe.native_samples_per_action,
+            "control_dt_minutes": args.control_dt_minutes,
+            "native_steps_per_action": native_hold_steps,
             "device_requested": args.device,
             "device": str(agent.device),
             "oracle_coef": args.oracle_coef,
@@ -254,7 +229,6 @@ def main():
         },
         "billing_mode": billing_mode,
         "p_ref_kw": p_ref,
-        "d_run_init_kw": d_run0,
         "validation": {"no_bess_vnd": val_base, "oracle_vnd": val_oracle},
     }
 
@@ -275,8 +249,8 @@ def main():
     print(
         f"[pro] config {tag} | gamma={args.gamma:g} | "
         f"oracle_coef={args.oracle_coef:g} decay={args.oracle_decay:g} | "
-        f"learner={agent.device} (requested {args.device}) | "
-        f"native dt {cfg.dt * 60:g}m | control dt {control_probe.control_interval_minutes:g}m | "
+        f"learner={agent.device} (requested {args.device}) | BrainEnv eyes={OBSERVATION_DIM} | "
+        f"native dt {cfg.dt * 60:g}m | control dt {args.control_dt_minutes:g}m | "
         f"val no-BESS {val_base/1e6:.1f}M, oracle {val_oracle/1e6:.1f}M VND",
         flush=True,
     )
@@ -286,7 +260,7 @@ def main():
     t0 = time.time()
     steps = 0
     rng = np.random.default_rng(args.seed)
-    buf = PROBuffer(decisions_per_day, control_probe.observation_dimensions)
+    buf = PROBuffer(decisions_per_day, OBSERVATION_DIM)
 
     for it in range(args.iters):
         # Sample a random training day
@@ -301,12 +275,12 @@ def main():
             )
         else:
             # Day missing from oracle cache — treat as having no oracle signal.
-            oracle_actions_native = np.zeros(native_steps, dtype=np.float32)
+            oracle_actions_native = np.zeros(native_rows_per_day, dtype=np.float32)
 
         # Down-sample oracle actions to match the control interval.
         # The oracle action for a control step is the mean over its native sub-steps
         # (all sub-steps inside one control interval share the same decision).
-        interval = control_probe.native_samples_per_action
+        interval = native_hold_steps
         oracle_actions = np.array([
             float(np.clip(oracle_actions_native[i * interval:(i + 1) * interval].mean(),
                           -1.0, 1.0))
@@ -315,33 +289,40 @@ def main():
 
         # --- rollout -------------------------------------------------------
         rollout_started = time.perf_counter()
-        env = make_env()
         episode = MonthData(days=[day], source="pro_day")
         soc_init = float(rng.uniform(cfg.SOC_min + cfg.SOC_safety,
                                      cfg.SOC_max))
-        if d_run0 is not None:
-            d_run_init = float(d_run0 * rng.uniform(0.8, 1.5))
-        else:
-            d_run_init = float(rng.uniform(0.5, 0.9) * p_ref)
-        env.initial_running_peak_kw = d_run_init
-        obs = env.reset(episode, soc_init=soc_init)
+        env = make_env(episode, soc_init)
+        obs = observation_array(env.reset())
         done = False
         decision_idx = 0
         buf.clear()
         while not done:
-            a, logp, v = agent.act(obs, deterministic=False)
+            current_obs = obs
+            a, logp, latent, v = agent.act_with_latent(
+                current_obs, deterministic=False
+            )
             a_oracle = float(oracle_actions[decision_idx])
-            obs, reward, done, info = env.step(a)
-            native_rows = int(info.get("native_rows", 1))
-            # Only store one entry per decision; step() handles sub-stepping
-            buf.add(obs if not done else np.zeros_like(obs),
+            transition = step_brain_control(
+                env,
+                a,
+                native_steps=native_hold_steps,
+            )
+            done = transition.done
+            reward = transition.reward_million_vnd
+            buf.add(current_obs,
                     np.array([a], dtype=np.float32),
                     logp, reward, v,
                     1.0 if done else 0.0,
+                    latent,
                     a_oracle)
+            if not done:
+                if transition.next_observation is None:
+                    raise RuntimeError("BrainEnv omitted next observation before episode end")
+                obs = observation_array(transition.next_observation)
             decision_idx += 1
             steps += 1
-            perf["_native_rows"] += native_rows
+            perf["_native_rows"] += len(transition.native_results)
             perf["_decisions"] += 1
             perf["_samples"] += 1
         last_val = 0.0  # episode terminated at buf.ptr
@@ -406,8 +387,6 @@ def main():
                 "e_cap_kwh": cfg.E_cap,
                 "p_rated_kw": cfg.P_rated_nominal,
             }
-            if d_run0 is not None:
-                agent.meta["d_run_init_kw"] = d_run0
             io_started = time.perf_counter()
             agent.save(RESULTS_DIR / f"policy_{tag}.pt")
             perf["checkpoint_report_io_seconds"] += (
@@ -424,7 +403,7 @@ def main():
     test_days = csv_days[-args.test_days:]
     test_month = MonthData(days=test_days, source="csv_test")
     best_agent = PROAgent(
-        control_probe.observation_dimensions,
+        OBSERVATION_DIM,
         oracle_coef=0.0,  # no oracle needed for test inference
         seed=args.seed,
         gamma=args.gamma,

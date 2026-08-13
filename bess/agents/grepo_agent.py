@@ -24,6 +24,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from bess.core.brain_runtime import observation_array, step_brain_control
+
 torch.set_num_threads(2)
 
 def _mlp(inp, out, h1=256, h2=128):
@@ -70,8 +72,6 @@ class GREPOAgent:
         with torch.random.fork_rng(devices=[]):
             self.collector_actor = _mlp(obs_dim, 1).cpu()
         self._sync_collector_actor()
-        self._group_envs = []
-        self._group_env_factory = None
         self._scalar_reference_envs = []
         self.n_group = n_group
         self.gamma, self.std, self.beta = gamma, std, beta
@@ -79,7 +79,6 @@ class GREPOAgent:
         self.vf_coef = vf_coef
         self.obs_dim = obs_dim
         self.meta = {}
-        self.forecast_bundle = None
         self.last_collect_stats = {}
         self.last_update_stats = {}
 
@@ -135,19 +134,12 @@ class GREPOAgent:
         return d.log_prob(a).sum(-1)
 
     # ------------------------------------------------------------------
-    def _ensure_group_envs(self, make_env):
-        if (
-            self._group_env_factory is not make_env
-            or len(self._group_envs) != self.n_group
-        ):
-            self._group_envs = [make_env() for _ in range(self.n_group)]
-            self._group_env_factory = make_env
-        return self._group_envs
-
     @staticmethod
-    def _decision_count(env, month) -> int:
+    def _decision_count(month, native_steps: int) -> int:
         native_rows = sum(len(day.load) for day in month.days)
-        interval = int(env.native_samples_per_action)
+        interval = int(native_steps)
+        if interval <= 0:
+            raise ValueError("native_steps must be greater than 0")
         if native_rows % interval:
             raise ValueError(
                 "episode native rows must be divisible by the control interval"
@@ -168,32 +160,48 @@ class GREPOAgent:
             )
         return noise
 
-    def collect_group(self, make_env, month, soc_init=None,
-                      d_run_init=None, noise_g=None,
-                      residual_limit=None):
-        """Rollout N_g episodes on the SAME episode data (identical exogenous
-        trajectory + initial state; Sec 2.2.2.2). Per the paper, an episode
-        is one day at the dataset's configured dynamic resolution; pass a
-        1-day MonthData. Returns stacked arrays [N_g, T, ...]."""
-        started = time.perf_counter()
-        envs = self._ensure_group_envs(make_env)
-        observations = [None] * self.n_group
-        for group_index, env in enumerate(envs):
-            if d_run_init is not None:
-                env.initial_running_peak_kw = float(d_run_init)
-            if residual_limit is not None and hasattr(env, "residual_limit"):
-                env.residual_limit = float(residual_limit)
-            shared_static = (
-                envs[0]._static_observation_cache
-                if group_index > 0 and not env.forecast_enabled
-                else None
-            )
-            observations[group_index] = env.reset(
-                month, initial_state_of_charge=soc_init,
-                static_observation_cache=shared_static,
-            )
+    def collect_group(
+        self,
+        make_env,
+        month,
+        soc_init=None,
+        noise_g=None,
+        *,
+        native_steps: int = 1,
+        baseline_actions=None,
+        baseline_costs=None,
+        residual_limit: float = 1.0,
+    ):
+        """Roll out a lockstep group on canonical episode-owned ``BrainEnv`` values.
 
-        decisions = self._decision_count(envs[0], month)
+        ``make_env(month, soc_init)`` must return a fresh configured ``BrainEnv``.
+        Optional baseline actions/costs keep GrePRO residual composition outside
+        the environment instead of subclassing or extending the seven-eye contract.
+        """
+        started = time.perf_counter()
+        decisions = self._decision_count(month, native_steps)
+        envs = [make_env(month, soc_init) for _ in range(self.n_group)]
+        observations = [observation_array(env.reset()) for env in envs]
+
+        baseline_action_values = None
+        if baseline_actions is not None:
+            baseline_action_values = np.asarray(baseline_actions, dtype=np.float64)
+            if baseline_action_values.shape != (decisions,):
+                raise ValueError(
+                    f"baseline_actions must have shape ({decisions},), "
+                    f"got {baseline_action_values.shape}"
+                )
+        baseline_cost_values = None
+        if baseline_costs is not None:
+            baseline_cost_values = np.asarray(baseline_costs, dtype=np.float64)
+            if baseline_cost_values.shape != (decisions,):
+                raise ValueError(
+                    f"baseline_costs must have shape ({decisions},), "
+                    f"got {baseline_cost_values.shape}"
+                )
+        if baseline_cost_values is not None and baseline_action_values is None:
+            raise ValueError("baseline_costs require baseline_actions")
+
         noise = self._prepare_noise(decisions, noise_g=noise_g)
         obs_g = np.empty(
             (self.n_group, decisions, self.obs_dim), dtype=np.float32
@@ -206,6 +214,8 @@ class GREPOAgent:
 
         for t in range(decisions):
             for group_index, observation in enumerate(observations):
+                if observation is None:
+                    raise RuntimeError("GREPO environment completed before its decision horizon")
                 obs_batch[group_index] = observation
             obs_g[:, t, :] = obs_batch
             with torch.inference_mode():
@@ -219,17 +229,44 @@ class GREPOAgent:
 
             completed = 0
             for group_index, env in enumerate(envs):
-                observation, reward, done, info = env.step(
-                    float(np.clip(raw_np[group_index], -1.0, 1.0))
+                policy_action = float(np.clip(raw_np[group_index], -1.0, 1.0))
+                if baseline_action_values is None:
+                    final_action = policy_action
+                else:
+                    final_action = float(np.clip(
+                        baseline_action_values[t]
+                        + float(residual_limit) * policy_action,
+                        -1.0,
+                        1.0,
+                    ))
+
+                transition = step_brain_control(
+                    env,
+                    final_action,
+                    native_steps=native_steps,
                 )
-                observations[group_index] = observation
-                rew_g[group_index, t] = reward
-                native_rows += int(info.get("native_rows", 0))
-                completed += int(done)
+                native_rows += len(transition.native_results)
+                if baseline_cost_values is None:
+                    reward = transition.reward_million_vnd
+                else:
+                    hybrid_cost_vnd = sum(
+                        result.bess.cost.operating_cost_vnd
+                        for result in transition.native_results
+                    )
+                    reward = (baseline_cost_values[t] - hybrid_cost_vnd) / 1_000_000.0
+                rew_g[group_index, t] = float(reward)
+                observations[group_index] = (
+                    None
+                    if transition.done
+                    else observation_array(transition.next_observation)
+                )
+                completed += int(transition.done)
+
             if completed and (completed != self.n_group or t != decisions - 1):
                 raise RuntimeError(
                     "lockstep GREPO environments completed inconsistently"
                 )
+
         if any(observation is not None for observation in observations):
             raise RuntimeError("GREPO episode did not complete at its horizon")
 
@@ -243,13 +280,39 @@ class GREPOAgent:
         return obs_g, act_g, logp_g, rew_g
 
     def collect_group_scalar_reference(
-            self, make_env, month, soc_init=None, d_run_init=None,
-            noise_g=None):
-        """Unoptimized parity reference for tests; not used by training."""
-        envs = [make_env() for _ in range(self.n_group)]
+        self,
+        make_env,
+        month,
+        soc_init=None,
+        noise_g=None,
+        *,
+        native_steps: int = 1,
+        baseline_actions=None,
+        baseline_costs=None,
+        residual_limit: float = 1.0,
+    ):
+        """Unoptimized parity reference using the same canonical BrainEnv contract."""
+        envs = [make_env(month, soc_init) for _ in range(self.n_group)]
         self._scalar_reference_envs = envs
-        decisions = self._decision_count(envs[0], month)
+        decisions = self._decision_count(month, native_steps)
         noise = self._prepare_noise(decisions, noise_g=noise_g)
+        baseline_action_values = (
+            None
+            if baseline_actions is None
+            else np.asarray(baseline_actions, dtype=np.float64)
+        )
+        baseline_cost_values = (
+            None
+            if baseline_costs is None
+            else np.asarray(baseline_costs, dtype=np.float64)
+        )
+        if baseline_action_values is not None and baseline_action_values.shape != (decisions,):
+            raise ValueError("baseline_actions length does not match decision horizon")
+        if baseline_cost_values is not None and baseline_cost_values.shape != (decisions,):
+            raise ValueError("baseline_costs length does not match decision horizon")
+        if baseline_cost_values is not None and baseline_action_values is None:
+            raise ValueError("baseline_costs require baseline_actions")
+
         obs_g = np.empty(
             (self.n_group, decisions, self.obs_dim), dtype=np.float32
         )
@@ -257,9 +320,7 @@ class GREPOAgent:
         logp_g = np.empty((self.n_group, decisions), dtype=np.float32)
         rew_g = np.empty((self.n_group, decisions), dtype=np.float32)
         for group_index, env in enumerate(envs):
-            if d_run_init is not None:
-                env.initial_running_peak_kw = float(d_run_init)
-            obs = env.reset(month, initial_state_of_charge=soc_init)
+            obs = observation_array(env.reset())
             for t in range(decisions):
                 obs_g[group_index, t] = obs
                 with torch.inference_mode():
@@ -270,14 +331,37 @@ class GREPOAgent:
                 raw_value = float(raw.item())
                 act_g[group_index, t] = raw_value
                 logp_g[group_index, t] = float(logp.item())
-                obs, reward, done, _ = env.step(
-                    float(np.clip(raw_value, -1.0, 1.0))
+                policy_action = float(np.clip(raw_value, -1.0, 1.0))
+                if baseline_action_values is None:
+                    final_action = policy_action
+                else:
+                    final_action = float(np.clip(
+                        baseline_action_values[t]
+                        + float(residual_limit) * policy_action,
+                        -1.0,
+                        1.0,
+                    ))
+                transition = step_brain_control(
+                    env,
+                    final_action,
+                    native_steps=native_steps,
                 )
-                rew_g[group_index, t] = reward
+                if baseline_cost_values is None:
+                    reward = transition.reward_million_vnd
+                else:
+                    hybrid_cost_vnd = sum(
+                        result.bess.cost.operating_cost_vnd
+                        for result in transition.native_results
+                    )
+                    reward = (baseline_cost_values[t] - hybrid_cost_vnd) / 1_000_000.0
+                rew_g[group_index, t] = float(reward)
+                done = transition.done
                 if done != (t == decisions - 1):
                     raise RuntimeError(
                         "scalar GREPO reference completed unexpectedly"
                     )
+                if not done:
+                    obs = observation_array(transition.next_observation)
         return obs_g, act_g, logp_g, rew_g
 
     # ------------------------------------------------------------------
@@ -397,11 +481,6 @@ class GREPOAgent:
                    "critic": critic_state,
                    "obs_dim": self.obs_dim, "std": self.std,
                    "algo": "grepo", "meta": dict(self.meta)}
-        if self.forecast_bundle is not None:
-            payload["forecast_bundle"] = {
-                **self.forecast_bundle,
-                "values": torch.as_tensor(self.forecast_bundle["values"]).cpu(),
-            }
         torch.save(payload, path)
 
     def load(self, path):
@@ -409,7 +488,6 @@ class GREPOAgent:
         self.actor.load_state_dict(ck["actor"])
         self.critic.load_state_dict(ck["critic"])
         self.meta = ck.get("meta", {}) or {}
-        self.forecast_bundle = ck.get("forecast_bundle")
         self.actor.eval()
         self.critic.eval()
         self._sync_collector_actor()

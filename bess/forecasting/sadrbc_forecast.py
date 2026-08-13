@@ -1,23 +1,26 @@
-"""Causal/declared-noisy SADRBC baseline and GrePRO residual environment.
+"""Causal/declared-noisy SADRBC planning and baseline rollouts.
 
-SADRBC never receives the exact future trajectory here.  When portable real
+SADRBC never receives the exact future trajectory here. When portable real
 weather forecasts are attached to DayData, the planner consumes their causal
-next-1h/following-2h outputs and replans hourly.  The remaining horizon (or
-the entire horizon when no real artifact exists) uses explicitly declared,
-deterministic AR(1) forecast errors.
+next-1h/following-2h outputs and replans hourly. The battery rollout itself is
+always executed by the canonical seven-eye ``BrainEnv``.
 """
 from __future__ import annotations
 
 import copy
 import hashlib
-import threading
 from dataclasses import dataclass
 
 import numpy as np
 
-from bess.core.bess_env import BESSEnv
-from bess.core.scenario_gen import MonthData
 from bess.agents.sadrbc import phase3_strategic_plan
+from bess.core.brain_runtime import (
+    BrainTrajectoryRecorder,
+    make_brain_env,
+    native_steps_per_action,
+    step_brain_control,
+)
+from bess.core.scenario_gen import MonthData
 
 
 DEFAULT_FORECAST_SEED = 13_0013
@@ -131,33 +134,36 @@ def build_sadrbc_forecast_baseline(
     p_ref_kw: float,
     control_dt_minutes: float | None = None,
     soc_init: float | None = None,
-    d_run_init_kw: float | None = None,
     spec: SADRBCForecastSpec | None = None,
 ) -> BaselineRollout:
+    """Plan with SADRBC forecasts and execute every battery step in ``BrainEnv``."""
     spec = spec or SADRBCForecastSpec()
     cfg_copy = copy.copy(cfg)
-    env = BESSEnv(
+    initial_soc = float(cfg_copy.SOC_eod if soc_init is None else soc_init)
+    env = make_brain_env(
+        month,
         cfg_copy,
-        reference_power_kw=p_ref_kw,
-        control_interval_minutes=control_dt_minutes,
-        record_trajectory=True,
+        power_scale_kw=p_ref_kw,
+        initial_state_of_charge=initial_soc,
     )
-    env.initial_running_peak_kw = float(
-        d_run_init_kw if d_run_init_kw is not None else cfg_copy.P_target_user
-    )
-    observation = env.reset(month, initial_state_of_charge=soc_init)
-    del observation
+    env.reset()
+    recorder = BrainTrajectoryRecorder(month, initial_soc)
+    native_hold_steps = native_steps_per_action(cfg_copy.dt, control_dt_minutes)
+
     noisy_days = _declared_noisy_days(month, spec)
     actions = [np.zeros(len(day.load), dtype=np.float64) for day in month.days]
     decision_costs: list[float] = []
-    schedule = None
+    schedule: np.ndarray | None = None
     done = False
     replan_steps = max(1, round(spec.replan_minutes / (cfg_copy.dt * 60.0)))
+    steps_per_day = len(month.days[0].load)
 
     while not done:
-        day_index = env.current_day_index
-        native_step = env.current_timestep_index
+        flat_index = env.bess_world.timestep_index
+        day_index = flat_index // steps_per_day
+        native_step = flat_index % steps_per_day
         day = month.days[day_index]
+
         if schedule is None or native_step % replan_steps == 0:
             fc_load, fc_pv = _forecast_at(
                 day, *noisy_days[day_index], native_step, p_ref_kw
@@ -172,165 +178,50 @@ def build_sadrbc_forecast_baseline(
                 fc_pv,
                 day.day_type,
                 next_type,
-                PMax_running_month=env.running_monthly_peak_kw,
+                PMax_running_month=env.bess_world.meter_state.monthly_peak_kw,
                 plan_timestamp=day.date_iso,
                 cfg=cfg_copy,
                 t_start=native_step,
-                SOC_start=env.state_of_charge,
+                SOC_start=env.bess_world.state_of_charge,
             )
             schedule = np.asarray(plan["execution"]["p_plan"], dtype=np.float64)
+
         action = float(np.clip(
-            schedule[native_step] / max(cfg_copy.P_rated_nominal, 1e-9), -1.0, 1.0
+            schedule[native_step] / max(cfg_copy.P_rated_nominal, 1e-9),
+            -1.0,
+            1.0,
         ))
-        end = min(len(actions[day_index]), native_step + env.native_samples_per_action)
+        end = min(len(actions[day_index]), native_step + native_hold_steps)
         actions[day_index][native_step:end] = action
-        _, _, done, info = env.step(action)
-        decision_costs.append(float(
-            info["energy_cost"] + info["peak_pen"] + info["deg_cost"]
-        ))
-        if done or env.current_day_index != day_index:
+
+        transition = step_brain_control(
+            env,
+            action,
+            native_steps=native_hold_steps,
+            recorder=recorder,
+        )
+        decision_costs.append(float(sum(
+            result.bess.cost.operating_cost_vnd for result in transition.native_results
+        )))
+        done = transition.done
+
+        if done:
             schedule = None
-            if (
-                not done
-                and (month.days[env.current_day_index].day_index - 1) % 30 == 0
-            ):
-                env.running_monthly_peak_kw = env.initial_running_peak_kw
-                env.no_bess_running_monthly_peak_kw = env.initial_running_peak_kw
+        else:
+            next_flat_index = env.bess_world.timestep_index
+            next_day_index = next_flat_index // steps_per_day
+            if next_day_index != day_index:
+                schedule = None
 
     return BaselineRollout(
         actions=actions,
         decision_costs=decision_costs,
-        p_grid_days=[row.copy() for row in env.grid_import_history],
-        soc_days=[row.copy() for row in env.state_of_charge_history],
-        p_bess_days=[row.copy() for row in env.battery_power_history],
+        p_grid_days=[row.copy() for row in recorder.grid_import_days],
+        soc_days=[row.copy() for row in recorder.state_of_charge_days],
+        p_bess_days=[row.copy() for row in recorder.battery_power_days],
         mode=_forecast_mode(month),
         spec=spec,
     )
-
-
-_BASELINE_CACHE: dict[tuple, BaselineRollout] = {}
-_BASELINE_CACHE_LOCK = threading.Lock()
-
-
-class SADRBCResidualEnv(BESSEnv):
-    """GrePRO learns a bounded correction around a causal SADRBC action."""
-
-    def __init__(self, *args, residual_limit: float = DEFAULT_RESIDUAL_LIMIT,
-                 forecast_spec: SADRBCForecastSpec | None = None, **kwargs):
-        super().__init__(*args, extra_observation_dimensions=1, **kwargs)
-        self.residual_limit = float(residual_limit)
-        self.forecast_spec = forecast_spec or SADRBCForecastSpec()
-        self._baseline: BaselineRollout | None = None
-        self._baseline_decision = 0
-
-    def reset(self, month_data: MonthData, initial_state_of_charge: float | None = None,
-              static_observation_cache: np.ndarray | None = None) -> np.ndarray:
-        starting_state_of_charge = float(
-            initial_state_of_charge
-            if initial_state_of_charge is not None
-            else self.config.SOC_eod
-        )
-        key = (
-            id(month_data),
-            round(starting_state_of_charge, 8),
-            round(float(self.initial_running_peak_kw), 8),
-            self.steps_per_day,
-            self.control_interval_minutes,
-            round(self.reference_power_kw, 8),
-            round(float(self.config.E_cap), 8),
-            round(float(self.config.P_rated_nominal), 8),
-            self.forecast_spec.seed,
-            self.forecast_spec.load_sigma,
-            self.forecast_spec.pv_sigma,
-            self.forecast_spec.rho,
-            self.forecast_spec.replan_minutes,
-            self.forecast_enabled,
-        )
-        with _BASELINE_CACHE_LOCK:
-            baseline = _BASELINE_CACHE.get(key)
-        if baseline is None:
-            baseline = build_sadrbc_forecast_baseline(
-                month_data,
-                self.config,
-                p_ref_kw=self.reference_power_kw,
-                control_dt_minutes=self.control_interval_minutes,
-                soc_init=starting_state_of_charge,
-                d_run_init_kw=self.initial_running_peak_kw,
-                spec=self.forecast_spec,
-            )
-            with _BASELINE_CACHE_LOCK:
-                if len(_BASELINE_CACHE) >= 32:
-                    _BASELINE_CACHE.pop(next(iter(_BASELINE_CACHE)))
-                _BASELINE_CACHE[key] = baseline
-        self._baseline = baseline
-        self._baseline_decision = 0
-        return super().reset(
-            month_data,
-            initial_state_of_charge=initial_state_of_charge,
-            static_observation_cache=static_observation_cache,
-        )
-
-    def _baseline_action(self) -> float:
-        if self._baseline is None:
-            return 0.0
-        return float(
-            self._baseline.actions[self.current_day_index][self.current_timestep_index]
-        )
-
-    def _fill_extra_observation_features(
-        self,
-        observation: np.ndarray,
-        timestep_index: int,
-    ) -> None:
-        if self._baseline is not None:
-            observation[-1] = self._baseline.actions[self.current_day_index][timestep_index]
-
-    def step(self, residual_action: float):
-        baseline_action = self._baseline_action()
-        bounded_residual_action = float(np.clip(residual_action, -1.0, 1.0))
-        final_action = float(np.clip(
-            baseline_action + self.residual_limit * bounded_residual_action,
-            -1.0,
-            1.0,
-        ))
-        day_index_before_action = self.current_day_index
-        observation, _, done, info = super().step(final_action)
-        baseline_cost = self._baseline.decision_costs[self._baseline_decision]
-        hybrid_cost = float(info["energy_cost"] + info["peak_pen"] + info["deg_cost"])
-        reward = (baseline_cost - hybrid_cost) / 1e6
-        if done or self.current_day_index != day_index_before_action:
-            baseline_end_state_of_charge = float(
-                self._baseline.soc_days[day_index_before_action][-1]
-            )
-            reward -= (
-                (
-                    abs(self.state_of_charge - self.config.SOC_eod)
-                    - abs(baseline_end_state_of_charge - self.config.SOC_eod)
-                )
-                * self.config.E_cap
-                * self.config.price_mid
-                / 1e6
-            )
-            if (
-                not done
-                and (self.month_data.days[self.current_day_index].day_index - 1) % 30 == 0
-            ):
-                self.running_monthly_peak_kw = self.initial_running_peak_kw
-                self.no_bess_running_monthly_peak_kw = self.initial_running_peak_kw
-                observation = self._build_observation()
-        requested_power_kw = abs(final_action) * self.config.P_rated_nominal
-        blocked = requested_power_kw > 1.0 and info["mean_abs_p_bess_kw"] < 1e-3
-        info.update({
-            "baseline_action": baseline_action,
-            "residual_action": bounded_residual_action,
-            "final_action": final_action,
-            "blocked_action": bool(blocked),
-            "baseline_cost": baseline_cost,
-            "hybrid_cost": hybrid_cost,
-            "residual_limit": self.residual_limit,
-        })
-        self._baseline_decision += 1
-        return observation, reward, done, info
 
 
 def rollout_activity(result: dict, dt_hours: float) -> dict:

@@ -140,7 +140,6 @@ class PPOAgent:
         self.epochs, self.minibatch = epochs, minibatch
         self.ent_coef, self.vf_coef = ent_coef, vf_coef
         self.meta = {}          # deployment context (p_ref_kw, obs_variant)
-        self.forecast_bundle = None
 
     @torch.inference_mode()
     def _sync_collector(self):
@@ -243,11 +242,6 @@ class PPOAgent:
         }
         payload = {"algo": "ppo", "state_dict": state,
                    "meta": dict(self.meta)}
-        if self.forecast_bundle is not None:
-            payload["forecast_bundle"] = {
-                **self.forecast_bundle,
-                "values": torch.as_tensor(self.forecast_bundle["values"]).cpu(),
-            }
         torch.save(payload, path)
 
     def load(self, path):
@@ -255,10 +249,8 @@ class PPOAgent:
         if isinstance(ck, dict) and "state_dict" in ck:
             self.net.load_state_dict(ck["state_dict"])
             self.meta = ck.get("meta", {}) or {}
-            self.forecast_bundle = ck.get("forecast_bundle")
         else:                                   # legacy raw state_dict
             self.net.load_state_dict(ck)
             self.meta = {}
-            self.forecast_bundle = None
         self._sync_collector()
         self.net.eval()

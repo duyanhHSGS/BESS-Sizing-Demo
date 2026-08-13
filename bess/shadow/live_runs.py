@@ -13,21 +13,17 @@ from typing import Any
 
 import numpy as np
 
-from bess.evaluation.baselines import validate_dispatch_sampling
-from bess.core.bess_env import BESSEnv
+from bess.evaluation.baselines import run_drl_policy
 from bess.core.common import check_hard_constraints, score_month, tariff_vector_day
 from bess.dispatch.dispatch_runner import (
-    DispatchRunWarning,
     build_dispatch_config,
     dataset_to_month,
     load_policy,
     prepare_policy_forecast,
 )
 from bess.evaluation.benchmark import selected_data_path
-from bess.core.settings import PPO_GAMMA
 from bess.forecasting.sadrbc_forecast import (
     SADRBCForecastSpec,
-    SADRBCResidualEnv,
     build_sadrbc_forecast_baseline,
 )
 
@@ -60,8 +56,6 @@ class LiveRunSession:
         policy_e = float(meta.get("e_cap_kwh") or e_cap)
         policy_p = float(meta.get("p_rated_kw") or p_rated)
         self.policy_cfg = build_dispatch_config(parameters, policy_e, policy_p)
-        native_minutes = self.policy_cfg.dt * 60.0
-        control_minutes = validate_dispatch_sampling(meta, native_minutes)
         p_ref = float(meta.get("p_ref_kw") or self._policy_reference_kw())
         prepare_policy_forecast(policy_name, agent, meta, self.month, p_ref)
         forecast = meta.get("sadrbc_forecast", {}) or {}
@@ -78,23 +72,12 @@ class LiveRunSession:
         self.agent = agent
         self.algo = algo
         self.meta = meta
-        env_class = SADRBCResidualEnv if meta.get("controller") == "sadrbc_residual" else BESSEnv
-        env_kwargs = {}
-        if env_class is SADRBCResidualEnv:
-            env_kwargs = {
-                "residual_limit": float(meta.get("residual_limit", 0.20)),
-                "forecast_spec": forecast_spec,
-            }
-        self.env = env_class(
+        self.policy_rollout = run_drl_policy(
+            self.month,
             self.policy_cfg,
-            reference_power_kw=p_ref,
-            forecast_enabled=meta.get("obs_variant") == "fc",
-            initial_running_peak_kw=meta.get("d_run_init_kw"),
-            discount_factor=float(meta.get("gamma", PPO_GAMMA)),
-            control_interval_minutes=control_minutes,
-            **env_kwargs,
+            self.agent,
+            p_ref_kw=p_ref,
         )
-        self.observation = self.env.reset(self.month)
 
         self.cursor = 0
         self.grids: dict[str, list[np.ndarray]] = {
@@ -118,16 +101,10 @@ class LiveRunSession:
         return max(500.0, np.ceil(peak / 500.0) * 500.0)
 
     def _advance_policy_day(self, day_index: int) -> tuple[np.ndarray, np.ndarray]:
-        done = False
-        while not done and self.env.current_day_index == day_index:
-            if hasattr(self.agent, "predict_action"):
-                action = self.agent.predict_action(self.observation)
-            else:
-                action, _, _ = self.agent.act(self.observation, deterministic=True)
-            self.observation, _, done, _ = self.env.step(action)
+        """Reveal one day from the continuous policy rollout computed at session start."""
         return (
-            np.asarray(self.env.grid_import_history[day_index], dtype=np.float64),
-            np.asarray(self.env.state_of_charge_history[day_index], dtype=np.float64),
+            np.asarray(self.policy_rollout["p_grid_days"][day_index], dtype=np.float64),
+            np.asarray(self.policy_rollout["soc_days"][day_index], dtype=np.float64),
         )
 
     def _method_kpi(self, method: str, cfg) -> dict[str, float]:

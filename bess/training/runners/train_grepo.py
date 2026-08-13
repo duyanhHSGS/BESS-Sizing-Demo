@@ -16,21 +16,19 @@ import argparse
 import math
 import time
 from datetime import date, datetime, timezone
-from pathlib import Path
 
 import numpy as np
 
+from bess.core.bess_env import OBSERVATION_DIM
+from bess.core.brain_runtime import make_brain_env, native_steps_per_action
 from bess.core.common import RESULTS_DIR, score_month
-from bess.evaluation.benchmark import _rolling_30_minute_average
 from bess.core.scenario_gen import MonthData
-from bess.core.bess_env import BESSEnv
 from bess.agents.grepo_agent import GREPOAgent, resolve_grepo_device
 from bess.evaluation.baselines import run_no_bess, run_drl_policy
 from bess.evaluation.oracle.oracle_cache import load_cached_training_grids
 from bess.training.training_common import build_training_bess_config, load_training_days
 from bess.training.training_reports import write_curve, write_report
 from bess.core.settings import GREPO_GAMMA
-from bess.forecasting.weather_forecast import build_forecast_bundle, fit_attach_forecasts
 
 VAL_EVERY = 10
 LOG_EVERY_ITERS = 4
@@ -77,9 +75,7 @@ def main():
                     help="Number of CSV days reserved for validation.")
     ap.add_argument("--test-days", type=int, default=30,
                     help="Number of CSV days reserved for test holdout.")
-    ap.add_argument("--obs-variant", choices=("base", "fc"), default="base")
-    ap.add_argument("--weather-data", default="")
-    ap.add_argument("--forecast-artifact", default="")
+    ap.add_argument("--obs-variant", choices=("brain7",), default="brain7")
     args = ap.parse_args()
     if not np.isfinite(args.gamma) or not 0.0 < args.gamma <= 1.0:
         raise SystemExit("gamma must be finite and in (0, 1]")
@@ -100,40 +96,31 @@ def main():
         raise SystemExit(f"CSV has {len(csv_days)} days; need more than {split_days}")
     peak = max(float(d.load.max()) for d in csv_days)
     p_ref = math.ceil(peak / 500.0) * 500.0
-    peaks = [
-        max(_rolling_30_minute_average(np.maximum(0, d.load - d.pv), cfg.dt), default=0.0)
-        for d in csv_days[:-split_days]
-    ]
-    d_run0 = 0.5 * float(np.mean(peaks))
     train_days = csv_days[:-split_days]
-    forecast_model = None
-    if args.obs_variant == "fc":
-        if not args.weather_data or not args.forecast_artifact:
-            raise SystemExit("forecast mode requires --weather-data and --forecast-artifact")
-        forecast_model = fit_attach_forecasts(
-            csv_days, Path(args.weather_data), len(train_days),
-            Path(args.forecast_artifact), p_ref,
-        )
     val_month = MonthData(source="csv_val")
     val_month.days = csv_days[-split_days:-args.test_days]
     tag = args.tag or f"grepo_{cfg.E_cap:.0f}kwh_{cfg.P_rated_nominal:.0f}kw"
 
-    make_env = lambda: BESSEnv(   # noqa: E731
-        cfg,
-        reference_power_kw=p_ref,
-        discount_factor=args.gamma,
-        control_interval_minutes=args.control_dt_minutes,
-        forecast_enabled=args.obs_variant == "fc",
-        record_trajectory=False,
-    )
-    control_probe = make_env()
+    native_steps = native_steps_per_action(cfg.dt, args.control_dt_minutes)
+
+    def make_env(month, soc_init):
+        return make_brain_env(
+            month,
+            cfg,
+            power_scale_kw=p_ref,
+            initial_state_of_charge=soc_init,
+        )
+
     learner_device = resolve_grepo_device(args.device)
     agent = GREPOAgent(
-        control_probe.observation_dimensions, n_group=args.group, seed=args.seed,
-        gamma=args.gamma, beta=args.beta, std=args.std,
+        OBSERVATION_DIM,
+        n_group=args.group,
+        seed=args.seed,
+        gamma=args.gamma,
+        beta=args.beta,
+        std=args.std,
         device=learner_device,
     )
-    # meta trc validation u tin  env val dng ng floor/p_ref
     agent.meta = {
         "p_ref_kw": p_ref,
         "algo": "grepo",
@@ -144,21 +131,12 @@ def main():
         "beta": args.beta,
         "std": args.std,
         "gamma": args.gamma,
-        "obs_variant": args.obs_variant,
-        "obs_dim": control_probe.observation_dimensions,
+        "obs_variant": "brain7",
+        "obs_dim": OBSERVATION_DIM,
         "native_dt_minutes": cfg.dt * 60.0,
         "control_dt_minutes": args.control_dt_minutes,
+        "native_steps_per_action": native_steps,
     }
-    if forecast_model:
-        agent.meta["forecast_model"] = forecast_model["model"]
-        agent.meta["forecast_artifact"] = forecast_model["artifact"]
-        agent.meta["forecast_model_artifact"] = forecast_model["model_artifact"]
-        agent.meta["weather_data"] = str(Path(args.weather_data))
-        agent.meta["forecast_embedded"] = True
-        agent.forecast_bundle = build_forecast_bundle(csv_days)
-    if d_run0 is not None:
-        agent.meta["d_run_init_kw"] = d_run0
-    agent.meta["native_steps_per_action"] = control_probe.native_samples_per_action
     val_base = score_month(
         run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_month.days
     )["total_cost_vnd"]
@@ -198,14 +176,13 @@ def main():
             "std": args.std,
             "gamma": args.gamma,
             "native_dt_minutes": cfg.dt * 60.0,
-            "control_dt_minutes": control_probe.control_interval_minutes,
-            "native_steps_per_action": control_probe.native_samples_per_action,
+            "control_dt_minutes": args.control_dt_minutes,
+            "native_steps_per_action": native_steps,
             "device_requested": args.device,
             "device": learner_device,
         },
         "billing_mode": billing_mode,
         "p_ref_kw": p_ref,
-        "d_run_init_kw": d_run0,
         "validation": {"no_bess_vnd": val_base, "oracle_vnd": val_oracle},
     }
     perf = {
@@ -229,7 +206,8 @@ def main():
     )
     print(f"[grepo] config {tag} | group={args.group} | gamma={args.gamma:g} | "
           f"learner={learner_device} (requested {args.device}) | "
-          f"native dt {cfg.dt * 60:g}m | control dt {control_probe.control_interval_minutes:g}m | val no-BESS "
+          f"BrainEnv eyes={OBSERVATION_DIM} | native dt {cfg.dt * 60:g}m | "
+          f"control dt {args.control_dt_minutes:g}m | val no-BESS "
           f"{val_base/1e6:.1f}M, oracle {val_oracle/1e6:.1f}M VND", flush=True)
 
     curve = []
@@ -243,12 +221,12 @@ def main():
         episode = MonthData(days=[day], source="grepo_day")
         soc_init = float(rng.uniform(cfg.SOC_min + cfg.SOC_safety,
                                      cfg.SOC_max))
-        if d_run0 is not None:      # site tht: floor data-driven  jitter
-            d_run_init = float(d_run0 * rng.uniform(0.8, 1.5))
-        else:
-            d_run_init = float(rng.uniform(0.5, 0.9) * p_ref)
-        batch = agent.collect_group(make_env, episode, soc_init=soc_init,
-                                    d_run_init=d_run_init)
+        batch = agent.collect_group(
+            make_env,
+            episode,
+            soc_init=soc_init,
+            native_steps=native_steps,
+        )
         collect_stats = agent.last_collect_stats
         perf["group_rollout_seconds"] += collect_stats[
             "group_rollout_seconds"
@@ -297,8 +275,6 @@ def main():
                 "e_cap_kwh": cfg.E_cap,
                 "p_rated_kw": cfg.P_rated_nominal,
             }
-            if d_run0 is not None:
-                agent.meta["d_run_init_kw"] = d_run0
             io_started = time.perf_counter()
             agent.save(RESULTS_DIR / f"policy_{tag}.pt")
             perf["checkpoint_report_io_seconds"] += (
@@ -315,7 +291,7 @@ def main():
     test_days = csv_days[-args.test_days:]
     test_month = MonthData(days=test_days, source="csv_test")
     best_agent = GREPOAgent(
-        control_probe.observation_dimensions,
+        OBSERVATION_DIM,
         n_group=args.group,
         gamma=args.gamma,
         std=args.std,

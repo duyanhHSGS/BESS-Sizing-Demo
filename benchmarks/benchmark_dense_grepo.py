@@ -1,7 +1,7 @@
-"""Opt-in GREPO phase benchmark.
+"""Opt-in GREPO collection/update benchmark on the canonical BrainEnv.
 
 Run only from the project virtual environment:
-    python tests/benchmark_dense_grepo.py
+    python benchmarks/benchmark_dense_grepo.py
 """
 from __future__ import annotations
 
@@ -10,9 +10,10 @@ import time
 import numpy as np
 import torch
 
-from bess.core.bess_env import BESSEnv, REACTIVE_OBSERVATION_DIM
-from bess.core.common import load_system_config, make_bess_config
 from bess.agents.grepo_agent import GREPOAgent
+from bess.core.bess_env import OBSERVATION_DIM
+from bess.core.brain_runtime import make_brain_env
+from bess.core.common import load_system_config, make_bess_config
 from bess.core.scenario_gen import DayData, MonthData
 
 
@@ -34,29 +35,36 @@ def benchmark_resolution(minutes, group=8):
         source="grepo_benchmark",
     )
 
-    def make_env():
-        return BESSEnv(
+    def make_env(month_data, soc_init):
+        return make_brain_env(
+            month_data,
             cfg,
-            reference_power_kw=1000.0,
-            initial_running_peak_kw=300.0,
-            control_interval_minutes=float(minutes),
-            record_trajectory=False,
+            power_scale_kw=1000.0,
+            initial_state_of_charge=soc_init,
         )
 
     agent = GREPOAgent(
-        REACTIVE_OBSERVATION_DIM, n_group=group, seed=23, device="cpu"
+        OBSERVATION_DIM, n_group=group, seed=23, device="cpu"
     )
     noise = np.random.default_rng(23).normal(
         size=(group, steps)
     ).astype(np.float32)
     started = time.perf_counter()
     scalar = agent.collect_group_scalar_reference(
-        make_env, month, soc_init=0.55, noise_g=noise
+        make_env,
+        month,
+        soc_init=0.55,
+        native_steps=1,
+        noise_g=noise,
     )
     scalar_seconds = time.perf_counter() - started
     started = time.perf_counter()
     optimized = agent.collect_group(
-        make_env, month, soc_init=0.55, noise_g=noise
+        make_env,
+        month,
+        soc_init=0.55,
+        native_steps=1,
+        noise_g=noise,
     )
     optimized_seconds = time.perf_counter() - started
     parity = max(
@@ -74,7 +82,7 @@ def benchmark_resolution(minutes, group=8):
         if device == "cuda" and not torch.cuda.is_available():
             continue
         learner = GREPOAgent(
-            REACTIVE_OBSERVATION_DIM, n_group=group, seed=23, device=device
+            OBSERVATION_DIM, n_group=group, seed=23, device=device
         )
         started = time.perf_counter()
         learner.update(*optimized)

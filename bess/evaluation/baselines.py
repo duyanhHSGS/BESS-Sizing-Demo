@@ -14,9 +14,16 @@ from __future__ import annotations
 
 import numpy as np
 
+from bess.core.bess_env import OBSERVATION_DIM
+from bess.core.brain_runtime import (
+    BrainTrajectoryRecorder,
+    make_brain_env,
+    native_steps_per_action,
+    observation_array,
+    step_brain_control,
+)
 from bess.core.common import validate_control_interval_minutes
 from bess.core.scenario_gen import MonthData
-from bess.core.settings import PPO_GAMMA
 
 
 def _result(p_grid_days, soc_days, p_bess_days):
@@ -80,14 +87,17 @@ def validate_dispatch_sampling(meta: dict, native_dt_minutes: float) -> float:
 def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
                    measure_latency: bool = False,
                    deterministic: bool = True) -> dict:
-    """Roll a trained policy through the environment declared by its checkpoint."""
+    """Roll a trained policy through its native environment contract.
+
+    PPO2 keeps its independent senior-reference environment. Every other policy
+    now consumes the canonical seven-eye ``BrainEnv`` directly. Legacy 13/17-eye
+    checkpoints are intentionally rejected instead of being silently adapted.
+    """
     import time
-    from bess.core.bess_env import BESSEnv
-    from bess.forecasting.sadrbc_forecast import SADRBCForecastSpec, SADRBCResidualEnv
 
     meta = getattr(agent, "meta", {}) or {}
     native_dt_minutes = cfg.dt * 60.0
-    validate_dispatch_sampling(meta, native_dt_minutes)
+    control_dt_minutes = validate_dispatch_sampling(meta, native_dt_minutes)
 
     if meta.get("reference_env") == "ppo2_senior_15m_v1":
         from bess.core.ppo2_env import PPO2Env
@@ -99,65 +109,124 @@ def run_drl_policy(month: MonthData, cfg, agent, p_ref_kw: float = 500.0,
                 meta.get("degradation_cost_per_kwh_discharged", 0.0)
             ),
         )
-    else:
-        use_fc = meta.get("obs_variant") == "fc"
-        control_dt_minutes = validate_dispatch_sampling(meta, native_dt_minutes)
-        env_class = (
-            SADRBCResidualEnv
-            if meta.get("controller") == "sadrbc_residual"
-            else BESSEnv
-        )
-        env_kwargs = {}
-        if env_class is SADRBCResidualEnv:
-            forecast = meta.get("sadrbc_forecast", {}) or {}
-            env_kwargs = {
-                "residual_limit": float(meta.get("residual_limit", 0.20)),
-                "forecast_spec": SADRBCForecastSpec(
-                    seed=int(forecast.get("seed", 13_0013)),
-                    load_sigma=float(forecast.get("load_sigma", 0.05)),
-                    pv_sigma=float(forecast.get("pv_sigma", 0.15)),
-                    rho=float(forecast.get("rho", 0.90)),
-                    replan_minutes=int(forecast.get("replan_minutes", 60)),
-                ),
-            }
-        env = env_class(
-            cfg,
-            reference_power_kw=p_ref_kw,
-            forecast_enabled=use_fc,
-            initial_running_peak_kw=meta.get("d_run_init_kw"),
-            discount_factor=float(meta.get("gamma", PPO_GAMMA)),
-            control_interval_minutes=control_dt_minutes,
-            **env_kwargs,
+        obs = env.reset(month)
+        done = False
+        lat = []
+        decisions = 0
+        while not done:
+            t0 = time.perf_counter()
+            raw_action = agent.act(obs, deterministic=deterministic)
+            action = raw_action[0] if isinstance(raw_action, tuple) else raw_action
+            if measure_latency:
+                lat.append((time.perf_counter() - t0) * 1e3)
+            obs, _, done, _ = env.step(action)
+            decisions += 1
+        out = _result(env.log_grid, env.log_soc, env.log_pbess)
+        out["blocked_action_count"] = 0
+        out["decision_count"] = decisions
+        out["blocked_action_pct"] = 0.0
+        if measure_latency:
+            out["latency_ms_mean"] = float(np.mean(lat))
+            out["latency_ms_max"] = float(np.max(lat))
+        return out
+
+    checkpoint_obs_dim = meta.get("obs_dim")
+    if checkpoint_obs_dim is not None and int(checkpoint_obs_dim) != OBSERVATION_DIM:
+        raise ValueError(
+            f"checkpoint uses legacy observation dimension {checkpoint_obs_dim}; "
+            f"current BrainEnv requires {OBSERVATION_DIM}. Retrain this policy."
         )
 
-    obs = env.reset(month)
-    done = False
-    lat = []
+    wear_cost = float(meta.get("battery_wear_cost", 0.0))
+    env = make_brain_env(
+        month,
+        cfg,
+        power_scale_kw=p_ref_kw,
+        battery_wear_vnd_per_kwh=wear_cost,
+    )
+    observation = observation_array(env.reset())
+    recorder = BrainTrajectoryRecorder(month, env.bess_world.state_of_charge)
+    native_steps = native_steps_per_action(cfg.dt, control_dt_minutes)
+
+    residual_baseline_actions: list[float] | None = None
+    residual_limit = float(meta.get("residual_limit", 0.20))
+    if meta.get("controller") == "sadrbc_residual":
+        from bess.forecasting.sadrbc_forecast import (
+            SADRBCForecastSpec,
+            build_sadrbc_forecast_baseline,
+        )
+
+        forecast = meta.get("sadrbc_forecast", {}) or {}
+        spec = SADRBCForecastSpec(
+            seed=int(forecast.get("seed", 13_0013)),
+            load_sigma=float(forecast.get("load_sigma", 0.05)),
+            pv_sigma=float(forecast.get("pv_sigma", 0.15)),
+            rho=float(forecast.get("rho", 0.90)),
+            replan_minutes=int(forecast.get("replan_minutes", 60)),
+        )
+        baseline = build_sadrbc_forecast_baseline(
+            month,
+            cfg,
+            p_ref_kw=p_ref_kw,
+            control_dt_minutes=control_dt_minutes,
+            soc_init=float(cfg.SOC_eod),
+            spec=spec,
+        )
+        residual_baseline_actions = [
+            float(action)
+            for day_actions in baseline.actions
+            for action in np.asarray(day_actions, dtype=np.float64)[::native_steps]
+        ]
+
+    lat: list[float] = []
     blocked_actions = 0
     decisions = 0
+    done = False
     while not done:
         t0 = time.perf_counter()
-        if meta.get("reference_env") == "ppo2_senior_15m_v1":
-            raw_action = agent.act(obs, deterministic=deterministic)
-            a = raw_action[0] if isinstance(raw_action, tuple) else raw_action
-        elif deterministic and hasattr(agent, "predict_action"):
-            a = agent.predict_action(obs)
+        if deterministic and hasattr(agent, "predict_action"):
+            policy_action = float(agent.predict_action(observation))
         else:
-            raw_action = agent.act(obs, deterministic=deterministic)
-            a = raw_action[0] if isinstance(raw_action, tuple) else raw_action
+            raw_action = agent.act(observation, deterministic=deterministic)
+            policy_action = float(raw_action[0] if isinstance(raw_action, tuple) else raw_action)
+
+        if residual_baseline_actions is not None:
+            if decisions >= len(residual_baseline_actions):
+                raise RuntimeError("SADRBC residual baseline ended before BrainEnv")
+            action = float(np.clip(
+                residual_baseline_actions[decisions]
+                + residual_limit * np.clip(policy_action, -1.0, 1.0),
+                -1.0,
+                1.0,
+            ))
+        else:
+            action = float(np.clip(policy_action, -1.0, 1.0))
+
         if measure_latency:
             lat.append((time.perf_counter() - t0) * 1e3)
-        obs, _, done, info = env.step(a)
-        blocked_actions += int(info.get("blocked_action", False))
-        decisions += 1
-    if meta.get("reference_env") == "ppo2_senior_15m_v1":
-        out = _result(env.log_grid, env.log_soc, env.log_pbess)
-    else:
-        out = _result(
-            env.grid_import_history,
-            env.state_of_charge_history,
-            env.battery_power_history,
+
+        transition = step_brain_control(
+            env,
+            action,
+            native_steps=native_steps,
+            recorder=recorder,
         )
+        blocked_actions += int(transition.adjusted_action)
+        decisions += 1
+        done = transition.done
+        if not done:
+            if transition.next_observation is None:
+                raise RuntimeError("BrainEnv omitted the next observation before episode end")
+            observation = observation_array(transition.next_observation)
+
+    if residual_baseline_actions is not None and decisions != len(residual_baseline_actions):
+        raise RuntimeError("SADRBC residual baseline and BrainEnv decision horizons disagree")
+
+    out = _result(
+        recorder.grid_import_days,
+        recorder.state_of_charge_days,
+        recorder.battery_power_days,
+    )
     out["blocked_action_count"] = blocked_actions
     out["decision_count"] = decisions
     out["blocked_action_pct"] = 100.0 * blocked_actions / max(1, decisions)

@@ -135,11 +135,4 @@ class GREPROAgent(GREPOAgent):
             "algo": "grepro",
             "meta": dict(self.meta),
         }
-        if self.forecast_bundle is not None:
-            payload["forecast_bundle"] = {
-                **self.forecast_bundle,
-                "values": torch.as_tensor(
-                    self.forecast_bundle["values"]
-                ).cpu(),
-            }
         torch.save(payload, path)
