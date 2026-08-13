@@ -12,7 +12,12 @@ from typing import Any
 from bess.paths import PROJECT_ROOT
 from bess.brain.runtime import load_csv_days, split_billing_periods
 from bess.core.config import ENVIRONMENT_CONTRACT_VERSION
-from bess.training.training_datasets import detect_resolution_minutes, get_dataset_path
+from bess.training.training_datasets import (
+    SINGLE_PERIOD_SANITY_WARNING,
+    detect_resolution_minutes,
+    get_dataset_path,
+    resolve_brain3_period_split,
+)
 from bess.training.training_jobs import JobManager
 
 CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
@@ -131,12 +136,19 @@ def preview_training(payload: dict, parameters: dict) -> dict[str, Any]:
     periods = split_billing_periods(
         load_csv_days(resolved["csv_path"]), reject_leftover=True, warnings=warnings
     )
-    reserve = int(values["validation_periods"]) + int(values["test_periods"])
-    if len(periods) <= reserve:
-        raise TrainingLaunchError("dataset needs training periods plus positive validation and test periods")
-    train_periods = periods[:-reserve]
-    validation_periods = periods[-reserve:-int(values["test_periods"])]
-    test_periods = periods[-int(values["test_periods"]):]
+    try:
+        period_split = resolve_brain3_period_split(
+            periods,
+            int(values["validation_periods"]),
+            int(values["test_periods"]),
+        )
+    except ValueError as exc:
+        raise TrainingLaunchError(str(exc)) from exc
+    train_periods = period_split["training"]
+    validation_periods = period_split["validation"]
+    test_periods = period_split["test"]
+    if period_split["periods_reused"]:
+        warnings.append(SINGLE_PERIOD_SANITY_WARNING)
     decisions_per_day = resolved["decisions_per_day"]
 
     total_decisions = 0
@@ -189,6 +201,8 @@ def preview_training(payload: dict, parameters: dict) -> dict[str, Any]:
             ),
             "usable_periods": len(periods),
         },
+        "split_mode": period_split["mode"],
+        "periods_reused": bool(period_split["periods_reused"]),
         "requested_decisions": int(values["steps"]),
         "expected_stop_decisions": total_decisions,
         "effective_learning_start": effective_learning_start,

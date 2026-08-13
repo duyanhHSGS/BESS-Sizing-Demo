@@ -17,6 +17,7 @@ from bess.brain.brain3_agent import BRAIN3_ACTIONS, Brain3Agent
 from bess.brain.brain_env import BrainEnvironmentStepResult
 from bess.brain.runtime import episode_for_period, load_csv_days, make_env, split_billing_periods
 from bess.core.config import BrainConfig, ENVIRONMENT_CONTRACT_VERSION
+from bess.training.training_datasets import SINGLE_PERIOD_SANITY_WARNING, resolve_brain3_period_split
 
 
 def _args() -> argparse.Namespace:
@@ -131,6 +132,15 @@ def main() -> None:
     )
     for warning in period_warnings:
         print(json.dumps({"type": "warning", "message": warning}), flush=True)
+    try:
+        period_split = resolve_brain3_period_split(periods, args.validation_periods, args.test_periods)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    train_periods = period_split["training"]
+    validation_periods = period_split["validation"]
+    test_periods = period_split["test"]
+    if period_split["periods_reused"]:
+        print(json.dumps({"type": "warning", "message": SINGLE_PERIOD_SANITY_WARNING}), flush=True)
     held_ratio = args.control_dt_minutes / (config.timestep_hours * 60.0)
     held_steps = round(held_ratio)
     decisions_per_day = 1440.0 / args.control_dt_minutes
@@ -173,13 +183,6 @@ def main() -> None:
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
-    reserve = args.validation_periods + args.test_periods
-    if args.validation_periods <= 0 or args.test_periods <= 0 or len(periods) <= reserve:
-        raise SystemExit("dataset needs training periods plus positive validation and test periods")
-    train_periods = periods[:-reserve]
-    validation_periods = periods[-reserve:-args.test_periods]
-    test_periods = periods[-args.test_periods:]
-
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -287,6 +290,8 @@ def main() -> None:
                             "training_periods": len(train_periods),
                             "validation_periods": len(validation_periods),
                             "test_periods": len(test_periods),
+                            "dataset_split_mode": period_split["mode"],
+                            "periods_reused": bool(period_split["periods_reused"]),
                             "dataset_fingerprint": dataset_fingerprint,
                             "training_contract": training_contract,
                         },
@@ -315,6 +320,8 @@ def main() -> None:
                     "best_step": best_step,
                     "best_deployment": best_deployment,
                     "curve": curve,
+                    "dataset_split_mode": period_split["mode"],
+                    "periods_reused": bool(period_split["periods_reused"]),
                 },
                 resume_path,
             )
@@ -334,6 +341,8 @@ def main() -> None:
         "environment_fingerprint": config.fingerprint(),
         "dataset_fingerprint": dataset_fingerprint,
         "training_contract": training_contract,
+        "dataset_split_mode": period_split["mode"],
+        "periods_reused": bool(period_split["periods_reused"]),
         "split": {
             "training": [period.key for period in train_periods],
             "validation": [period.key for period in validation_periods],

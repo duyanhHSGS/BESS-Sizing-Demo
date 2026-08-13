@@ -17,6 +17,44 @@ class DatasetError(ValueError):
     pass
 
 
+NORMAL_SPLIT_MODE = "chronological_holdout"
+SINGLE_PERIOD_SANITY_MODE = "single_period_sanity"
+SINGLE_PERIOD_SANITY_WARNING = (
+    "Single usable billing period detected: Brain 3 sanity mode reuses the same period for training, "
+    "greedy validation, and final test. This can show whether the learner trains, but validation/test "
+    "results are in-sample and do not measure performance on unseen periods."
+)
+
+
+def resolve_brain3_period_split(periods, validation_periods: int, test_periods: int) -> dict:
+    """Return the canonical Brain 3 period roles used by preview and the real runner."""
+    if validation_periods <= 0 or test_periods <= 0:
+        raise DatasetError("validation_periods and test_periods must both be positive")
+    if not periods:
+        raise DatasetError("dataset needs at least one complete billing period")
+
+    periods = tuple(periods)
+    if len(periods) == 1:
+        return {
+            "mode": SINGLE_PERIOD_SANITY_MODE,
+            "training": periods,
+            "validation": periods,
+            "test": periods,
+            "periods_reused": True,
+        }
+
+    reserve = validation_periods + test_periods
+    if len(periods) <= reserve:
+        raise DatasetError("dataset needs training periods plus positive validation and test periods")
+    return {
+        "mode": NORMAL_SPLIT_MODE,
+        "training": periods[:-reserve],
+        "validation": periods[-reserve:-test_periods],
+        "test": periods[-test_periods:],
+        "periods_reused": False,
+    }
+
+
 def _dataset_paths(base_dir: Path = BASE_DIR) -> dict[str, Path]:
     data_dir = base_dir / "data"
     source_dir = data_dir if data_dir.exists() else base_dir
@@ -113,14 +151,14 @@ def get_dataset_path(dataset_id: str, base_dir: Path = BASE_DIR) -> Path:
     return path
 
 
-def require_min_days(path: Path, min_days: int = 90) -> int:
+def require_min_days(path: Path, min_days: int = 30) -> int:
     n_days = count_days(path)
     if n_days < min_days:
         raise DatasetError(f"{path.name} has {n_days} days; training needs at least {min_days}")
     return n_days
 
 
-def export_training_csv(dataset_id: str, output_dir: Path, base_dir: Path = BASE_DIR, min_days: int = 90) -> Path:
+def export_training_csv(dataset_id: str, output_dir: Path, base_dir: Path = BASE_DIR, min_days: int = 30) -> Path:
     source = get_dataset_path(dataset_id, base_dir)
     require_min_days(source, min_days)
     output_dir.mkdir(parents=True, exist_ok=True)
