@@ -7,12 +7,18 @@ import re
 import sys
 from pathlib import Path
 
-from bess.paths import PROJECT_ROOT
-
-import bess.evaluation.oracle.oracle_cache as oracle_cache
-from bess.evaluation.benchmark import detect_dt_hours
+from bess.agents import SUPPORTED_POLICY_ALGORITHMS
 from bess.core.common import ensure_inside_directory, validate_control_interval_minutes
-from bess.core.settings import GREPO_GAMMA, GREPRO_GAMMA, PPO_GAMMA, PPO_LAMBDA, PPO2_GAMMA, PPO2_LAM_ENERGY, PPO2_LAM_PEAK, PRO_GAMMA
+from bess.core.settings import (
+    PPO2_GAMMA,
+    PPO2_LAM_ENERGY,
+    PPO2_LAM_PEAK,
+    PPO_GAMMA,
+    PPO_LAMBDA,
+)
+from bess.evaluation.benchmark import detect_dt_hours
+from bess.evaluation.oracle import oracle_cache
+from bess.paths import PROJECT_ROOT
 from bess.training.training_datasets import (
     DatasetError,
     detect_resolution_minutes,
@@ -22,23 +28,16 @@ from bess.training.training_datasets import (
 )
 from bess.training.training_jobs import Job, JobManager
 
-
 BASE_DIR = PROJECT_ROOT
 CHECKPOINT_DIR = BASE_DIR / "checkpoints"
 USER_DATA_DIR = BASE_DIR / "user_data"
 PPO_SCRIPT = BASE_DIR / "bess" / "training" / "runners" / "train_ppo_dataset.py"
-GREPO_SCRIPT = BASE_DIR / "bess" / "training" / "runners" / "train_grepo.py"
-GREPRO_SCRIPT = BASE_DIR / "bess" / "training" / "runners" / "train_grepro.py"
-PRO_SCRIPT = BASE_DIR / "bess" / "training" / "runners" / "train_pro.py"
 PPO2_SCRIPT = BASE_DIR / "bess" / "training" / "runners" / "train_ppo2_dataset.py"
 TRAINING_MODULES = {
     "ppo": "bess.training.runners.train_ppo_dataset",
     "ppo2": "bess.training.runners.train_ppo2_dataset",
-    "grepo": "bess.training.runners.train_grepo",
-    "grepro": "bess.training.runners.train_grepro",
-    "pro": "bess.training.runners.train_pro",
 }
-ALGORITHMS = {"ppo", "ppo2", "grepo", "grepro", "grpo", "pro"}
+ALGORITHMS = SUPPORTED_POLICY_ALGORITHMS
 
 
 class TrainingLaunchError(ValueError):
@@ -175,7 +174,7 @@ def _control_dt_minutes(payload: dict, csv_path: Path) -> int:
             "control_dt_minutes must be a native-or-coarser multiple "
             "that divides both 30 minutes and 24 hours"
         ) from exc
-    return int(round(requested))
+    return round(requested)
 
 
 def _training_tag(
@@ -258,9 +257,9 @@ def build_training_command(
 ) -> dict:
     algo = str(payload.get("algo", "ppo")).lower()
     if algo not in ALGORITHMS:
-        raise TrainingLaunchError(f"unknown algorithm: {algo}")
-    if algo == "grpo":
-        raise UnsupportedAlgorithm("GRPO is not implemented in this repo yet.")
+        raise UnsupportedAlgorithm(
+            f"unsupported algorithm: {algo}; this repository supports only PPO and PPO2"
+        )
 
     e_cap = _float(payload, "e_cap_kwh")
     p_rated = _float(payload, "p_rated_kw")
@@ -411,74 +410,6 @@ def build_training_command(
         )
         if seeds:
             cmd.extend(["--seeds", seeds])
-    elif algo == "pro":
-        gamma = _bounded_float(
-            payload,
-            "pro_gamma",
-            PRO_GAMMA,
-            minimum=0.0,
-            minimum_inclusive=False,
-            maximum=1.0,
-        )
-        cmd.extend(
-            [
-                "--iters",
-                str(_int(payload, "pro_iters", 400)),
-                "--gamma",
-                str(gamma),
-                "--oracle-coef",
-                str(_float(payload, "pro_oracle_coef", 1.0)),
-                "--oracle-decay",
-                str(_float(payload, "pro_oracle_decay", 0.0)),
-            ]
-        )
-    else:
-        gamma_key = "grepro_gamma" if algo == "grepro" else "grepo_gamma"
-        gamma_default = GREPRO_GAMMA if algo == "grepro" else GREPO_GAMMA
-        gamma = _bounded_float(
-            payload,
-            gamma_key,
-            gamma_default,
-            minimum=0.0,
-            minimum_inclusive=False,
-            maximum=1.0,
-        )
-        cmd.extend(
-            [
-                "--iters",
-                str(_int(payload, "grepro_iters" if algo == "grepro" else "iters", 200 if algo == "grepro" else 400)),
-                "--group",
-                str(_int(payload, "grepro_group" if algo == "grepro" else "group", 6 if algo == "grepro" else 8)),
-                "--beta",
-                str(_float(payload, "grepro_beta" if algo == "grepro" else "beta", 0.5)),
-                "--std",
-                str(_float(payload, "grepro_std" if algo == "grepro" else "std", 0.20 if algo == "grepro" else 0.30)),
-                "--gamma",
-                str(gamma),
-            ]
-        )
-        if algo == "grepro":
-            cmd.extend(
-                [
-                    "--residual-limit",
-                    str(_bounded_float(
-                        payload, "grepro_residual_limit", 0.05,
-                        minimum=0.0, minimum_inclusive=False, maximum=1.0,
-                    )),
-                    "--forecast-seed",
-                    str(_int(payload, "grepro_forecast_seed", 13_0013)),
-                    "--forecast-load-sigma",
-                    str(_bounded_float(
-                        payload, "grepro_forecast_load_sigma", 0.05,
-                        minimum=0.0, maximum=1.0,
-                    )),
-                    "--forecast-pv-sigma",
-                    str(_bounded_float(
-                        payload, "grepro_forecast_pv_sigma", 0.15,
-                        minimum=0.0, maximum=1.0,
-                    )),
-                ]
-            )
     return {"cmd": cmd, "tag": tag, "checkpoint": str(checkpoint), "algo": algo,
             "obs_variant": obs_variant, "device": device}
 
@@ -530,7 +461,7 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
         oracle_path = Path("")  # PPO2 builds the senior fixed-block month LP internally.
     else:
         val_days, test_days = _split_days(payload)
-        required_train_days = 30 if algo == "grepro" else 1
+        required_train_days = 1
         n_days = require_min_days(source, val_days + test_days + required_train_days)
         oracle_path, _ = oracle_cache.require_cached_oracle(oracle_parameters)
 

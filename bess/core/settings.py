@@ -75,9 +75,6 @@ SYSTEM_CONFIG = {
 # PPO training defaults. PPO_GAMMA is also used by potential-based SOC shaping.
 PPO_GAMMA = 0.995
 PPO_LAMBDA = 0.97
-PRO_GAMMA = 0.995
-GREPO_GAMMA = 0.995
-GREPRO_GAMMA = 0.995
 PPO2_GAMMA = 1.0
 PPO2_LAM_ENERGY = 0.97
 PPO2_LAM_PEAK = 0.97

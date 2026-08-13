@@ -1417,7 +1417,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       </div>
       <div class="card">
         <h2>Forecast contract</h2>
-        <div class="info">The site forecaster uses only current/past PV, 1/5/15-minute PV changes, recent load/PV, weather freshness, cloud cover, irradiance, temperature and precipitation. It predicts next-hour and following-two-hour effective load/PV for forecast-driven planners such as SADRBC. BrainEnv policies keep the fixed 7-eye observation and do not receive forecast-only eyes.</div>
+        <div class="info">The site forecaster uses only current/past PV, 1/5/15-minute PV changes, recent load/PV, weather freshness, cloud cover, irradiance, temperature and precipitation. BrainEnv PPO keeps the fixed 7-eye observation, and PPO2 keeps its isolated senior-reference input contract; neither policy receives forecast-only eyes.</div>
       </div>
     </section>
 
@@ -1429,11 +1429,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label>Algorithm
             <select id="train-algo">
               <option value="ppo">PPO</option>
-              <option value="ppo2">PPO2 — decomposed critics</option>
-              <option value="pro">PRO — PPO + Oracle</option>
-              <option value="grepo">GREPO</option>
-              <option value="grepro">GrePRO — monthly memory</option>
-              <option value="grpo">GRPO (not implemented)</option>
+              <option value="ppo2">PPO2 — senior reference</option>
             </select>
           </label>
           <label>Brain contract
@@ -1467,26 +1463,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
               step="0.0001" value="{{ ppo_gamma }}"></label>
           <label class="train-ppo-field">Lambda <input type="number" id="train-lambda" min="0" max="1"
               step="0.001" value="{{ ppo_lambda }}"></label>
-          <label class="train-grepo-field">Iters <input type="number" id="train-iters" value="400" step="50"></label>
-          <label class="train-grepo-field">Group <input type="number" id="train-group" value="8" step="1"></label>
-          <label class="train-grepo-field">Beta <input type="number" id="train-beta" value="0.5" step="0.05"></label>
-          <label class="train-grepo-field">Std <input type="number" id="train-std" value="0.30" step="0.05"></label>
-          <label class="train-grepo-field">GREPO Gamma <input type="number" id="train-grepo-gamma"
-              min="0.0001" max="1" step="0.0001" value="{{ grepo_gamma }}"></label>
-          <label class="train-grepro-field" style="display:none">Iters <input type="number" id="train-grepro-iters" value="200" step="25"></label>
-          <label class="train-grepro-field" style="display:none">Group <input type="number" id="train-grepro-group" value="6" step="1"></label>
-          <label class="train-grepro-field" style="display:none">Absolute/relative beta <input type="number" id="train-grepro-beta" value="0.5" step="0.05"></label>
-          <label class="train-grepro-field" style="display:none">Std <input type="number" id="train-grepro-std" value="0.20" step="0.05"></label>
-          <label class="train-grepro-field" style="display:none">GrePRO Gamma <input type="number" id="train-grepro-gamma"
-              min="0.0001" max="1" step="0.0001" value="{{ grepro_gamma }}"></label>
-          <label class="train-grepro-field" style="display:none">Fixed residual limit <input type="number" id="train-grepro-residual-limit" min="0.01" max="1" step="0.01" value="0.05"></label>
-          <label class="train-grepro-field" style="display:none">SADRBC noise seed <input type="number" id="train-grepro-forecast-seed" step="1" value="130013"></label>
-          <label class="train-grepro-field" style="display:none">Declared load error sigma <input type="number" id="train-grepro-load-sigma" min="0" max="1" step="0.01" value="0.05"></label>
-          <label class="train-grepro-field" style="display:none">Declared PV error sigma <input type="number" id="train-grepro-pv-sigma" min="0" max="1" step="0.01" value="0.15"></label>
-          <label class="train-pro-field" style="display:none">Iters <input type="number" id="train-pro-iters" value="400" step="50"></label>
-          <label class="train-pro-field" style="display:none">Oracle coefficient <input type="number" id="train-pro-oracle-coef" min="0" max="10" step="0.01" value="1.0"></label>
-          <label class="train-pro-field" style="display:none">Oracle decay / update <input type="number" id="train-pro-oracle-decay" min="0" max="1" step="0.0001" value="0.002"></label>
-          <label class="train-pro-field" style="display:none">PRO Gamma <input type="number" id="train-pro-gamma" min="0.0001" max="1" step="0.0001" value="{{ pro_gamma }}"></label>
+
           <label class="train-ppo2-field" style="display:none">Steps <input type="number" id="train-ppo2-steps" value="1500000" min="1" step="50000"></label>
           <label class="train-ppo2-field" style="display:none">Seed <input type="number" id="train-ppo2-seed" value="0" step="1"></label>
           <label class="train-ppo2-field" style="display:none">Seed sweep <input id="train-ppo2-seeds" placeholder="e.g. 0,1,2" size="12"></label>
@@ -1532,7 +1509,6 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <div class="training-metric-tabs" id="training-metric-tabs">
             <button type="button" class="active" data-training-metric="bill">Validation bill</button>
             <button type="button" data-training-metric="saving">Saving vs no-BESS</button>
-            <button type="button" data-training-metric="sadrbc">Saving vs SADRBC</button>
             <button type="button" data-training-metric="gap">Oracle gap</button>
           </div>
           <canvas id="train-chart" class="training-chart" width="900" height="240"></canvas>
@@ -1569,7 +1545,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         <div class="section-head">
           <div>
             <h2>Policy Tournament Arena 🏟️🔋</h2>
-            <div>Every selected .pt brain gets the same battery body and fights no-BESS, SADRBC v13, and Oracle Final Boss.</div>
+            <div>Every compatible PPO/PPO2 .pt brain fights on the selected battery/data setup; No-BESS and Oracle are neutral references.</div>
           </div>
           <div class="row">
             <button id="btn-benchmarking-run" class="primary" type="button">Recompute fresh</button>
@@ -1708,7 +1684,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         <h2>Daily flight recorder</h2>
         <div class="sizing-table-wrap">
           <table class="sizing-table">
-            <thead><tr><th>Day</th><th>Date</th><th>Type</th><th>No BESS bill</th><th>SADRBC bill</th><th>Policy bill</th><th>Policy SOC</th><th>Peak</th></tr></thead>
+            <thead><tr><th>Day</th><th>Date</th><th>Type</th><th>No BESS bill</th><th>Policy bill</th><th>Policy SOC</th><th>Peak</th></tr></thead>
             <tbody id="live-table-body"></tbody>
           </table>
         </div>
@@ -1746,28 +1722,6 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         <div id="shadow-connector-status" class="info">Connector not inspected yet.</div>
       </section>
 
-      <section class="card">
-        <div class="section-head">
-          <div>
-            <h2>Shadow Weather Forecast 🌦️</h2>
-            <div>Real hourly weather is available to causal forecast-driven planning in Shadow. BrainEnv policy inference remains fixed at 7 eyes; no future actuals are injected into the policy.</div>
-          </div>
-          <div class="row">
-            <button id="btn-shadow-weather-save" class="primary" type="button">Save weather</button>
-            <button id="btn-shadow-weather-test" type="button">Test weather provider</button>
-          </div>
-        </div>
-        <div class="row">
-          <label>Provider <select id="shadow-weather-provider"><option value="open-meteo">Open-Meteo automatic</option><option value="custom">Custom compatible HTTPS API</option></select></label>
-          <label>Latitude <input id="shadow-weather-latitude" type="number" min="-90" max="90" step="0.000001" placeholder="site latitude"></label>
-          <label>Longitude <input id="shadow-weather-longitude" type="number" min="-180" max="180" step="0.000001" placeholder="site longitude"></label>
-          <label>Timezone <input id="shadow-weather-timezone" type="text" value="Asia/Bangkok"></label>
-          <label class="shadow-weather-custom" style="display:none">HTTPS URL template <input id="shadow-weather-url" type="url" size="48" placeholder="https://api.example.com?...{start_date}..."></label>
-          <label class="shadow-weather-custom" style="display:none">API-key header <input id="shadow-weather-key-header" type="text" placeholder="X-API-Key"></label>
-          <label class="shadow-weather-custom" style="display:none">API key <input id="shadow-weather-key" type="password" placeholder="unchanged when blank"></label>
-        </div>
-        <div id="shadow-weather-status" class="info">Weather provider not configured yet.</div>
-      </section>
 
       <section class="card shadow-hero">
         <div class="section-head">
@@ -1801,7 +1755,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       <div class="live-grid">
         <section class="card shadow-dispatch-card">
           <div class="section-head">
-            <div><h2>Daily shadow dispatch</h2><div>Measured load/PV with virtual SADRBC and policy behavior.</div></div>
+            <div><h2>Daily shadow dispatch</h2><div>Measured load/PV with No-BESS reference and selected .pt policy behavior.</div></div>
             <label>Day <select id="shadow-chart-day"></select></label>
           </div>
           <div class="chart-wrap">
@@ -1815,7 +1769,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         <section class="card">
           <h2>Monthly virtual bill</h2>
           <div class="sizing-table-wrap"><table class="sizing-table">
-            <thead><tr><th>Month</th><th>OK / skipped</th><th>No BESS</th><th>SADRBC</th><th>Policy</th><th>Policy vs SADRBC</th><th>Safety</th></tr></thead>
+            <thead><tr><th>Month</th><th>OK / skipped</th><th>No BESS</th><th>Policy</th><th>Policy vs No-BESS</th><th>Safety</th></tr></thead>
             <tbody id="shadow-month-table"></tbody>
           </table></div>
         </section>
@@ -1823,7 +1777,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       <section class="card">
         <h2>Shadow audit log</h2>
         <div class="sizing-table-wrap"><table class="sizing-table">
-          <thead><tr><th>Date</th><th>Status</th><th>Type</th><th>Load</th><th>No BESS energy</th><th>SADRBC energy</th><th>Policy energy</th><th>Policy peak</th><th>Policy SOC</th></tr></thead>
+          <thead><tr><th>Date</th><th>Status</th><th>Type</th><th>Load</th><th>No BESS energy</th><th>Policy energy</th><th>Policy peak</th><th>Policy SOC</th></tr></thead>
           <tbody id="shadow-day-table"></tbody>
         </table></div>
       </section>
@@ -3726,8 +3680,6 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       { key: "load", label: "Load", color: "#fdba74" },
       { key: "pv", label: "PV", color: "#4ade80" },
       { key: "no_bess_grid", label: "No BESS grid", color: "#94a3b8" },
-      { key: "sadrbc_grid", label: "SADRBC grid", color: "#f97316" },
-      { key: "sadrbc_soc", label: "SADRBC SOC", color: "#67e8f9", soc: true },
       { key: "policy_grid", label: "Policy grid", color: "#a78bfa", policy: true },
       { key: "policy_soc", label: "Policy SOC", color: "#fde047", policy: true, soc: true },
     ];
@@ -3751,7 +3703,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         liveApi("/api/training/checkpoints"),
         liveApi("/api/live-runs"),
       ]);
-      const runnable = checkpoints.filter((checkpoint) => !checkpoint.error);
+      const runnable = checkpoints.filter((checkpoint) =>
+        !checkpoint.error && ["ppo", "ppo2"].includes(String(checkpoint.algo || "").toLowerCase())
+      );
       livePolicy.innerHTML = runnable.map((checkpoint) =>
         `<option value="${escapeHtml(checkpoint.name)}">${escapeHtml(checkpoint.name)} · ${escapeHtml(checkpoint.algo)}</option>`
       ).join("");
@@ -3949,10 +3903,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           (status.error ? ` · ERROR: ${escapeHtml(status.error)}` : "");
         liveTableBody.innerHTML = days.slice(-31).reverse().map((day) => {
           const noBess = day.methods.no_bess;
-          const sadrbc = day.methods.sadrbc_v13;
           const policyRow = day.methods[policy];
           return `<tr><td>${day.day}</td><td>${escapeHtml(day.date || "—")}</td><td>${escapeHtml(day.day_type)}</td>` +
-            `<td>${formatVnd(noBess.mtd_total_vnd)}</td><td>${formatVnd(sadrbc.mtd_total_vnd)}</td>` +
+            `<td>${formatVnd(noBess.mtd_total_vnd)}</td>` +
             `<td>${formatVnd(policyRow.mtd_total_vnd)}</td><td>${formatNumber(policyRow.soc_end_pct, 1)}%</td>` +
             `<td>${formatNumber(policyRow.mtd_pmax_kw, 1)} kW</td></tr>`;
         }).join("");
@@ -4144,75 +4097,13 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       }
     }
 
-    function updateShadowWeatherFields() {
-      const custom = document.getElementById("shadow-weather-provider").value === "custom";
-      document.querySelectorAll(".shadow-weather-custom").forEach((field) => {
-        field.style.display = custom ? "inline-flex" : "none";
-      });
-    }
-
-    function fillShadowWeather(config) {
-      document.getElementById("shadow-weather-provider").value = config.provider || "open-meteo";
-      document.getElementById("shadow-weather-latitude").value = config.latitude ?? "";
-      document.getElementById("shadow-weather-longitude").value = config.longitude ?? "";
-      document.getElementById("shadow-weather-timezone").value = config.timezone || "Asia/Bangkok";
-      document.getElementById("shadow-weather-url").value = config.custom_url || "";
-      document.getElementById("shadow-weather-key-header").value = config.api_key_header || "";
-      document.getElementById("shadow-weather-key").value = "";
-      document.getElementById("shadow-weather-key").placeholder = config.has_api_key ? "saved · unchanged when blank" : "optional";
-      document.getElementById("shadow-weather-status").textContent = config.latitude == null
-        ? "Enter the real site coordinates and save weather settings."
-        : `Saved ${config.provider} weather · ${config.latitude}, ${config.longitude} · ${config.timezone}.`;
-      updateShadowWeatherFields();
-    }
-
-    function shadowWeatherPayload() {
-      const latitude = document.getElementById("shadow-weather-latitude").value;
-      const longitude = document.getElementById("shadow-weather-longitude").value;
-      return {
-        provider: document.getElementById("shadow-weather-provider").value,
-        latitude: latitude === "" ? null : Number(latitude),
-        longitude: longitude === "" ? null : Number(longitude),
-        timezone: document.getElementById("shadow-weather-timezone").value.trim(),
-        custom_url: document.getElementById("shadow-weather-url").value.trim(),
-        api_key_header: document.getElementById("shadow-weather-key-header").value.trim(),
-        api_key: document.getElementById("shadow-weather-key").value,
-      };
-    }
-
-    async function saveShadowWeather() {
-      const status = document.getElementById("shadow-weather-status");
-      try {
-        status.textContent = "Saving Shadow weather settings...";
-        const config = await liveApi("/api/shadow/weather", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(shadowWeatherPayload()),
-        });
-        fillShadowWeather(config);
-        status.textContent = "Weather settings saved. Now save the main Shadow configuration to freeze the experiment.";
-      } catch (error) {
-        status.textContent = `ERROR: ${error.message}`;
-      }
-    }
-
-    async function testShadowWeather() {
-      const status = document.getElementById("shadow-weather-status");
-      try {
-        status.textContent = "Downloading one historical weather day...";
-        const result = await liveApi("/api/shadow/weather/test", { method: "POST" });
-        status.textContent = `${result.message} ${result.date} · ${result.hours} hourly rows.`;
-      } catch (error) {
-        status.textContent = `ERROR: ${error.message}`;
-      }
-    }
 
     async function refreshShadowRunning() {
       try {
-        const [config, checkpoints, connector, weather] = await Promise.all([
+        const [config, checkpoints, connector] = await Promise.all([
           liveApi("/api/shadow/config"),
           liveApi("/api/training/checkpoints"),
           liveApi("/api/shadow/connector"),
-          liveApi("/api/shadow/weather"),
         ]);
         shadowSource.innerHTML = shadowSources.map((source) =>
           `<option value="${escapeHtml(source)}">${escapeHtml(source)}</option>`
@@ -4226,7 +4117,6 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         shadowEcap.value = config.e_cap_kwh || "";
         shadowPrated.value = config.p_rated_kw || "";
         fillShadowConnector(connector);
-        fillShadowWeather(weather);
         updateShadowSourceFields();
         await renderShadowData();
       } catch (error) {
@@ -4342,31 +4232,31 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       shadowLastDays = okDays.filter((row) => row.trace);
       const totals = months.reduce((acc, month) => ({
         nobess: acc.nobess + month.nobess_bill_vnd,
-        sadrbc: acc.sadrbc + month.sadrbc_bill_vnd,
         policy: acc.policy + month.policy_bill_vnd,
         violations: acc.violations + month.policy_violations,
-      }), { nobess: 0, sadrbc: 0, policy: 0, violations: 0 });
+      }), { nobess: 0, policy: 0, violations: 0 });
+      const policyLead = totals.nobess - totals.policy;
       const cards = [
         ["Audited days", `${okDays.length}`, `${days.length - okDays.length} skipped`, ""],
-        ["No-BESS virtual bill", formatVnd(totals.nobess), "all months", ""],
-        ["SADRBC virtual bill", formatVnd(totals.sadrbc), `saved ${formatVnd(totals.nobess - totals.sadrbc)}`, ""],
-        ["Policy virtual bill", formatVnd(totals.policy), `saved ${formatVnd(totals.nobess - totals.policy)}`, "shadow-good"],
-        ["Policy vs SADRBC", formatVnd(totals.sadrbc - totals.policy), totals.sadrbc >= totals.policy ? "policy leads" : "SADRBC leads", totals.sadrbc >= totals.policy ? "shadow-good" : "shadow-bad"],
+        ["No-BESS virtual bill", formatVnd(totals.nobess), "neutral reference", ""],
+        ["Policy virtual bill", formatVnd(totals.policy), `saved ${formatVnd(policyLead)} vs No-BESS`, policyLead >= 0 ? "shadow-good" : "shadow-bad"],
+        ["Policy vs No-BESS", formatVnd(policyLead), policyLead >= 0 ? "policy leads" : "No-BESS leads", policyLead >= 0 ? "shadow-good" : "shadow-bad"],
         ["Safety violations", `${totals.violations}`, "virtual audit", totals.violations ? "shadow-bad" : "shadow-good"],
       ];
       shadowStats.innerHTML = months.length ? cards.map(([label, value, note, cls]) =>
         `<div class="shadow-stat"><span>${label}</span><b class="${cls}">${value}</b><small>${note}</small></div>`
       ).join("") : `<div class="info">No persisted shadow history yet.</div>`;
-      shadowMonthTable.innerHTML = months.map((month) =>
-        `<tr><td>${month.month}</td><td>${month.n_days_ok} / ${month.n_days_skipped}</td>` +
-        `<td>${formatVnd(month.nobess_bill_vnd)}</td><td>${formatVnd(month.sadrbc_bill_vnd)}</td>` +
-        `<td><b>${formatVnd(month.policy_bill_vnd)}</b></td><td class="${month.policy_vs_sadrbc_vnd >= 0 ? "shadow-good" : "shadow-bad"}">${formatVnd(month.policy_vs_sadrbc_vnd)}</td>` +
-        `<td>${month.policy_violations}</td></tr>`
-      ).join("");
+      shadowMonthTable.innerHTML = months.map((month) => {
+        const delta = month.policy_vs_nobess_vnd;
+        return `<tr><td>${month.month}</td><td>${month.n_days_ok} / ${month.n_days_skipped}</td>` +
+          `<td>${formatVnd(month.nobess_bill_vnd)}</td>` +
+          `<td><b>${formatVnd(month.policy_bill_vnd)}</b></td><td class="${delta >= 0 ? "shadow-good" : "shadow-bad"}">${formatVnd(delta)}</td>` +
+          `<td>${month.policy_violations}</td></tr>`;
+      }).join("");
       shadowDayTable.innerHTML = days.slice(-31).reverse().map((row) =>
         `<tr><td>${row.date}</td><td>${escapeHtml(row.status)}${row.skip_reason ? `<div class="benchmark-danger">${escapeHtml(row.skip_reason)}</div>` : ""}</td><td>${escapeHtml(row.day_type)}</td>` +
         `<td>${formatNumber(row.load_kwh, 0)} kWh</td><td>${formatVnd(row.nobess_energy_vnd)}</td>` +
-        `<td>${formatVnd(row.sadrbc_energy_vnd)}</td><td>${formatVnd(row.policy_energy_vnd)}</td>` +
+        `<td>${formatVnd(row.policy_energy_vnd)}</td>` +
         `<td>${formatNumber(row.policy_mtd_peak_kw, 1)} kW</td><td>${row.policy_soc_end_pct == null ? "—" : `${formatNumber(row.policy_soc_end_pct, 1)}%`}</td></tr>`
       ).join("");
       const previousChartDay = shadowChartDay.value;
@@ -4381,13 +4271,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     document.getElementById("btn-shadow-save").addEventListener("click", saveShadowConfig);
     document.getElementById("btn-shadow-connector-save").addEventListener("click", saveShadowConnector);
     document.getElementById("btn-shadow-connector-test").addEventListener("click", testShadowConnector);
-    document.getElementById("btn-shadow-weather-save").addEventListener("click", saveShadowWeather);
-    document.getElementById("btn-shadow-weather-test").addEventListener("click", testShadowWeather);
     document.getElementById("btn-shadow-run").addEventListener("click", startShadowCatchup);
     document.getElementById("btn-shadow-cancel").addEventListener("click", cancelShadowJob);
     document.getElementById("btn-shadow-reset").addEventListener("click", resetShadowHistory);
     shadowSourceKind.addEventListener("change", updateShadowSourceFields);
-    document.getElementById("shadow-weather-provider").addEventListener("change", updateShadowWeatherFields);
     shadowChartDay.addEventListener("change", renderSelectedShadowDay);
     document.getElementById("btn-shadow-dispatch-hide-all").addEventListener("click", () => {
       Object.keys(shadowDailyActiveSeries).forEach((key) => { shadowDailyActiveSeries[key] = false; });
@@ -4543,24 +4430,6 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const trainSteps = document.getElementById("train-steps");
     const trainGamma = document.getElementById("train-gamma");
     const trainLambda = document.getElementById("train-lambda");
-    const trainIters = document.getElementById("train-iters");
-    const trainGroup = document.getElementById("train-group");
-    const trainBeta = document.getElementById("train-beta");
-    const trainStd = document.getElementById("train-std");
-    const trainGrepoGamma = document.getElementById("train-grepo-gamma");
-    const trainGreproIters = document.getElementById("train-grepro-iters");
-    const trainGreproGroup = document.getElementById("train-grepro-group");
-    const trainGreproBeta = document.getElementById("train-grepro-beta");
-    const trainGreproStd = document.getElementById("train-grepro-std");
-    const trainGreproGamma = document.getElementById("train-grepro-gamma");
-    const trainGreproResidualLimit = document.getElementById("train-grepro-residual-limit");
-    const trainGreproForecastSeed = document.getElementById("train-grepro-forecast-seed");
-    const trainGreproLoadSigma = document.getElementById("train-grepro-load-sigma");
-    const trainGreproPvSigma = document.getElementById("train-grepro-pv-sigma");
-    const trainProIters = document.getElementById("train-pro-iters");
-    const trainProOracleCoef = document.getElementById("train-pro-oracle-coef");
-    const trainProOracleDecay = document.getElementById("train-pro-oracle-decay");
-    const trainProGamma = document.getElementById("train-pro-gamma");
     const trainTag = document.getElementById("train-tag");
     const trainPlan = document.getElementById("train-plan");
     const trainLog = document.getElementById("train-log");
@@ -4720,16 +4589,13 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         reportMetric("Test saving", reportValue(testSaving, (value) => `${formatNumber(value, 2)}%`)),
         reportMetric("Test Oracle gap", reportValue(test.oracle_gap_pct ?? meta.test_oracle_gap_pct, (value) => `${formatNumber(value, 2)}%`)),
         reportMetric("Test peak", reportValue(test.peak_kw ?? meta.test_peak_kw, (value) => `${formatNumber(value, 1)} kW`)),
-        reportMetric("Test vs SADRBC", reportValue(test.saving_vs_sadrbc_pct ?? meta.test_saving_vs_sadrbc_pct, (value) => `${formatNumber(value, 2)}%`)),
         reportMetric("Battery throughput", reportValue(test.activity?.throughput_kwh ?? meta.test_throughput_kwh, (value) => `${formatNumber(value, 1)} kWh`)),
         reportMetric("Trained steps", reportValue(summary.max_steps, (value) => formatNumber(value))),
       ].join("");
       const datasetRange = dataset.validation_range ? dataset.validation_range.join(" → ") : meta.test_range?.join(" → ");
-      const hyperparameters = checkpoint.algo === "ppo"
-        ? `gamma ${training.gamma ?? meta.gamma ?? "?"}, lambda ${training.lambda ?? meta.lambda ?? "?"}`
-        : checkpoint.algo === "ppo2"
-          ? `gamma ${training.gamma ?? meta.gamma ?? "?"}, λE ${training.lambda_energy ?? meta.lambda_energy ?? "?"}, λP ${training.lambda_peak_selected ?? meta.lambda_peak_selected ?? meta.lambda_peak ?? "?"}, actor/critic LR ${training.actor_lr ?? meta.actor_learning_rate ?? "?"}/${training.critic_lr ?? meta.critic_learning_rate ?? "?"}, PPO clip ${training.ppo_clip ?? meta.ppo_clip ?? "?"}`
-          : `gamma ${training.gamma ?? meta.gamma ?? "?"}, group ${training.group ?? meta.group ?? "?"}, beta ${training.beta ?? meta.beta ?? "?"}, std ${training.std ?? meta.std ?? "?"}`;
+      const hyperparameters = checkpoint.algo === "ppo2"
+        ? `gamma ${training.gamma ?? meta.gamma ?? "?"}, λE ${training.lambda_energy ?? meta.lambda_energy ?? "?"}, λP ${training.lambda_peak_selected ?? meta.lambda_peak_selected ?? meta.lambda_peak ?? "?"}, actor/critic LR ${training.actor_lr ?? meta.actor_learning_rate ?? "?"}/${training.critic_lr ?? meta.critic_learning_rate ?? "?"}, PPO clip ${training.ppo_clip ?? meta.ppo_clip ?? "?"}`
+        : `gamma ${training.gamma ?? meta.gamma ?? "?"}, lambda ${training.lambda ?? meta.lambda ?? "?"}`;
       const details = [
         ["Algorithm", checkpoint.algo || saved.algorithm],
         ["Brain contract", meta.obs_variant === "brain7"
@@ -4752,10 +4618,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         ["Seed", training.seed],
         ["Reference peak", reportValue(saved.p_ref_kw ?? meta.p_ref_kw, (value) => `${formatNumber(value, 1)} kW`)],
         ["Initial running peak", reportValue(saved.d_run_init_kw ?? meta.d_run_init_kw, (value) => `${formatNumber(value, 1)} kW`)],
-        ["Controller", meta.controller === "sadrbc_residual" ? `SADRBC + GrePRO residual (limit ${formatNumber((meta.residual_limit || 0) * 100, 0)}%)` : (meta.controller || "Direct policy")],
-        ["SADRBC forecast", meta.sadrbc_forecast ? `${meta.sadrbc_forecast.mode}; seed ${meta.sadrbc_forecast.seed}; load sigma ${meta.sadrbc_forecast.load_sigma}; PV sigma ${meta.sadrbc_forecast.pv_sigma}; exact future actuals ${meta.sadrbc_forecast.exact_future_actuals_passed_to_sadrbc ? "USED" : "NEVER"}` : "Legacy / unavailable"],
+        ["Controller", meta.controller || "Direct policy"],
         ["Validation no-BESS", reportValue(validation.no_bess_vnd ?? summary.val_no_bess_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
-        ["Validation SADRBC", reportValue(validation.sadrbc_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
         ["Validation Oracle (native perfect)", reportValue(validation.oracle_vnd ?? summary.val_oracle_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
         ["Test policy bill", reportValue(test.policy_cost_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
         ["Test no-BESS", reportValue(test.no_bess_vnd, (value) => `${formatNumber(value / 1e6, 1)}M VND`)],
@@ -4797,25 +4661,16 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     function updateTrainAlgoFields() {
       const algo = trainAlgo.value;
       document.querySelectorAll(".train-learning-field").forEach((item) => {
-        item.style.display = ["ppo", "ppo2", "grepo", "grepro"].includes(algo) ? "inline-flex" : "none";
+        item.style.display = "inline-flex";
       });
       document.querySelectorAll(".train-ppo-field").forEach((item) => {
         item.style.display = algo === "ppo" ? "inline-flex" : "none";
-      });
-      document.querySelectorAll(".train-grepo-field").forEach((item) => {
-        item.style.display = algo === "grepo" ? "inline-flex" : "none";
-      });
-      document.querySelectorAll(".train-grepro-field").forEach((item) => {
-        item.style.display = algo === "grepro" ? "inline-flex" : "none";
       });
       document.querySelectorAll(".train-ppo2-field").forEach((item) => {
         item.style.display = algo === "ppo2" ? "inline-flex" : "none";
       });
       document.querySelectorAll(".train-day-split-field").forEach((item) => {
         item.style.display = algo === "ppo2" ? "none" : "inline-flex";
-      });
-      document.querySelectorAll(".train-pro-field").forEach((item) => {
-        item.style.display = algo === "pro" ? "inline-flex" : "none";
       });
       const ppo2Mode = algo === "ppo2";
       trainObservation.disabled = true;
@@ -4830,9 +4685,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         }
         trainControlDtCustomWrap.style.display = "none";
       }
-      if (["ppo", "ppo2", "grepo", "grepro", "pro"].includes(algo)) {
-        trainControlDtCustomWrap.style.display = trainControlDt.value === "custom" ? "inline-flex" : "none";
-      }
+      trainControlDtCustomWrap.style.display = (!ppo2Mode && trainControlDt.value === "custom") ? "inline-flex" : "none";
       updateTrainPlan();
     }
 
@@ -4871,28 +4724,15 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         trainPlan.textContent = `PPO2 reference plan: ${document.getElementById("train-ppo2-steps").value} steps; fixed 15m/17D reference environment; calendar-month split with ${valMonths} validation + ${testMonths} newest test month(s), ≥${formatNumber(coverage, 0)}% coverage; λ_energy ${document.getElementById("train-ppo2-lam-energy").value}; λ_peak sweep ${document.getElementById("train-ppo2-lam-peak").value}; internal fixed-block month Oracle; CPU threads ${document.getElementById("train-ppo2-torch-threads").value}. No shared rolling-Oracle cache is required.`;
         return;
       }
-      trainButton.disabled = valDays < 1 || testDays < 1 || trainDays < 1 || algo === "grpo" || !validControlDt;
-      if (algo === "grpo") {
-        trainPlan.textContent = "GRPO is visible for planning, but it is not implemented in this repo yet.";
-      } else if (valDays < 1 || testDays < 1) {
+      trainButton.disabled = valDays < 1 || testDays < 1 || trainDays < 1 || !validControlDt;
+      if (valDays < 1 || testDays < 1) {
         trainPlan.textContent = "Validation days and test days must both be at least 1.";
       } else if (trainDays < 1) {
         trainPlan.textContent = `${days} days found; validation ${valDays} + test ${testDays} leaves no training days.`;
-      } else if (algo === "grepro" && trainDays < 30) {
-        trainButton.disabled = true;
-        trainPlan.textContent = `GrePRO needs at least 30 chronological training days; only ${trainDays} remain after validation/test.`;
       } else if (!validControlDt) {
         trainPlan.textContent = `Invalid control Δt ${controlDt}m. It must be a native-or-coarser multiple that divides both 30 minutes and 24 hours.`;
       } else {
-        const budget = algo === "ppo"
-          ? `${trainSteps.value} PPO steps; gamma ${trainGamma.value}; lambda ${trainLambda.value}`
-          : algo === "ppo2"
-            ? `${document.getElementById("train-ppo2-steps").value} PPO2 steps; gamma ${document.getElementById("train-ppo2-gamma").value}; λ_energy ${document.getElementById("train-ppo2-lam-energy").value}; λ_peak ${document.getElementById("train-ppo2-lam-peak").value}`
-            : algo === "pro"
-              ? `${trainProIters.value} PRO iterations; oracle_coef ${trainProOracleCoef.value}; decay ${trainProOracleDecay.value}; gamma ${trainProGamma.value}`
-            : algo === "grepro"
-              ? `${trainGreproIters.value} GrePRO iterations; fixed SADRBC residual ${formatNumber(Number(trainGreproResidualLimit.value) * 100, 0)}%; deterministic forecast seed ${trainGreproForecastSeed.value}; 3→7→30 day curriculum; gamma ${trainGreproGamma.value}`
-              : `${trainIters.value} GREPO iterations; gamma ${trainGrepoGamma.value}`;
+        const budget = `${trainSteps.value} PPO steps; gamma ${trainGamma.value}; lambda ${trainLambda.value}`;
         const brainLabel = "BrainEnv (7 eyes)";
         trainPlan.textContent = `Checking required data... Plan: ${brainLabel}; device ${trainDevice.value}; train ${trainDays} days, validation ${valDays}, test ${testDays}; ${budget}; sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action); E/P ${trainEcap.value}/${trainPrated.value}.`;
         trainOracleStatusTimer = setTimeout(refreshTrainingOracleStatus, 250);
@@ -4952,14 +4792,6 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           scale: 1,
           color: "#4ade80",
           direction: "Higher is better.",
-        },
-        sadrbc: {
-          field: "saving_vs_sadrbc_pct",
-          label: "saving vs causal SADRBC",
-          unit: "%",
-          scale: 1,
-          color: "#22d3ee",
-          direction: "Higher is better; zero matches Uncle SADRBC.",
         },
         gap: {
           field: "oracle_gap_pct",
@@ -5059,24 +4891,6 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         steps: Number(trainSteps.value),
         gamma: Number(trainGamma.value),
         lambda: Number(trainLambda.value),
-        iters: Number(trainIters.value),
-        group: Number(trainGroup.value),
-        beta: Number(trainBeta.value),
-        std: Number(trainStd.value),
-        grepo_gamma: Number(trainGrepoGamma.value),
-        grepro_iters: Number(trainGreproIters.value),
-        grepro_group: Number(trainGreproGroup.value),
-        grepro_beta: Number(trainGreproBeta.value),
-        grepro_std: Number(trainGreproStd.value),
-        grepro_gamma: Number(trainGreproGamma.value),
-        grepro_residual_limit: Number(trainGreproResidualLimit.value),
-        grepro_forecast_seed: Number(trainGreproForecastSeed.value),
-        grepro_forecast_load_sigma: Number(trainGreproLoadSigma.value),
-        grepro_forecast_pv_sigma: Number(trainGreproPvSigma.value),
-        pro_iters: Number(trainProIters.value),
-        pro_oracle_coef: Number(trainProOracleCoef.value),
-        pro_oracle_decay: Number(trainProOracleDecay.value),
-        pro_gamma: Number(trainProGamma.value),
         ppo2_steps: Number(document.getElementById("train-ppo2-steps").value),
         ppo2_seed: Number(document.getElementById("train-ppo2-seed").value),
         ppo2_seeds: document.getElementById("train-ppo2-seeds").value.trim(),
@@ -5351,7 +5165,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       if (trainControlDt.value === "custom") trainControlDtCustom.focus();
       updateTrainPlan();
     });
-    [trainEcap, trainPrated, trainValDays, trainTestDays, trainSteps, trainGamma, trainLambda, trainIters, trainGrepoGamma, trainGreproIters, trainGreproGroup, trainGreproBeta, trainGreproStd, trainGreproGamma, trainControlDtCustom].forEach((input) => input.addEventListener("input", updateTrainPlan));
+    [trainEcap, trainPrated, trainValDays, trainTestDays, trainSteps, trainGamma, trainLambda, trainControlDtCustom].forEach((input) => input.addEventListener("input", updateTrainPlan));
     document.querySelectorAll(".train-ppo2-field input").forEach((input) => input.addEventListener("input", updateTrainPlan));
     trainButton.addEventListener("click", startTraining);
     trainStopButton.addEventListener("click", stopTraining);

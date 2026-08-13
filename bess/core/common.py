@@ -1,5 +1,5 @@
 """bess.core.common.py  shared paths, config mapping, tariff helpers and the
-monthly-billing scorer used by EVERY method (DRL, SADRBC, Oracle, No-BESS)
+monthly-billing scorer used by PPO, Oracle, and No-BESS evaluation paths
 so comparisons are scored on one identical cost model.
 
 Cost model (EVN 2-part tariff params from settings.SYSTEM_CONFIG):
@@ -25,7 +25,7 @@ ROOT = PROJECT_ROOT
 DATA_DIR = ROOT / "data"
 RESULTS_DIR = ROOT / "checkpoints"
 
-from bess.agents.sadrbc import SADRBCConfig, tariff_for_step  # noqa: E402
+from bess.core.config import BESSConfig, tariff_for_step  # noqa: E402
 
 
 def ensure_inside_directory(path: Path, base_dir: Path, *, label: str = "project") -> Path:
@@ -81,7 +81,7 @@ FIN = {
 }
 
 
-def load_system_config() -> SADRBCConfig:
+def load_system_config() -> BESSConfig:
     """Build the fallback controller config from canonical project defaults."""
     battery = SYSTEM_CONFIG["BESS"]
     tariff = SYSTEM_CONFIG["Tariff"]
@@ -113,15 +113,15 @@ def load_system_config() -> SADRBCConfig:
         "peak_windows": tariff["peak_windows"],
         "off_windows": tariff["off_windows"],
     }
-    return SADRBCConfig(cfg)
+    return BESSConfig(cfg)
 
 
-def make_bess_config(base: SADRBCConfig, e_cap_kwh: float,
-                     p_rated_kw: float, p_target_kw: float) -> SADRBCConfig:
+def make_bess_config(base: BESSConfig, e_cap_kwh: float,
+                     p_rated_kw: float, p_target_kw: float) -> BESSConfig:
     """Clone `base` tariff/SOC/TOU-window settings with a different BESS
     size. Windows PHI c copy  nu khng, biu gi ty chnh (VD khung
     cao im mi 17:3022:30) s m thm quay v mc nh TT16."""
-    return SADRBCConfig({
+    return BESSConfig({
         "E_cap_kWh": e_cap_kwh,
         "P_rated_kW": p_rated_kw,
         "eta_ch": base.eta_ch,
@@ -149,7 +149,7 @@ def make_bess_config(base: SADRBCConfig, e_cap_kwh: float,
 
 
 
-def tariff_vector(cfg: SADRBCConfig) -> np.ndarray:
+def tariff_vector(cfg: BESSConfig) -> np.ndarray:
     steps_per_day = steps_per_day_from_dt(cfg.dt)
     return np.array([tariff_for_step(t, cfg) for t in range(steps_per_day)],
                     dtype=np.float64)
@@ -173,7 +173,7 @@ def is_sunday(day) -> bool:
         return False
 
 
-def cfg_no_peak(cfg: SADRBCConfig) -> SADRBCConfig:
+def cfg_no_peak(cfg: BESSConfig) -> BESSConfig:
     """Clone cfg vi khung cao im rng (gi cao im  gi bnh thng)
      dng cho ngy Ch nht khi TOU_RULES['sunday_no_peak'] bt."""
     c = make_bess_config(cfg, cfg.E_cap, cfg.P_rated_nominal,
@@ -184,7 +184,7 @@ def cfg_no_peak(cfg: SADRBCConfig) -> SADRBCConfig:
     return c
 
 
-def tariff_vector_day(cfg: SADRBCConfig, day) -> np.ndarray:
+def tariff_vector_day(cfg: BESSConfig, day) -> np.ndarray:
     if TOU_RULES.get("sunday_no_peak") and is_sunday(day):
         return tariff_vector(cfg_no_peak(cfg))
     return tariff_vector(cfg)
@@ -202,7 +202,7 @@ def rolling_pmax_day(p_grid_day: np.ndarray, dt_hours: float) -> float:
     return fixed_pmax_day(p_grid_day, dt_hours)
 
 
-def score_month(p_grid_days: list[np.ndarray], cfg: SADRBCConfig,
+def score_month(p_grid_days: list[np.ndarray], cfg: BESSConfig,
                 days: list | None = None) -> dict:
     """Monthly bill on the shared cost model. Input: list of daily grids.
     `days` (list DayData, cng th t vi grids): cho quy tc lch 
@@ -232,7 +232,7 @@ def score_month(p_grid_days: list[np.ndarray], cfg: SADRBCConfig,
     }
 
 
-def check_hard_constraints(p_grid_days, soc_days, cfg: SADRBCConfig,
+def check_hard_constraints(p_grid_days, soc_days, cfg: BESSConfig,
                            tol: float = 1e-6) -> dict:
     """Count violations of the two hard constraints (must both be zero)."""
     export_viol = sum(int(np.any(np.asarray(g) < -tol)) for g in p_grid_days)

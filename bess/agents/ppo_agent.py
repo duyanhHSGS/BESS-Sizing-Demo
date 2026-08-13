@@ -247,9 +247,12 @@ class PPOAgent:
     def load(self, path):
         ck = torch.load(path, map_location=self.device)
         if isinstance(ck, dict) and "state_dict" in ck:
+            algo = str(ck.get("algo") or "ppo").lower()
+            if algo != "ppo":
+                raise ValueError(f"checkpoint algorithm {algo!r} is not PPO")
             self.net.load_state_dict(ck["state_dict"])
             self.meta = ck.get("meta", {}) or {}
-        else:                                   # legacy raw state_dict
+        else:                                   # legacy raw PPO state_dict
             self.net.load_state_dict(ck)
             self.meta = {}
         self._sync_collector()

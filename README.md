@@ -5,91 +5,50 @@ How to run
 ----------
 
 1. Use Python 3.10.
+2. Create a virtual environment with `python -m venv .venv`.
+3. Activate it (`.\.venv\Scripts\Activate.ps1` on Windows PowerShell or `source .venv/bin/activate` on macOS/Linux).
+4. Install dependencies with `python -m pip install --upgrade pip` and `python -m pip install -r requirements.txt`.
+5. Run tests with `python -m pytest`.
+6. Start the app with `python main.py`.
 
-2. Create a virtual environment:
+Controller families
+-------------------
 
-   python -m venv .venv
+The learned-controller surface intentionally contains only **PPO** and **PPO2**.
 
-3. Activate the virtual environment:
+- **PPO** uses the canonical resolution-aware seven-eye `BrainEnv`.
+- **PPO2** is the isolated senior-reference path. It keeps its dedicated 15-minute `PPO2Env`, 17-input contract, actor-only deployment wrapper, training runner, and private PPO2 Oracle/scorer.
+- **No-BESS** and **Oracle LP** are references used for measurement; they are not learned controllers.
 
-   Windows PowerShell:
-   .\.venv\Scripts\Activate.ps1
+Training, Dispatch, Live Runs, Shadow Running, and Benchmarking accept only PPO/PPO2 checkpoints. Old checkpoint files from removed algorithms may still exist as runtime artifacts on another machine, but they are not runnable by this source tree.
 
-   macOS/Linux:
-   source .venv/bin/activate
+Checkpoint Tournament
+---------------------
 
-4. Install dependencies:
+The **Benchmarking** tab is checkpoint-centric. Select any compatible PPO/PPO2 `policy_*.pt` files and they fight as independent `.pt` contestants. This supports PPO-vs-PPO, PPO-vs-PPO2, different seeds, different training settings, and other checkpoint-level comparisons without giving any controller family a special benchmark seat.
 
-   python -m pip install --upgrade pip
-   python -m pip install -r requirements.txt
-
-5. Run tests with pytest:
-
-   python -m pytest
-
-6. Start the app:
-
-   python main.py
+No-BESS and the cached Oracle LP are neutral references. PPO2 participates only when the selected dataset satisfies its fixed 15-minute playing-field contract.
 
 Live Runs
 ---------
 
-Open the **Live Runs** tab, choose a local `policy_*.pt` checkpoint, and
-create a session. A session snapshots the currently selected CSV and keeps
-SADRBC, DRL, SOC, and peak state alive while you run one day at a time or use
-Auto run. Sessions are held in server memory and disappear when the Flask
-process restarts. The Live Runs day selector shows native-resolution Load, PV,
-No-BESS grid, SADRBC grid, policy grid, and policy SOC traces in the same daily
-shape as Dispatch Viewer. Click legend metrics to enable or disable individual
-lines, use **Hide all lines** to clear the graph, and hover for time-slot values.
-
-GrePRO hybrid controller
-------------------------
-
-New GrePRO checkpoints use SADRBC v13 as a causal baseline and learn only a
-bounded, constant residual correction (5% by default). The training horizon
-still grows from 3 to 7 to 30 days without simultaneously changing GrePRO's
-physical authority. SADRBC receives
-the portable real-weather forecast when forecast mode is selected. Otherwise
-it receives a declared deterministic AR(1) forecast (default seed `130013`,
-5% load error, 15% PV error). Exact future load/PV is never passed directly
-to SADRBC. The seed and forecast contract are saved inside checkpoint meta so
-Dispatch, Benchmarking, and Live Runs reproduce training behavior.
+Open **Live Runs**, choose a PPO/PPO2 `policy_*.pt`, and create a session. The selected CSV is snapshotted and the page reveals one day at a time beside the No-BESS reference. Daily traces contain Load, PV, No-BESS grid, policy grid, and policy SOC. Sessions live in server memory and disappear when the Flask process restarts.
 
 Shadow Running
 --------------
 
-The **Shadow Running** tab evaluates No-BESS, SADRBC v13, and one local policy
-against measured CSV days without sending battery commands. Save a source,
-checkpoint, and battery body, then run catch-up for a date range. Configuration,
-daily audit rows, and monthly virtual bills persist in `shadow/shadow.sqlite`
-across Flask restarts. Reset the shadow history before changing its scientific
-configuration. Native-resolution daily traces are stored separately in the
-same database and can be selected in the daily Shadow dispatch chart, with the
-same metric toggles and hover inspector as Live Runs.
+The **Shadow Running** tab evaluates No-BESS and one selected PPO/PPO2 checkpoint against measured CSV or ThingsBoard data without sending battery commands. Configuration, daily audit rows, monthly virtual bills, and native-resolution traces persist in `shadow/shadow.sqlite`.
 
-At the top of Shadow Running, the distinct **ThingsBoard Connector** panel can
-configure and test the API URL, account, device ID, load/PV telemetry keys,
-unit scaling, timezone, sampling interval, and maximum repaired gap. Selecting
-ThingsBoard as the Shadow source fetches completed telemetry days directly,
-caches valid raw days in the ignored `shadow/` folder, and reconstructs the
-controller chain from that cache after restarts. Connector secrets remain in
-the local ignored runtime folder and are never returned by the configuration
-API.
+The current source schema stores only No-BESS and policy results. If this checkout opens a legacy local Shadow database containing old controller-specific columns, that non-authoritative local history is reset and recreated under the current schema.
 
-The adjacent **Shadow Weather Forecast** panel configures Open-Meteo or a
-compatible custom HTTPS provider with site coordinates, timezone, and optional
-API-key authentication. For a ThingsBoard forecast policy, catch-up downloads
-and caches real hourly weather, loads the checkpoint's saved causal ridge
-`.npz`, reproduces the training feature pipeline, and generates the four live
-forecast inputs without reading future load/PV actuals. Save Weather first,
-then save the main Shadow configuration to freeze both data contracts.
+The **ThingsBoard Connector** panel configures and tests the API URL, account, device ID, load/PV telemetry keys, unit scaling, timezone, sampling interval, and repaired-gap limits. Connector secrets remain in ignored local runtime storage and are not returned by public configuration APIs.
 
-The connector initially uses the Tande ThingsBoard `SPEC` embedded in
-`bess/integrations/thingsboard_connector.py`, so the Shadow panel opens prefilled and can be
-tested without re-entering the site fields.
+Get Weather
+-----------
+
+The standalone **Get Weather** tab can download real hourly weather aligned to dated site data. This is independent tooling; PPO keeps its fixed seven-eye observation and PPO2 keeps its isolated senior-reference input contract.
 
 Project layout
 --------------
 
-Application code lives under `bess/`, grouped by responsibility instead of being spread across the repository root. Manual utilities live in `scripts/`, performance probes live in `benchmarks/`, and Flask templates live in `web/templates/`. See `docs/project-structure.md` for the full map and package-module training commands.
+Application code lives under `bess/`, manual utilities under `scripts/`, performance probes under `benchmarks/`, Flask templates under `web/templates/`, and tests under `tests/`. See `docs/project-structure.md` and `git-plz-ignore/projarch.md` for the detailed architecture map.

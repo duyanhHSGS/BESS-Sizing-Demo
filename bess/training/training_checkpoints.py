@@ -15,15 +15,6 @@ CURVE_FIELDS = (
     "val_cost_vnd",
     "oracle_gap_pct",
     "saving_vs_nobess_pct",
-    "saving_vs_sadrbc_pct",
-    "throughput_kwh",
-    "mean_abs_p_bess_kw",
-    "soc_span_pct",
-    "blocked_action_pct",
-    "residual_limit",
-    "active_gate",
-    "zero_export_violation_days",
-    "soc_violation_days",
 )
 
 
@@ -40,12 +31,10 @@ def _load_checkpoint_meta(path: Path) -> tuple[str, dict, str | None]:
     meta = raw.get("meta", {}) or {}
     algo = raw.get("algo") or meta.get("algo")
     if not algo:
-        if "actor" in raw and "critic" in raw:
-            algo = "grepo"
-        elif "state_dict" in raw:
+        if "state_dict" in raw:
             algo = "ppo"
         else:
-            algo = "unknown"
+            algo = "removed_legacy"
     return (str(algo), dict(meta), None)
 
 

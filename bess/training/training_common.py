@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from bess.agents.sadrbc import SADRBCConfig
+from bess.core.config import BESSConfig
 from bess.core.common import TOU_RULES, load_system_config
 from bess.core.scenario_gen import DayData, MonthData
 
@@ -124,7 +124,7 @@ def build_training_bess_config(
     """Build one canonical BESS/tariff config for every training algorithm."""
     base = load_system_config()
     tariff = json.loads(Path(training_config_path).read_text(encoding="utf-8"))
-    cfg = SADRBCConfig({
+    cfg = BESSConfig({
         "E_cap_kWh": e_cap_kwh,
         "P_rated_kW": p_rated_kw,
         "eta_ch": float(tariff.get("charge_efficiency", base.eta_ch)),

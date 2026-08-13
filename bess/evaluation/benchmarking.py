@@ -2,23 +2,28 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
-import bess.evaluation.benchmark_store as benchmark_store
-import bess.dispatch.dispatch_runner as dispatch_runner
-import bess.evaluation.oracle.oracle_cache as oracle_cache
-from bess.evaluation.baselines import run_no_bess, run_sadrbc
-from bess.evaluation.benchmark import _demand_charge, _month_start_day, selected_data_path
-from bess.evaluation.benchmark_jobs import BenchmarkCancelled
+from bess.agents import SUPPORTED_POLICY_ALGORITHMS
 from bess.core.common import check_hard_constraints
+from bess.dispatch import dispatch_runner
+from bess.evaluation import benchmark_store
+from bess.evaluation.baselines import run_no_bess
+from bess.evaluation.benchmark import (
+    _demand_charge,
+    _month_start_day,
+    selected_data_path,
+)
+from bess.evaluation.benchmark_jobs import BenchmarkCancelled
+from bess.evaluation.oracle import oracle_cache
 from bess.training.training_checkpoints import CHECKPOINT_DIR, list_checkpoints
 
-
 SCHEMA_VERSION = 2
-REFERENCE_IDS = ("no_bess", "sadrbc_v13", "oracle")
+REFERENCE_IDS = ("no_bess", "oracle")
 SAMPLING_FIELDS = {"native_dt_minutes", "control_dt_minutes", "native_steps_per_action"}
 
 
@@ -40,8 +45,11 @@ def context(parameters: dict[str, Any]) -> dict[str, Any]:
         expected_dt = meta.get("native_dt_minutes")
         incompatible_dt = expected_dt is not None and abs(float(expected_dt) - actual_dt_minutes) > 1e-9
         reason = checkpoint.get("error")
-        if checkpoint.get("algo", "").lower() not in {"ppo", "grepo", "grepro", "pro"}:
-            reason = reason or f"Unsupported algorithm: {checkpoint.get('algo') or 'unknown'}"
+        algo = checkpoint.get("algo", "").lower()
+        if algo not in SUPPORTED_POLICY_ALGORITHMS:
+            reason = reason or f"Removed/unsupported algorithm: {checkpoint.get('algo') or 'unknown'}"
+        elif algo == "ppo2" and abs(actual_dt_minutes - 15.0) > 1e-9:
+            reason = reason or f"PPO2 requires 15-minute data; selected CSV is {actual_dt_minutes:g}-minute."
         elif not SAMPLING_FIELDS.issubset(meta):
             reason = reason or "Legacy checkpoint lacks required sampling metadata."
         elif incompatible_dt:
@@ -73,7 +81,7 @@ def context(parameters: dict[str, Any]) -> dict[str, Any]:
 
 
 def fingerprint(parameters: dict[str, Any], policy_names: list[str]) -> str:
-    checkpoints = _selected_checkpoints(policy_names)
+    checkpoints = _selected_checkpoints(policy_names, parameters)
     payload = {
         "schema": SCHEMA_VERSION,
         "dataset_sha256": _file_hash(selected_data_path(parameters)),
@@ -97,7 +105,7 @@ def run_and_save(
     progress: Callable[[str, int, int, str | None], None],
     cancelled: Callable[[], bool],
 ) -> dict[str, Any]:
-    checkpoints = _selected_checkpoints(policy_names)
+    checkpoints = _selected_checkpoints(policy_names, parameters)
     oracle = oracle_cache.cached_oracle_lp(parameters)
     if not _oracle_ready(oracle):
         raise ValueError("Exact Oracle is missing. Calculate this battery and dataset in Sizing Demo first.")
@@ -108,48 +116,20 @@ def run_and_save(
         float(parameters.get("battery_capacity_kWh") or 0),
         float(parameters.get("battery_power_limit_kW") or 0),
     )
-    total_stages = 3 + len(checkpoints)
+    total_stages = 2 + len(checkpoints)
     contestants: list[dict[str, Any]] = []
-    sadrbc_forecast_spec = None
-    sadrbc_p_ref = None
-
-    for checkpoint in checkpoints:
-        contract = checkpoint.get("meta", {}).get("sadrbc_forecast") or {}
-        if not contract:
-            continue
-        from bess.forecasting.sadrbc_forecast import SADRBCForecastSpec
-
-        sadrbc_forecast_spec = SADRBCForecastSpec(
-            seed=int(contract.get("seed", 13_0013)),
-            load_sigma=float(contract.get("load_sigma", 0.05)),
-            pv_sigma=float(contract.get("pv_sigma", 0.15)),
-            rho=float(contract.get("rho", 0.90)),
-            replan_minutes=int(contract.get("replan_minutes", 60)),
-        )
-        sadrbc_p_ref = float(
-            checkpoint.get("meta", {}).get("p_ref_kw")
-            or dispatch_runner._policy_reference_kw(month)
-        )
-        break
-
 
     _check_cancelled(cancelled)
-    progress("Running no-BESS baseline", 0, total_stages, "No-BESS")
+    progress("Running no-BESS reference", 0, total_stages, "No-BESS")
     no_bess = run_no_bess(month, cfg)
-    contestants.append(_rollout_contestant("no_bess", "No-BESS", "reference", no_bess, month, cfg, parameters))
-
-    _check_cancelled(cancelled)
-    progress("Running rule-based BESS", 1, total_stages, "SADRBC v13")
-    sadrbc = run_sadrbc(
-        month, cfg, forecast_spec=sadrbc_forecast_spec,
-        p_ref_kw=sadrbc_p_ref,
+    contestants.append(
+        _rollout_contestant("no_bess", "No-BESS", "reference", no_bess, month, cfg, parameters)
     )
-    contestants.append(_rollout_contestant("sadrbc_v13", "SADRBC v13", "rule", sadrbc, month, cfg, parameters))
 
-    for index, checkpoint in enumerate(checkpoints, start=2):
+    for index, checkpoint in enumerate(checkpoints, start=1):
         _check_cancelled(cancelled)
         name = checkpoint["name"]
-        progress("Running policy brain", index, total_stages, name)
+        progress("Running .pt fighter", index, total_stages, name)
         agent, algo, meta = dispatch_runner.load_policy(name)
         p_ref = float(meta.get("p_ref_kw") or dispatch_runner._policy_reference_kw(month))
         dispatch_runner.prepare_policy_forecast(name, agent, meta, month, p_ref)
@@ -206,11 +186,24 @@ def run_and_save(
     return benchmark_store.save_result(result)
 
 
-def _selected_checkpoints(policy_names: list[str]) -> list[dict[str, Any]]:
+def _selected_checkpoints(
+    policy_names: list[str],
+    parameters: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     if not isinstance(policy_names, list) or not policy_names:
         raise ValueError("Select at least one runnable .pt policy.")
     if len(set(policy_names)) != len(policy_names):
         raise ValueError("A policy was selected more than once.")
+
+    actual_dt_minutes = None
+    if parameters is not None:
+        cfg = dispatch_runner.build_dispatch_config(
+            parameters,
+            float(parameters.get("battery_capacity_kWh") or 0),
+            float(parameters.get("battery_power_limit_kW") or 0),
+        )
+        actual_dt_minutes = cfg.dt * 60.0
+
     known = {row["name"]: row for row in list_checkpoints()}
     selected = []
     for name in policy_names:
@@ -219,11 +212,23 @@ def _selected_checkpoints(policy_names: list[str]) -> list[dict[str, Any]]:
         row = known[name]
         if row.get("error"):
             raise ValueError(f"{name}: checkpoint is not loadable ({row['error']})")
-        if row.get("algo", "").lower() not in {"ppo", "grepo", "grepro", "pro"}:
-            raise ValueError(f"{name}: unsupported algorithm {row.get('algo')}")
-        if not SAMPLING_FIELDS.issubset(row.get("meta", {})):
+        algo = row.get("algo", "").lower()
+        meta = row.get("meta", {})
+        if algo not in SUPPORTED_POLICY_ALGORITHMS:
+            raise ValueError(f"{name}: removed/unsupported algorithm {row.get('algo')}")
+        if not SAMPLING_FIELDS.issubset(meta):
             raise ValueError(f"{name}: legacy checkpoint lacks required sampling metadata")
-        portability_error = dispatch_runner.forecast_portability_error(row.get("meta", {}))
+        if actual_dt_minutes is not None:
+            if algo == "ppo2" and abs(actual_dt_minutes - 15.0) > 1e-9:
+                raise ValueError(
+                    f"{name}: PPO2 requires 15-minute data; selected CSV is {actual_dt_minutes:g}-minute"
+                )
+            expected_dt = float(meta["native_dt_minutes"])
+            if abs(expected_dt - actual_dt_minutes) > 1e-9:
+                raise ValueError(
+                    f"{name}: needs {expected_dt:g}-minute data; selected CSV is {actual_dt_minutes:g}-minute"
+                )
+        portability_error = dispatch_runner.forecast_portability_error(meta)
         if portability_error:
             raise ValueError(f"{name}: {portability_error}")
         selected.append(row)
@@ -336,16 +341,23 @@ def _champions(leaderboard):
         return {}
 
     def pick(key, reverse=False):
-        return sorted(policies, key=lambda row: ((-row[key]) if reverse else row[key], row["total_operating_cost_vnd"], row["id"]))[0]["id"]
+        return min(
+            policies,
+            key=lambda row: (
+                (-row[key]) if reverse else row[key],
+                row["total_operating_cost_vnd"],
+                row["id"],
+            ),
+        )["id"]
 
-    safest = sorted(
+    safest = min(
         policies,
         key=lambda row: (
             row["zero_export_violation_days"] + row["soc_violation_days"],
             row["total_operating_cost_vnd"],
             row["id"],
         ),
-    )[0]["id"]
+    )["id"]
     return {
         "cheapest": pick("total_operating_cost_vnd"),
         "lowest_peak": pick("peak_kw"),

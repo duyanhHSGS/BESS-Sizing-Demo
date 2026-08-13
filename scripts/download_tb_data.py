@@ -1,4 +1,4 @@
-"""Download 1-minute ThingsBoard telemetry into a Sizing_Demo GREPO CSV.
+"""Download 1-minute ThingsBoard telemetry into a Sizing_Demo training CSV.
 
 This file is intentionally self-contained.  It imports no code from
 ``diseep_simulator`` or any other project folder, and it uses only Python's
@@ -42,7 +42,7 @@ END_DATE = "2026-07-01"
 INTERVAL_MINUTES = 1
 
 BASE_DIR = PROJECT_ROOT
-OUTPUT_CSV = BASE_DIR / "data" / f"offline_{SPEC['name']}_grepo.csv"
+OUTPUT_CSV = BASE_DIR / "data" / f"offline_{SPEC['name']}_1min.csv"
 
 TOKEN_TTL_SECONDS = 2 * 60 * 60
 MAX_INTERVALS_PER_REQUEST = 650

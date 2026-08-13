@@ -5,17 +5,19 @@ from datetime import date
 
 from flask import Flask, Response, jsonify, render_template, request
 
-import bess.evaluation.benchmark_jobs as benchmark_jobs
-import bess.evaluation.benchmark_store as benchmark_store
-import bess.evaluation.benchmarking as benchmarking
-import bess.dispatch.dispatch_runner as dispatch_runner
-import bess.dispatch.dispatch_store as dispatch_store
-import bess.shadow.live_runs as live_runs
-import bess.evaluation.oracle.oracle_cache as oracle_cache
-import bess.shadow.shadow_jobs as shadow_jobs
-import bess.shadow.shadow_runs as shadow_runs
-import bess.integrations.thingsboard_connector as thingsboard_connector
-import bess.forecasting.shadow_weather as shadow_weather
+from bess.agents import SUPPORTED_POLICY_ALGORITHMS
+from bess.core.settings import (
+    DEFAULT_PARAMETERS,
+    FORM_FIELDS,
+    PPO2_GAMMA,
+    PPO2_LAM_ENERGY,
+    PPO2_LAM_PEAK,
+    PPO_GAMMA,
+    PPO_LAMBDA,
+    SAMPLE_BATTERY_CANDIDATES,
+)
+from bess.dispatch import dispatch_runner, dispatch_store
+from bess.evaluation import benchmark_jobs, benchmark_store, benchmarking
 from bess.evaluation.benchmark import (
     build_benchmark,
     detect_dt_hours,
@@ -23,20 +25,15 @@ from bess.evaluation.benchmark import (
     selected_data_filename,
     selected_data_path,
 )
+from bess.evaluation.oracle import oracle_cache
 from bess.evaluation.oracle.oracle_lp import build_oracle_lp
-from bess.core.settings import (
-    DEFAULT_PARAMETERS,
-    FORM_FIELDS,
-    GREPO_GAMMA,
-    GREPRO_GAMMA,
-    PPO_GAMMA,
-    PPO_LAMBDA,
-    PPO2_GAMMA,
-    PPO2_LAM_ENERGY,
-    PPO2_LAM_PEAK,
-    PRO_GAMMA,
-    SAMPLE_BATTERY_CANDIDATES,
+from bess.forecasting.weather_forecast import (
+    WeatherError,
+    fetch_weather,
+    weather_status,
 )
+from bess.integrations import thingsboard_connector
+from bess.shadow import live_runs, shadow_jobs, shadow_runs
 from bess.training.training_checkpoints import get_checkpoint_report, list_checkpoints
 from bess.training.training_datasets import DatasetError, list_datasets
 from bess.training.training_jobs import MANAGER
@@ -46,8 +43,6 @@ from bess.training.training_launcher import (
     start_training,
     training_oracle_status,
 )
-from bess.forecasting.weather_forecast import WeatherError, fetch_weather, weather_status
-
 
 app = Flask(__name__, template_folder="web/templates")
 
@@ -132,7 +127,10 @@ def weather_fetch():
 
 @app.route("/api/training/checkpoints", methods=["GET"])
 def training_checkpoints():
-    return jsonify(list_checkpoints())
+    return jsonify([
+        checkpoint for checkpoint in list_checkpoints()
+        if checkpoint.get("algo", "").lower() in SUPPORTED_POLICY_ALGORITHMS
+    ])
 
 
 @app.route("/api/training/checkpoints/<checkpoint_name>/report", methods=["GET"])
@@ -191,24 +189,10 @@ def training_job_events(job_id):
 @app.route("/api/dispatch/policies", methods=["GET"])
 def dispatch_policies():
     latest = dispatch_store.latest_runs_by_policy()
-    sadrbc_run = latest.get("sadrbc_v13")
-    rows = [
-        {
-            "name": "sadrbc_v13",
-            "display_name": "SADRBC v13",
-            "algo": "rule-based",
-            "e_cap_kwh": _to_float(PARAMETERS.get("battery_capacity_kWh"), 0.0),
-            "p_rated_kw": _to_float(PARAMETERS.get("battery_power_limit_kW"), 0.0),
-            "billing_mode": PARAMETERS.get("billing_mode"),
-            "meta": {"controller": "SADRBC v13", "uses_current_sizing": True},
-            "error": None,
-            "latest_run": sadrbc_run,
-            "latest_status": "saved" if sadrbc_run else "no saved trace",
-            "has_trace": bool(sadrbc_run and dispatch_store.get_traces(sadrbc_run["id"])),
-            "warning": None if sadrbc_run else "No saved SADRBC v13 trace exists yet.",
-        }
-    ]
+    rows = []
     for checkpoint in list_checkpoints():
+        if checkpoint.get("algo", "").lower() not in SUPPORTED_POLICY_ALGORITHMS:
+            continue
         run = latest.get(checkpoint["name"])
         rows.append(
             {
@@ -260,7 +244,11 @@ def dispatch_run():
     if not isinstance(policy_names, list) or not policy_names:
         return jsonify({"error": "Select at least one policy."}), 422
 
-    known = {"sadrbc_v13", *{checkpoint["name"] for checkpoint in list_checkpoints()}}
+    known = {
+        checkpoint["name"]
+        for checkpoint in list_checkpoints()
+        if checkpoint.get("algo", "").lower() in SUPPORTED_POLICY_ALGORITHMS
+    }
     unknown = [name for name in policy_names if name not in known]
     if unknown:
         return jsonify({"error": f"Unknown local policy: {', '.join(unknown)}"}), 422
@@ -285,7 +273,11 @@ def live_run_list():
 def live_run_create():
     payload = request.get_json(silent=True) or {}
     policy_name = str(payload.get("policy") or "")
-    known = {checkpoint["name"] for checkpoint in list_checkpoints()}
+    known = {
+        checkpoint["name"]
+        for checkpoint in list_checkpoints()
+        if checkpoint.get("algo", "").lower() in SUPPORTED_POLICY_ALGORITHMS
+    }
     if policy_name not in known:
         return jsonify({"error": "Select a loadable local policy checkpoint."}), 422
     try:
@@ -390,28 +382,6 @@ def shadow_connector_test():
     try:
         return jsonify(thingsboard_connector.test_connection())
     except thingsboard_connector.ThingsBoardError as exc:
-        return jsonify({"error": str(exc)}), 502
-
-
-@app.route("/api/shadow/weather", methods=["GET"])
-def shadow_weather_config():
-    return jsonify(shadow_weather.public_config())
-
-
-@app.route("/api/shadow/weather", methods=["POST"])
-def shadow_weather_save():
-    try:
-        config = shadow_weather.save_config(request.get_json(silent=True) or {})
-    except shadow_weather.ShadowWeatherError as exc:
-        return jsonify({"error": str(exc)}), 422
-    return jsonify(config)
-
-
-@app.route("/api/shadow/weather/test", methods=["POST"])
-def shadow_weather_test():
-    try:
-        return jsonify(shadow_weather.test_connection())
-    except shadow_weather.ShadowWeatherError as exc:
         return jsonify({"error": str(exc)}), 502
 
 
@@ -620,9 +590,6 @@ def view_context():
         "ppo2_gamma": PPO2_GAMMA,
         "ppo2_lam_energy": PPO2_LAM_ENERGY,
         "ppo2_lam_peak": PPO2_LAM_PEAK,
-        "pro_gamma": PRO_GAMMA,
-        "grepo_gamma": GREPO_GAMMA,
-        "grepro_gamma": GREPRO_GAMMA,
         "candidate_oracles": candidate_oracles,
         "csv_has_oracle_cache": oracle_cache.selected_csv_has_cache(PARAMETERS),
         "exact_oracle_cache_exists": any(

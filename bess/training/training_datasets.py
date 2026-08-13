@@ -22,7 +22,6 @@ def _dataset_paths(base_dir: Path = BASE_DIR) -> dict[str, Path]:
     source_dir = data_dir if data_dir.exists() else base_dir
     paths = {
         "youngone": source_dir / "offline_data_Youngone.csv",
-        "youngone_grepo": source_dir / "offline_Youngone_grepo.csv",
     }
     for path in sorted(source_dir.glob("*.csv")):
         if path.is_file():

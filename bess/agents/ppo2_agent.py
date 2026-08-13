@@ -24,7 +24,7 @@ import torch.nn as nn
 
 # The senior trainer uses two Torch CPU threads. In this multi-agent repo that
 # setting is applied by the PPO2 training entrypoint instead of at import time,
-# so merely importing PPO2 cannot perturb PPO/GREPO numerical execution.
+# so merely importing PPO2 cannot perturb PPO numerical execution.
 
 # ---------------------------------------------------------------------------
 # Squashed Gaussian helpers (vendored from bess-drl engine/squashed_gaussian.py)

@@ -13,6 +13,7 @@ from bess.paths import PROJECT_ROOT
 from bess.training.training_common import augment_month, build_training_bess_config
 from bess.training.training_launcher import (
     TrainingLaunchError,
+    UnsupportedAlgorithm,
     build_training_command,
     write_training_config,
 )
@@ -70,6 +71,19 @@ class SharedTrainingHelpersTests(unittest.TestCase):
         self.assertEqual(len(cfg.W2), 60)
         self.assertEqual(cfg.OFF_PEAK_END_STEP, 60)
         self.assertEqual(cfg.T_cap, 0.0)
+
+
+class RemovedAlgorithmTests(unittest.TestCase):
+    def test_removed_algorithms_are_rejected_before_launch(self):
+        for algo in ("grepo", "grepro", "pro", "sadrbc", "grpo"):
+            with self.subTest(algo=algo):
+                with self.assertRaisesRegex(UnsupportedAlgorithm, "only PPO and PPO2"):
+                    build_training_command(
+                        {"algo": algo},
+                        Path("unused.csv"),
+                        Path("unused.json"),
+                        Path("unused_oracle.json"),
+                    )
 
 
 class PPO2LauncherTests(unittest.TestCase):

@@ -2,7 +2,7 @@
 
 This is a direct logic port of the archived senior causal BESS environment in
 git-plz-ignore/senior-ppo2-reference/. The only
-changes are attribute/import adapters for this repository's SADRBCConfig and
+changes are attribute/import adapters for this repository's shared BESSConfig and
 DayData/MonthData types. The reference contract is intentionally 15-minute-only:
 96 slots/day, two slots per fixed 30-minute demand block, and a 17D observation.
 """
@@ -130,7 +130,7 @@ def _map_feasible_action(
 
 
 class PPO2Env:
-    """Senior's causal 15-minute PPO environment, adapted to SADRBCConfig names."""
+    """Senior's causal 15-minute PPO environment, adapted to shared BESSConfig names."""
 
     def __init__(
         self,

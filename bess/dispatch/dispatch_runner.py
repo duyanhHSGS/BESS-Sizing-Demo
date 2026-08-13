@@ -4,12 +4,16 @@ import csv
 import math
 from datetime import date, timedelta
 from pathlib import Path
-
-from bess.paths import PROJECT_ROOT
 from typing import Any
 
 import numpy as np
 
+from bess.agents import SUPPORTED_POLICY_ALGORITHMS
+from bess.evaluation.baselines import (
+    rollout_activity,
+    run_drl_policy,
+    validate_dispatch_sampling,
+)
 from bess.evaluation.benchmark import (
     DATA_PATH,
     _annotate_day_billing,
@@ -17,32 +21,28 @@ from bess.evaluation.benchmark import (
     _demand_charge,
     _month_peaks,
     _month_start_day,
-    _rounded_series,
     _rolling_30_minute_average,
+    _rounded_series,
     _to_float,
     selected_data_path,
 )
+from bess.paths import PROJECT_ROOT
 from bess.training.training_checkpoints import CHECKPOINT_DIR, _load_checkpoint_meta
-from bess.evaluation.baselines import run_drl_policy, run_sadrbc, validate_dispatch_sampling
-
 
 BASE_DIR = PROJECT_ROOT
 
+from bess.agents.ppo2_agent import PPO2InferenceAgent
+from bess.agents.ppo_agent import PPOAgent
 from bess.core.bess_env import OBSERVATION_DIM
-from bess.core.common import (  # noqa: E402
+from bess.core.common import (
     TOU_RULES,
     ensure_inside_directory,
     load_system_config,
     score_month,
 )
+from bess.core.config import BESSConfig
+from bess.core.scenario_gen import DayData, MonthData
 from bess.core.timebase import dt_from_steps_per_day, steps_per_day_from_dt
-from bess.agents.grepo_agent import GREPOAgent  # noqa: E402
-from bess.agents.grepro_agent import GREPROAgent  # noqa: E402
-from bess.agents.ppo_agent import PPOAgent  # noqa: E402
-from bess.agents.ppo2_agent import PPO2InferenceAgent  # noqa: E402
-from bess.agents.pro_agent import PROAgent  # noqa: E402
-from bess.agents.sadrbc import SADRBCConfig  # noqa: E402
-from bess.core.scenario_gen import DayData, MonthData  # noqa: E402
 
 
 class DispatchRunWarning(RuntimeError):
@@ -100,7 +100,7 @@ def build_dispatch_config(parameters: dict[str, Any], e_cap_kwh: float, p_rated_
     dt_hours = _to_float(parameters.get("dt"), base.dt)
     dt_hours = dt_from_steps_per_day(steps_per_day_from_dt(dt_hours))
     TOU_RULES["sunday_no_peak"] = bool(parameters.get("billing_sunday"))
-    return SADRBCConfig(
+    return BESSConfig(
         {
             "E_cap_kWh": e_cap_kwh,
             "P_rated_kW": p_rated_kw,
@@ -140,10 +140,10 @@ def load_policy(checkpoint_name: str, checkpoint_dir: Path = CHECKPOINT_DIR):
     if error:
         raise DispatchRunWarning(f"{checkpoint_name}: checkpoint is not loadable ({error})")
     algo = algo.lower()
-    if algo == "grpo":
-        raise DispatchRunWarning(f"{checkpoint_name}: GRPO is not implemented in this repo yet")
-    if algo not in {"ppo", "ppo2", "grepo", "grepro", "pro"}:
-        raise DispatchRunWarning(f"{checkpoint_name}: unsupported checkpoint algorithm {algo}")
+    if algo not in SUPPORTED_POLICY_ALGORITHMS:
+        raise DispatchRunWarning(
+            f"{checkpoint_name}: unsupported checkpoint algorithm {algo}; only PPO and PPO2 are runnable"
+        )
     sampling_fields = {
         "native_dt_minutes",
         "control_dt_minutes",
@@ -159,33 +159,13 @@ def load_policy(checkpoint_name: str, checkpoint_dir: Path = CHECKPOINT_DIR):
         obs_dim = int(meta.get("obs_dim") or 17)
         agent = PPO2InferenceAgent(obs_dim=obs_dim)
     else:
-        raw = None
-        if algo in {"grepo", "grepro"}:
-            import torch
-
-            raw = torch.load(path, map_location="cpu")
-        obs_dim = int(
-            (raw or {}).get("obs_dim")
-            or meta.get("obs_dim")
-            or OBSERVATION_DIM
-        )
+        obs_dim = int(meta.get("obs_dim") or OBSERVATION_DIM)
         if obs_dim != OBSERVATION_DIM:
             raise DispatchRunWarning(
                 f"{checkpoint_name}: legacy {obs_dim}-eye checkpoint is incompatible "
                 f"with the current {OBSERVATION_DIM}-eye BrainEnv; retrain it"
             )
-        if algo == "ppo":
-            agent = PPOAgent(obs_dim=OBSERVATION_DIM)
-        elif algo == "pro":
-            agent = PROAgent(obs_dim=OBSERVATION_DIM)
-        else:
-            agent_class = GREPROAgent if algo == "grepro" else GREPOAgent
-            agent = agent_class(
-                obs_dim=OBSERVATION_DIM,
-                n_group=int(meta.get("group") or meta.get("n_group") or 6),
-                std=float((raw or {}).get("std") or meta.get("std") or 0.30),
-                beta=float(meta.get("beta") or 0.5),
-            )
+        agent = PPOAgent(obs_dim=OBSERVATION_DIM)
     agent.load(path)
     return agent, algo, meta
 
@@ -197,11 +177,7 @@ def prepare_policy_forecast(
     month: MonthData,
     p_ref_kw: float,
 ) -> None:
-    """Reject the removed forecast-eye policy contract.
-
-    Forecasts may still be used by external planners such as SADRBC, but they
-    are never appended to the canonical seven-eye BrainEnv observation.
-    """
+    """Reject the removed forecast-eye policy contract for canonical PPO."""
     del agent, month, p_ref_kw
     if meta.get("obs_variant") == "fc":
         raise DispatchRunWarning(
@@ -256,8 +232,6 @@ def run_policy_dispatch(
     p_ref = float(meta.get("p_ref_kw") or _policy_reference_kw(month))
     prepare_policy_forecast(checkpoint_name, agent, meta, month, p_ref)
     rollout = run_drl_policy(month, cfg, agent, p_ref_kw=p_ref)
-    from bess.forecasting.sadrbc_forecast import rollout_activity
-
     days = policy_result_to_days(month, rollout, cfg, parameters)
     if algo == "ppo2" and meta.get("reference_env") == "ppo2_senior_15m_v1":
         from bess.evaluation.oracle.ppo2_oracle import score_month as score_ppo2_month
@@ -293,60 +267,14 @@ def run_policies(
     parameters: dict[str, Any],
     checkpoint_dir: Path = CHECKPOINT_DIR,
 ) -> tuple[dict[str, Any], list[str]]:
+    """Run selected PPO/PPO2 checkpoints; each .pt is an independent fighter."""
     month = dataset_to_month(selected_data_path(parameters))
-    results = {}
-    warnings = []
-    sadrbc_forecast_spec = None
-    sadrbc_p_ref = None
-    for checkpoint_name in policy_names:
-        if checkpoint_name == "sadrbc_v13":
-            continue
-        try:
-            _, _, forecast_meta = load_policy(checkpoint_name, checkpoint_dir)
-            contract = forecast_meta.get("sadrbc_forecast", {}) or {}
-            if contract and sadrbc_forecast_spec is None:
-                from bess.forecasting.sadrbc_forecast import SADRBCForecastSpec
-
-                sadrbc_forecast_spec = SADRBCForecastSpec(
-                    seed=int(contract.get("seed", 13_0013)),
-                    load_sigma=float(contract.get("load_sigma", 0.05)),
-                    pv_sigma=float(contract.get("pv_sigma", 0.15)),
-                    rho=float(contract.get("rho", 0.90)),
-                    replan_minutes=int(contract.get("replan_minutes", 60)),
-                )
-                sadrbc_p_ref = float(
-                    forecast_meta.get("p_ref_kw") or _policy_reference_kw(month)
-                )
-        except DispatchRunWarning:
-            continue
+    results: dict[str, Any] = {}
+    warnings: list[str] = []
     for policy_name in policy_names:
-        if policy_name == "sadrbc_v13":
-            cfg = build_dispatch_config(
-                parameters,
-                _to_float(parameters.get("battery_capacity_kWh"), 0.0),
-                _to_float(parameters.get("battery_power_limit_kW"), 0.0),
-            )
-            rollout = run_sadrbc(
-                month, cfg, forecast_spec=sadrbc_forecast_spec,
-                p_ref_kw=sadrbc_p_ref,
-            )
-            days = policy_result_to_days(month, rollout, cfg, parameters)
-            results[policy_name] = {
-                "policy": policy_name,
-                "algo": "sadrbc",
-                "meta": {
-                    "e_cap_kwh": cfg.E_cap,
-                    "p_rated_kw": cfg.P_rated_nominal,
-                    "controller": "SADRBC v13",
-                },
-                "warnings": [],
-                "days": days,
-                "kpi": score_month(rollout["p_grid_days"], cfg, month.days),
-            }
-            continue
         try:
             result = run_policy_dispatch(policy_name, parameters, checkpoint_dir, month)
-        except DispatchRunWarning as exc:
+        except (DispatchRunWarning, ValueError) as exc:
             warnings.append(str(exc))
             continue
         warnings.extend(result.get("warnings", []))
