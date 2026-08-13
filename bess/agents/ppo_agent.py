@@ -5,6 +5,7 @@ below the 500 ms edge cycle-time budget on a Raspberry Pi class CPU.
 """
 from __future__ import annotations
 
+import copy
 import os
 import random
 
@@ -15,7 +16,7 @@ import numpy as np
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from bess.core.settings import PPO_GAMMA, PPO_LAMBDA
 
@@ -149,6 +150,19 @@ class PPOAgent:
         }
         self.collector_net.load_state_dict(state)
         self.collector_net.eval()
+
+    def snapshot_training_state(self) -> dict:
+        """Copy learned PPO + Adam state without freezing any random generator."""
+        return {
+            "network": copy.deepcopy(self.net.state_dict()),
+            "optimizer": copy.deepcopy(self.opt.state_dict()),
+        }
+
+    def restore_training_state(self, snapshot: dict) -> None:
+        """Restore an in-memory learner snapshot and make collection use it immediately."""
+        self.net.load_state_dict(snapshot["network"])
+        self.opt.load_state_dict(snapshot["optimizer"])
+        self._sync_collector()
 
     # ------------------------------------------------------------------
     @torch.inference_mode()

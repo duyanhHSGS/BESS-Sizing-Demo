@@ -4,12 +4,17 @@ import argparse
 import json
 import math
 import time
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 
-from bess.evaluation.baselines import run_drl_policy, run_no_bess
+from bess.agents.ppo_agent import (
+    PPOAgent,
+    RolloutBuffer,
+    configure_ppo_determinism,
+    resolve_ppo_device,
+)
 from bess.core.bess_env import OBSERVATION_DIM
 from bess.core.brain_runtime import (
     make_brain_env,
@@ -18,13 +23,9 @@ from bess.core.brain_runtime import (
     step_brain_control,
 )
 from bess.core.common import RESULTS_DIR, score_month
-from bess.agents.ppo_agent import (
-    PPOAgent,
-    RolloutBuffer,
-    configure_ppo_determinism,
-    resolve_ppo_device,
-)
 from bess.core.scenario_gen import MonthData
+from bess.core.settings import PPO_GAMMA, PPO_LAMBDA
+from bess.evaluation.baselines import run_drl_policy, run_no_bess
 from bess.evaluation.oracle.oracle_cache import load_cached_training_grids
 from bess.training.training_common import (
     augment_month,
@@ -32,9 +33,11 @@ from bess.training.training_common import (
     load_training_days,
     month_blocks,
 )
-from bess.training.training_reports import write_curve, write_report
-from bess.core.settings import PPO_GAMMA, PPO_LAMBDA
-
+from bess.training.training_reports import (
+    PPO_CHAMPION_CURVE_FIELDS,
+    write_curve,
+    write_report,
+)
 
 ROLLOUT_DAYS = 32
 LOG_EVERY_UPDATES = 1
@@ -68,6 +71,56 @@ def _score_ppo_operating_month(
         "throughput_kwh": throughput_kwh,
         "wear_cost_vnd": wear_cost_vnd,
         "total_operating_cost_vnd": utility["total_cost_vnd"] + wear_cost_vnd,
+    }
+
+
+def _initialize_champion(agent: PPOAgent, validate_cost, checkpoint_path: Path) -> float:
+    """Validate and persist Champion #0 before any PPO update can run."""
+    champion_cost = float(validate_cost())
+    agent.save(checkpoint_path)
+    return champion_cost
+
+
+def _resolve_challenger(
+    agent: PPOAgent,
+    champion_state: dict,
+    champion_cost: float,
+    candidate_cost: float,
+) -> tuple[float, bool]:
+    """Accept only strict cost improvements; otherwise restore the Champion learner."""
+    if candidate_cost < champion_cost:
+        return candidate_cost, True
+    agent.restore_training_state(champion_state)
+    return champion_cost, False
+
+
+def _save_accepted_champion(agent: PPOAgent, checkpoint_path: Path, accepted: bool) -> bool:
+    """Persist only accepted learner state; rejected challengers never touch disk."""
+    if not accepted:
+        return False
+    agent.save(checkpoint_path)
+    return True
+
+
+def _champion_curve_point(
+    *,
+    steps: int,
+    candidate_cost: float,
+    champion_cost: float,
+    accepted: bool,
+    val_base: float,
+    val_oracle: float,
+) -> dict:
+    saving = (val_base - champion_cost) / val_base * 100
+    gap = (champion_cost - val_oracle) / val_oracle * 100
+    return {
+        "steps": steps,
+        "candidate_val_cost_vnd": candidate_cost,
+        "champion_val_cost_vnd": champion_cost,
+        "val_cost_vnd": champion_cost,
+        "accepted": accepted,
+        "oracle_gap_pct": gap,
+        "saving_vs_nobess_pct": saving,
     }
 
 
@@ -200,12 +253,15 @@ def main() -> None:
             "native_steps_per_action": native_steps,
             "device_requested": args.device,
             "device": learner_device,
+            "accepted_updates": 0,
+            "rejected_updates": 0,
+            "acceptance_rate_pct": 0.0,
         },
         "billing_mode": billing,
         "p_ref_kw": p_ref,
         "validation": {"no_bess_vnd": val_base, "oracle_vnd": val_oracle},
     }
-    write_curve(curve_path, [])
+    write_curve(curve_path, [], fields=PPO_CHAMPION_CURVE_FIELDS)
     write_report(report_path, report)
     print(
         f"[train-ds] {len(days)} days | train {len(train_days)} / "
@@ -219,7 +275,6 @@ def main() -> None:
     )
 
     rng = np.random.default_rng(args.seed)
-    best_val = float("inf")
     curve = []
     perf = {
         "augment": 0.0,
@@ -232,10 +287,26 @@ def main() -> None:
         "decisions": 0,
         "native_rows": 0,
     }
+    checkpoint_path = RESULTS_DIR / f"policy_{tag}.pt"
+
+    def validate_policy_cost() -> float:
+        validation_started = time.perf_counter()
+        result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
+        perf["validation"] += time.perf_counter() - validation_started
+        scoring_started = time.perf_counter()
+        val_cost = _score_ppo_operating_month(
+            result["p_grid_days"],
+            result["p_bess_days"],
+            cfg,
+            battery_wear_cost,
+            val_days,
+        )["total_operating_cost_vnd"]
+        perf["scoring"] += time.perf_counter() - scoring_started
+        return val_cost
 
     def persist_progress() -> None:
         started_io = time.perf_counter()
-        write_curve(curve_path, curve)
+        write_curve(curve_path, curve, fields=PPO_CHAMPION_CURVE_FIELDS)
         if curve:
             report["latest"] = curve[-1]
             if (
@@ -267,6 +338,24 @@ def main() -> None:
             power_scale_kw=p_ref,
             battery_wear_vnd_per_kwh=battery_wear_cost,
         )
+
+    champion_cost = _initialize_champion(agent, validate_policy_cost, checkpoint_path)
+    initial_point = _champion_curve_point(
+        steps=0,
+        candidate_cost=champion_cost,
+        champion_cost=champion_cost,
+        accepted=True,
+        val_base=val_base,
+        val_oracle=val_oracle,
+    )
+    curve.append(initial_point)
+    persist_progress()
+    print(
+        f"  champion #0 | step {0:>7} | val {champion_cost/1e6:8.1f}M | "
+        f"saving {initial_point['saving_vs_nobess_pct']:5.1f}% | "
+        f"gap {initial_point['oracle_gap_pct']:6.1f}% | initial checkpoint",
+        flush=True,
+    )
 
     month_index = 0
     augment_started = time.perf_counter()
@@ -308,68 +397,56 @@ def main() -> None:
             continue
         perf["rollout"] += time.perf_counter() - rollout_started
         updates += 1
-        update_started = time.perf_counter()
         _, _, last_value = agent.act(obs)
+        champion_state = agent.snapshot_training_state()
+        update_started = time.perf_counter()
         agent.update(buffer, 0.0 if done else last_value)
         perf["update"] += time.perf_counter() - update_started
-        validation_started = time.perf_counter()
-        result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
-        perf["validation"] += time.perf_counter() - validation_started
-        scoring_started = time.perf_counter()
-        val_cost = _score_ppo_operating_month(
-            result["p_grid_days"], result["p_bess_days"], cfg,
-            battery_wear_cost, val_days,
-        )["total_operating_cost_vnd"]
-        perf["scoring"] += time.perf_counter() - scoring_started
-        saving = (val_base - val_cost) / val_base * 100
-        gap = (val_cost - val_oracle) / val_oracle * 100
-        curve.append({"steps": steps, "val_cost_vnd": val_cost, "oracle_gap_pct": gap, "saving_vs_nobess_pct": saving})
-        persist_progress()
-        is_best = val_cost < best_val
-        if val_cost < best_val:
-            best_val = val_cost
-            checkpoint_started = time.perf_counter()
-            agent.save(RESULTS_DIR / f"policy_{tag}.pt")
+        candidate_cost = validate_policy_cost()
+        champion_cost, accepted = _resolve_challenger(
+            agent,
+            champion_state,
+            champion_cost,
+            candidate_cost,
+        )
+        if accepted:
+            report["training"]["accepted_updates"] += 1
+        else:
+            report["training"]["rejected_updates"] += 1
+        checkpoint_started = time.perf_counter()
+        if _save_accepted_champion(agent, checkpoint_path, accepted):
             perf["checkpoint"] += time.perf_counter() - checkpoint_started
+        report["training"]["acceptance_rate_pct"] = (
+            report["training"]["accepted_updates"] / updates * 100.0
+        )
+        point = _champion_curve_point(
+            steps=steps,
+            candidate_cost=candidate_cost,
+            champion_cost=champion_cost,
+            accepted=accepted,
+            val_base=val_base,
+            val_oracle=val_oracle,
+        )
+        curve.append(point)
+        persist_progress()
         should_log = updates == 1 or updates % LOG_EVERY_UPDATES == 0
         if should_log:
+            verdict = "ACCEPTED 👑" if accepted else "REJECTED 💀"
             print(
-                f"  update {updates:>4} | step {steps:>7} | val {val_cost/1e6:8.1f}M | "
-                f"saving {saving:5.1f}% | gap {gap:6.1f}% | {steps/(time.time()-started):,.0f} sps",
+                f"  update {updates:>4} | step {steps:>7} | "
+                f"candidate {candidate_cost/1e6:8.1f}M | champion {champion_cost/1e6:8.1f}M | "
+                f"{verdict} | saving {point['saving_vs_nobess_pct']:5.1f}% | "
+                f"gap {point['oracle_gap_pct']:6.1f}% | {steps/(time.time()-started):,.0f} sps",
+                flush=True,
+            )
+            print(
+                f"  champion stats | accepted {report['training']['accepted_updates']} / {updates} | "
+                f"rejected {report['training']['rejected_updates']} / {updates} | "
+                f"rate {report['training']['acceptance_rate_pct']:.1f}%",
                 flush=True,
             )
             print_performance()
-        if is_best:
-            print(
-                f"  best   {updates:>4} | step {steps:>7} | val {val_cost/1e6:8.1f}M | "
-                f"saving {saving:5.1f}% | gap {gap:6.1f}% | checkpoint updated",
-                flush=True,
-            )
-        elif updates % LOG_EVERY_UPDATES == 0:
-            print(
-                f"  step {steps:>7} | val {val_cost/1e6:8.1f}M | saving {saving:5.1f}% | "
-                f"gap {gap:6.1f}% | no new best",
-                flush=True,
-            )
         rollout_started = time.perf_counter()
-
-    if not curve:
-        result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
-        val_cost = _score_ppo_operating_month(
-            result["p_grid_days"], result["p_bess_days"], cfg,
-            battery_wear_cost, val_days,
-        )["total_operating_cost_vnd"]
-        saving = (val_base - val_cost) / val_base * 100
-        gap = (val_cost - val_oracle) / val_oracle * 100
-        curve.append({"steps": steps, "val_cost_vnd": val_cost, "oracle_gap_pct": gap, "saving_vs_nobess_pct": saving})
-        persist_progress()
-        best_val = val_cost
-        print(
-            f"  best   {updates:>4} | step {steps:>7} | val {val_cost/1e6:8.1f}M | "
-            f"saving {saving:5.1f}% | gap {gap:6.1f}% | final short-run checkpoint",
-            flush=True,
-        )
-        agent.save(RESULTS_DIR / f"policy_{tag}.pt")
 
     persist_progress()
 
@@ -384,7 +461,11 @@ def main() -> None:
     test_cost = test_operating["total_operating_cost_vnd"]
     no_bess_cost = score_month(run_no_bess(test_month, cfg)["p_grid_days"], cfg, days=test_days)["total_cost_vnd"]
     test_saving = (no_bess_cost - test_cost) / no_bess_cost * 100
-    best_agent.meta = {**agent.meta, "test_saving_pct": round(test_saving, 2), "trained": date.today().isoformat()}
+    best_agent.meta = {
+        **agent.meta,
+        "test_saving_pct": round(test_saving, 2),
+        "trained": datetime.now(timezone.utc).astimezone().date().isoformat(),
+    }
     best_agent.save(RESULTS_DIR / f"policy_{tag}.pt")
     report["status"] = "complete"
     report["completed_at"] = datetime.now(timezone.utc).isoformat()
