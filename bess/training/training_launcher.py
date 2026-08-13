@@ -266,7 +266,9 @@ def build_training_command(
     if algo == "ppo2":
         val_days, test_days = 0, 0  # PPO2 splits by calendar months, not day counts.
     else:
-        val_days, test_days = _split_days(payload)
+        # TEMP PPO DEBUG MODE: the runner ignores holdout counts and uses the
+        # entire exported dataset for train/validation/test.
+        val_days, test_days = 0, 0
     dataset_id = str(payload.get("dataset_id", "dataset"))
     default_obs_variant = "base" if algo == "ppo2" else "brain7"
     obs_variant = str(payload.get("obs_variant", default_obs_variant)).strip().lower()
@@ -460,9 +462,12 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
         n_days = require_min_days(source, required_train_days)
         oracle_path = Path("")  # PPO2 builds the senior fixed-block month LP internally.
     else:
-        val_days, test_days = _split_days(payload)
+        # TEMP PPO DEBUG MODE: train/validation/test all use the same exported
+        # dataset, so no holdout days are reserved by the launcher.
         required_train_days = 1
-        n_days = require_min_days(source, val_days + test_days + required_train_days)
+        n_days = require_min_days(source, required_train_days)
+        val_days = n_days
+        test_days = n_days
         oracle_path, _ = oracle_cache.require_cached_oracle(oracle_parameters)
 
     USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -470,7 +475,9 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
     csv_path = export_training_csv(
         dataset_id,
         USER_DATA_DIR,
-        min_days=val_days + test_days + required_train_days,
+        # TEMP PPO overlap needs no reserved holdout rows; PPO2 also owns its
+        # month split internally. Export only needs one usable training day.
+        min_days=required_train_days,
     )
     config_path = write_training_config(oracle_parameters, USER_DATA_DIR)
     spec = build_training_command(payload, csv_path, config_path, oracle_path)

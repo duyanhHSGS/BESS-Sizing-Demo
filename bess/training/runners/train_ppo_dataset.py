@@ -31,7 +31,6 @@ from bess.training.training_common import (
     augment_month,
     build_training_bess_config,
     load_training_days,
-    month_blocks,
 )
 from bess.training.training_reports import (
     PPO_CHAMPION_CURVE_FIELDS,
@@ -151,18 +150,16 @@ def main() -> None:
     configure_ppo_determinism(args.seed)
 
     days = load_training_days(args.csv, weather="csv")
-    if args.val_days < 1 or args.test_days < 1:
-        raise SystemExit("Validation days and test days must both be at least 1")
-    split_days = args.val_days + args.test_days
-    if len(days) <= split_days:
-        raise SystemExit(
-            f"Need more than {split_days} days for train/val/test split; found {len(days)}"
-        )
+    if not days:
+        raise SystemExit("Training CSV contains no usable days")
     csv_dt = 24.0 / len(days[0].load)
 
-    test_days = days[-args.test_days:]
-    val_days = days[-split_days:-args.test_days]
-    train_days = days[:-split_days]
+    # TEMP DEBUG MODE: intentionally leak the full dataset into all three roles.
+    # This measures whether PPO can fit the supplied month at all; it is NOT a
+    # valid generalization test and must be reverted before production evaluation.
+    train_days = list(days)
+    val_days = list(days)
+    test_days = list(days)
     peak = max(float(day.load.max()) for day in days)
     p_ref = math.ceil(peak / 500.0) * 500.0
 
@@ -179,8 +176,11 @@ def main() -> None:
     if billing == "tou" and not tag.endswith("_tou"):
         tag += "_tou"
 
-    train_months = month_blocks(train_days)
-    val_month = MonthData(days=val_days, source="val")
+    # TEMP DEBUG MODE: keep all supplied days in one continuous training
+    # episode instead of calendar-month filtering, so every one of the 30 days
+    # participates in training as well as validation/test.
+    train_months = [MonthData(days=train_days, source="train:full-overlap")]
+    val_month = MonthData(days=val_days, source="val:full-overlap")
     gamma = args.gamma
     native_steps = native_steps_per_action(cfg.dt, args.control_dt_minutes)
     learner_device = resolve_ppo_device(args.device)
@@ -211,6 +211,8 @@ def main() -> None:
         "deterministic_training": True,
         "train_csv": str(args.csv),
         "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
+        "temporary_full_dataset_overlap": True,
+        "data_overlap_note": "TEMP DEBUG: train/validation/test all use the full dataset",
     }
     decisions_per_day = len(days[0].load) // native_steps
     buffer = RolloutBuffer(decisions_per_day * ROLLOUT_DAYS, OBSERVATION_DIM)
@@ -236,6 +238,7 @@ def main() -> None:
             "test_days": len(test_days),
             "validation_range": [val_days[0].date_iso, val_days[-1].date_iso],
             "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
+            "temporary_full_dataset_overlap": True,
         },
         "battery": {"e_cap_kwh": args.e_cap, "p_rated_kw": args.p_rated},
         "economics": {
@@ -264,8 +267,8 @@ def main() -> None:
     write_curve(curve_path, [], fields=PPO_CHAMPION_CURVE_FIELDS)
     write_report(report_path, report)
     print(
-        f"[train-ds] {len(days)} days | train {len(train_days)} / "
-        f"val {len(val_days)} / test {len(test_days)} | "
+        f"[train-ds] TEMP FULL-DATASET OVERLAP | {len(days)} days | "
+        f"train {len(train_days)} / val {len(val_days)} / test {len(test_days)} | "
         f"gamma {gamma:g} | lambda {args.lambda_value:g} | "
         f"UI wear {battery_wear_cost:g} VND/kWh | "
         f"learner {learner_device} (requested {args.device}) | BrainEnv eyes={OBSERVATION_DIM} | "
