@@ -13,7 +13,7 @@ from bess.agents.ppo2_agent import (
     _adv_share_of_return,
 )
 from bess.core.common import load_system_config
-from bess.core.ppo2_env import PPO2Env, PPO2_OBS_DIM
+from bess.core.ppo2_env import PPO2_OBS_DIM, PPO2Env
 from bess.core.scenario_gen import DayData, MonthData
 from bess.evaluation.baselines import run_drl_policy
 from bess.evaluation.oracle.ppo2_oracle import run_oracle, score_month
@@ -22,8 +22,9 @@ from bess.training.runners.train_ppo2_dataset import (
     EVAL_EVERY_UPDATES,
     MIN_MONTH_COVERAGE,
     ROLLOUT,
-    VAL_MONTHS,
     TEST_MONTHS,
+    VAL_MONTHS,
+    _fit_test_split,
     _split_months,
 )
 
@@ -71,7 +72,7 @@ def test_ppo2_tariff_countdown_sees_midnight_boundary() -> None:
     env.reset(_month())
     # 22:00 at 15-minute data is slot 88. With default tariff, 22:00 is still
     # peak until 22:30; this verifies the observation follows tariff truth.
-    env.t = int(round(22.0 / env.dt))
+    env.t = round(22.0 / env.dt)
     obs = env._obs()
     assert obs[7] == pytest.approx(env.cfg.price_peak / env.cfg.price_peak)
     assert obs[8] == pytest.approx(0.5 / 24.0)
@@ -175,6 +176,28 @@ def test_ppo2_split_uses_calendar_months_not_day_slices() -> None:
     assert [month.source for month in train] == ["csv:2026-01"]
     assert [month.source for month in val] == ["csv:2026-02", "csv:2026-03"]
     assert [month.source for month in test] == ["csv:2026-04"]
+
+
+def test_ppo2_fit_test_reuses_all_supplied_days_for_all_three_sets() -> None:
+    from datetime import date, timedelta
+
+    days = [
+        DayData(
+            load=np.full(96, 100.0 + index),
+            pv=np.zeros(96),
+            day_type="working",
+            weather="test",
+            day_index=index + 1,
+            date_iso=(date(2026, 1, 1) + timedelta(days=index)).isoformat(),
+        )
+        for index in range(30)
+    ]
+    train, val, test = _fit_test_split(days)
+    assert train[0] is val[0] is test[0]
+    assert train[0].source == "csv:ppo2-fit-test-overlap"
+    assert len(train[0].days) == 30
+    assert train[0].days[0].date_iso == "2026-01-01"
+    assert train[0].days[-1].date_iso == "2026-01-30"
 
 
 def test_ppo2_inference_checkpoint_is_actor_only_and_matches_training_actor() -> None:

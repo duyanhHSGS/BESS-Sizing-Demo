@@ -1475,6 +1475,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label class="train-ppo2-field" style="display:none">Minimum month coverage <input type="number" id="train-ppo2-min-month-coverage" value="0.8" min="0.01" max="1" step="0.01"></label>
           <label class="train-ppo2-field" style="display:none">Validation months <input type="number" id="train-ppo2-val-months" value="2" min="1" max="24" step="1"></label>
           <label class="train-ppo2-field" style="display:none">Test months <input type="number" id="train-ppo2-test-months" value="1" min="1" max="24" step="1"></label>
+          <label class="train-ppo2-field" style="display:none"><input type="checkbox" id="train-ppo2-fit-test"> Fit test: reuse ALL days for train/val/test ⚠</label>
           <label class="train-ppo2-field" style="display:none">Actor LR <input type="number" id="train-ppo2-actor-lr" value="0.00003" min="0" step="0.00001"></label>
           <label class="train-ppo2-field" style="display:none">Critic LR <input type="number" id="train-ppo2-critic-lr" value="0.0003" min="0" step="0.0001"></label>
           <label class="train-ppo2-field" style="display:none">Initial std <input type="number" id="train-ppo2-init-std" value="0.15" min="0.0001" step="0.01"></label>
@@ -4721,7 +4722,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         const valMonths = document.getElementById("train-ppo2-val-months").value;
         const testMonths = document.getElementById("train-ppo2-test-months").value;
         const coverage = Number(document.getElementById("train-ppo2-min-month-coverage").value) * 100;
-        trainPlan.textContent = `PPO2 reference plan: ${document.getElementById("train-ppo2-steps").value} steps; fixed 15m/17D reference environment; calendar-month split with ${valMonths} validation + ${testMonths} newest test month(s), ≥${formatNumber(coverage, 0)}% coverage; λ_energy ${document.getElementById("train-ppo2-lam-energy").value}; λ_peak sweep ${document.getElementById("train-ppo2-lam-peak").value}; internal fixed-block month Oracle; CPU threads ${document.getElementById("train-ppo2-torch-threads").value}. No shared rolling-Oracle cache is required.`;
+        const fitTest = document.getElementById("train-ppo2-fit-test").checked;
+        trainPlan.textContent = fitTest
+          ? `PPO2 FIT TEST: ${document.getElementById("train-ppo2-steps").value} steps; ALL ${days} supplied day(s) are reused for training, validation, and test; raw-before-BC and pre-PPO deterministic IQ are recorded; load/PV augmentation is forced OFF. This measures fit/memorization ONLY, not generalization.`
+          : `PPO2 reference plan: ${document.getElementById("train-ppo2-steps").value} steps; fixed 15m/17D reference environment; calendar-month split with ${valMonths} validation + ${testMonths} newest test month(s), ≥${formatNumber(coverage, 0)}% coverage; λ_energy ${document.getElementById("train-ppo2-lam-energy").value}; λ_peak sweep ${document.getElementById("train-ppo2-lam-peak").value}; internal fixed-block month Oracle; CPU threads ${document.getElementById("train-ppo2-torch-threads").value}. No shared rolling-Oracle cache is required.`;
         return;
       }
       trainButton.disabled = valDays < 1 || testDays < 1 || trainDays < 1 || !validControlDt;
@@ -4902,6 +4906,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         ppo2_min_month_coverage: Number(document.getElementById("train-ppo2-min-month-coverage").value),
         ppo2_val_months: Number(document.getElementById("train-ppo2-val-months").value),
         ppo2_test_months: Number(document.getElementById("train-ppo2-test-months").value),
+        ppo2_fit_test: document.getElementById("train-ppo2-fit-test").checked,
         ppo2_actor_lr: Number(document.getElementById("train-ppo2-actor-lr").value),
         ppo2_critic_lr: Number(document.getElementById("train-ppo2-critic-lr").value),
         ppo2_init_std: Number(document.getElementById("train-ppo2-init-std").value),

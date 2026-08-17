@@ -76,14 +76,15 @@ class SharedTrainingHelpersTests(unittest.TestCase):
 class RemovedAlgorithmTests(unittest.TestCase):
     def test_removed_algorithms_are_rejected_before_launch(self):
         for algo in ("grepo", "grepro", "pro", "sadrbc", "grpo"):
-            with self.subTest(algo=algo):
-                with self.assertRaisesRegex(UnsupportedAlgorithm, "only PPO and PPO2"):
-                    build_training_command(
-                        {"algo": algo},
-                        Path("unused.csv"),
-                        Path("unused.json"),
-                        Path("unused_oracle.json"),
-                    )
+            with self.subTest(algo=algo), self.assertRaisesRegex(
+                UnsupportedAlgorithm, "only PPO and PPO2"
+            ):
+                build_training_command(
+                    {"algo": algo},
+                    Path("unused.csv"),
+                    Path("unused.json"),
+                    Path("unused_oracle.json"),
+                )
 
 
 class PPO2LauncherTests(unittest.TestCase):
@@ -136,6 +137,7 @@ class PPO2LauncherTests(unittest.TestCase):
                 "p_rated_kw": 500.0, "obs_variant": "base", "device": "cpu",
                 "ppo2_rollout": 960, "ppo2_epochs": 4, "ppo2_minibatch": 128,
                 "ppo2_lam_peak": "0.7,0.97", "ppo2_torch_threads": 3,
+                "ppo2_fit_test": True,
             }
             command = build_training_command(
                 payload, csv_path, config_path, oracle_path,
@@ -146,6 +148,7 @@ class PPO2LauncherTests(unittest.TestCase):
         self.assertEqual(command[command.index("--minibatch") + 1], "128")
         self.assertEqual(command[command.index("--lambda-peak") + 1], "0.7,0.97")
         self.assertEqual(command[command.index("--torch-threads") + 1], "3")
+        self.assertIn("--fit-test", command)
 
     def test_reference_command_rejects_non_reference_gamma(self):
         with tempfile.TemporaryDirectory() as directory:

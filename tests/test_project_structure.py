@@ -7,7 +7,6 @@ from bess.agents import SUPPORTED_POLICY_ALGORITHMS
 from bess.paths import PROJECT_ROOT
 from bess.training.training_launcher import TRAINING_MODULES
 
-
 OLD_ROOT_MODULES = {
     "common.py",
     "settings.py",
@@ -58,3 +57,10 @@ def test_flask_entrypoint_uses_moved_template_directory() -> None:
     main = importlib.import_module("main")
     assert main.app.template_folder == "web/templates"
     assert (PROJECT_ROOT / "web" / "templates" / "index.html").is_file()
+
+
+def test_training_ui_wires_explicit_ppo2_fit_test_flag() -> None:
+    template = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+    assert 'id="train-ppo2-fit-test"' in template
+    assert 'ppo2_fit_test: document.getElementById("train-ppo2-fit-test").checked' in template
+    assert "PPO2 FIT TEST:" in template

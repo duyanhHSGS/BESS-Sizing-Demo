@@ -18,7 +18,7 @@ import math
 import shutil
 import statistics
 import time
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -26,7 +26,7 @@ import torch
 
 from bess.agents.ppo2_agent import PPO2Agent, RolloutBuffer, resolve_ppo2_device
 from bess.core.common import RESULTS_DIR
-from bess.core.ppo2_env import PPO2Env, PPO2_OBS_DIM, PPO2_STEPS_PER_DAY
+from bess.core.ppo2_env import PPO2_OBS_DIM, PPO2_STEPS_PER_DAY, PPO2Env
 from bess.core.scenario_gen import DayData, MonthData
 from bess.evaluation.oracle.ppo2_oracle import (
     fixed_pmax_day,
@@ -151,6 +151,15 @@ def _split_months(
         )
     holdout = months[-holdout_count:]
     return months[:-holdout_count], holdout[:val_months], holdout[val_months:]
+
+
+def _fit_test_split(all_days: list[DayData]) -> tuple[list[MonthData], list[MonthData], list[MonthData]]:
+    """Reuse the complete supplied dataset for train/validation/test fit diagnostics."""
+    if not all_days:
+        raise SystemExit("PPO2 fit test requires at least one usable day")
+    block = MonthData(source="csv:ppo2-fit-test-overlap")
+    block.days = sorted(all_days, key=lambda item: item.date_iso)
+    return [block], [block], [block]
 
 
 def _flatten(months: list[MonthData]) -> list[DayData]:
@@ -457,6 +466,7 @@ def _train_seed(
     train_months: list[MonthData],
     val_months: list[MonthData],
     test_months: list[MonthData],
+    fit_test: bool,
     degradation_cost_per_kwh_discharged: float,
     val_base: float,
     val_oracle: float,
@@ -513,6 +523,15 @@ def _train_seed(
         log_std_init=log_std_init,
         device="cpu",
     )
+    raw_fit_cost = None
+    if fit_test:
+        raw_fit_cost = _evaluate_months(
+            val_months,
+            cfg,
+            agent,
+            p_ref,
+            degradation_cost_per_kwh_discharged,
+        )["total_cost_vnd"]
     if bc_epochs > 0:
         if train_oracle is None:
             raise ValueError("PPO2 behaviour cloning requires Oracle solutions")
@@ -590,6 +609,12 @@ def _train_seed(
         "train_month_count": len(train_months),
         "validation_month_count": len(val_months),
         "test_month_count": len(test_months),
+        "fit_test_overlap": fit_test,
+        "raw_initial_validation_cost_vnd": raw_fit_cost,
+        "data_overlap_note": (
+            "TEMP DEBUG: train/validation/test all use the full supplied dataset"
+            if fit_test else None
+        ),
         "torch_threads": torch_threads,
         "augmentation": {
             "sigmaLoad": aug_load_sigma,
@@ -644,12 +669,16 @@ def _train_seed(
         val_cost = score["total_cost_vnd"]
         saving = (val_base - val_cost) / val_base * 100.0
         gap = (val_cost - val_oracle) / val_oracle * 100.0
+        if fit_test and updates == 0:
+            agent.meta["initial_validation_cost_vnd"] = val_cost
         improved = val_cost < best_val
         diagnostics = agent.diagnostics
         curves.append({
             "seed": seed,
             "lambda_peak": lam_peak,
             "steps": steps,
+            "updates": updates,
+            "phase": "initial" if updates == 0 else "ppo",
             "val_cost_vnd": val_cost,
             "val_cost_stochastic_vnd": stochastic["total_cost_vnd"],
             "oracle_gap_pct": gap,
@@ -682,6 +711,10 @@ def _train_seed(
             f"{' | best' if improved else ''}",
             flush=True,
         )
+
+    if fit_test:
+        evaluate_and_checkpoint()
+        evaluated_at = 0
 
     while steps < total_steps:
         action, logp, latent, value_energy, value_peak = agent.act(obs)
@@ -746,6 +779,7 @@ def main() -> None:
     parser.add_argument("--min-month-coverage", type=float, default=MIN_MONTH_COVERAGE)
     parser.add_argument("--val-months", type=int, default=VAL_MONTHS)
     parser.add_argument("--test-months", type=int, default=TEST_MONTHS)
+    parser.add_argument("--fit-test", action="store_true")
     parser.add_argument("--lr", type=float, default=LEARNING_RATE)
     parser.add_argument("--actor-lr", type=float, default=ACTOR_LR)
     parser.add_argument("--critic-lr", type=float, default=CRITIC_LR)
@@ -817,12 +851,17 @@ def main() -> None:
 
     csv_path = Path(args.csv)
     all_days = _load_csv_days_reference(csv_path)
-    train_months, val_months, test_months = _split_months(
-        all_days,
-        args.min_month_coverage,
-        val_months=args.val_months,
-        test_months=args.test_months,
-    )
+    if args.fit_test:
+        train_months, val_months, test_months = _fit_test_split(all_days)
+    else:
+        train_months, val_months, test_months = _split_months(
+            all_days,
+            args.min_month_coverage,
+            val_months=args.val_months,
+            test_months=args.test_months,
+        )
+    effective_aug_load_sigma = 0.0 if args.fit_test else args.aug_load_sigma
+    effective_aug_pv_sigma = 0.0 if args.fit_test else args.aug_pv_sigma
     train_days = _flatten(train_months)
     peak = max(float(day.load.max()) for day in train_days)
     p_ref = max(500.0, math.ceil(peak / 500.0) * 500.0)
@@ -873,6 +912,13 @@ def main() -> None:
     )
     log_std_init = math.log(args.init_std)
 
+    if args.fit_test:
+        print(
+            f"[train-ppo2] FIT TEST WARNING: reusing all {len(all_days)} supplied day(s) "
+            "for training, validation, and test. Load/PV augmentation is forced off. "
+            "This measures fit/memorization only, not unseen-data generalization.",
+            flush=True,
+        )
     if len(train_months) < 6:
         print(
             f"[train-ppo2] WARNING: only {len(train_months)} training month(s); "
@@ -906,6 +952,7 @@ def main() -> None:
                 train_months=train_months,
                 val_months=val_months,
                 test_months=test_months,
+                fit_test=args.fit_test,
                 degradation_cost_per_kwh_discharged=degradation_cost,
                 val_base=val_base,
                 val_oracle=val_oracle,
@@ -931,8 +978,8 @@ def main() -> None:
                 bc_action_clip=args.bc_action_clip,
                 shaping_margin=args.shaping_margin,
                 min_month_coverage=args.min_month_coverage,
-                aug_load_sigma=args.aug_load_sigma,
-                aug_pv_sigma=args.aug_pv_sigma,
+                aug_load_sigma=effective_aug_load_sigma,
+                aug_pv_sigma=effective_aug_pv_sigma,
                 aug_rho_load=args.aug_rho_load,
                 aug_rho_pv=args.aug_rho_pv,
                 torch_threads=args.torch_threads,
@@ -974,6 +1021,13 @@ def main() -> None:
     test_score = _evaluate_months(test_months, cfg, best_agent, p_ref, degradation_cost)
     test_saving = (test_base - test_score["total_cost_vnd"]) / test_base * 100.0
     test_gap = (test_score["total_cost_vnd"] - test_oracle) / test_oracle * 100.0
+    raw_initial_fit_cost = best_agent.meta.get("raw_initial_validation_cost_vnd")
+    initial_fit_cost = best_agent.meta.get("initial_validation_cost_vnd")
+    fit_improvement_pct = (
+        (float(initial_fit_cost) - test_score["total_cost_vnd"]) / float(initial_fit_cost) * 100.0
+        if args.fit_test and initial_fit_cost
+        else None
+    )
     best_agent.meta.update({
         "validation_cost_vnd": best_overall,
         "lambda_peak_sweep": lambda_peaks,
@@ -985,7 +1039,12 @@ def main() -> None:
         "test_oracle_gap_pct": round(test_gap, 2),
         "seeds": seeds,
         "test_saving_pct_by_seed": [round(value, 2) for value in savings],
-        "trained": date.today().isoformat(),
+        "fit_test_overlap": args.fit_test,
+        "fit_test_raw_initial_cost_vnd": raw_initial_fit_cost,
+        "fit_test_improvement_pct": (
+            round(fit_improvement_pct, 4) if fit_improvement_pct is not None else None
+        ),
+        "trained": datetime.now(timezone.utc).date().isoformat(),
     })
     best_agent.save(final_path)
 
@@ -1006,6 +1065,11 @@ def main() -> None:
             "train_range": [train_months[0].days[0].date_iso, train_months[-1].days[-1].date_iso],
             "validation_range": [val_months[0].days[0].date_iso, val_months[-1].days[-1].date_iso],
             "test_range": [test_months[0].days[0].date_iso, test_months[-1].days[-1].date_iso],
+            "fit_test_overlap": args.fit_test,
+            "data_overlap_note": (
+                "TEMP DEBUG: train/validation/test all use the full supplied dataset"
+                if args.fit_test else None
+            ),
         },
         "training": {
             "steps": args.steps,
@@ -1028,11 +1092,16 @@ def main() -> None:
             "min_month_coverage": args.min_month_coverage,
             "validation_months": args.val_months,
             "test_months": args.test_months,
+            "fit_test": args.fit_test,
             "augmentation": {
-                "sigmaLoad": args.aug_load_sigma,
-                "sigmaPv": args.aug_pv_sigma,
+                "sigmaLoad": effective_aug_load_sigma,
+                "sigmaPv": effective_aug_pv_sigma,
                 "rhoLoad": args.aug_rho_load,
                 "rhoPv": args.aug_rho_pv,
+            },
+            "requested_augmentation": {
+                "sigmaLoad": args.aug_load_sigma,
+                "sigmaPv": args.aug_pv_sigma,
             },
             "torch_threads": args.torch_threads,
             "gamma": args.gamma,
@@ -1045,7 +1114,10 @@ def main() -> None:
         "validation": {
             "no_bess_vnd": val_base,
             "oracle_vnd": val_oracle,
+            "raw_before_bc_vnd": raw_initial_fit_cost if args.fit_test else None,
+            "initial_vnd": initial_fit_cost if args.fit_test else None,
             "best_vnd": best_overall,
+            "improvement_from_initial_pct": fit_improvement_pct if args.fit_test else None,
         },
         "test": {
             **test_score,
@@ -1066,6 +1138,14 @@ def main() -> None:
         spread = (
             f" | across seeds {statistics.mean(savings):.2f}% "
             f"+/- {statistics.stdev(savings):.2f}%"
+        )
+    if args.fit_test:
+        print(
+            f"[train-ppo2] === FIT IQ: raw {float(raw_initial_fit_cost)/1e6:.1f}M -> "
+            f"pre-PPO {float(initial_fit_cost)/1e6:.1f}M -> "
+            f"best {test_score['total_cost_vnd']/1e6:.1f}M VND | "
+            f"PPO improvement {fit_improvement_pct:.2f}% ===",
+            flush=True,
         )
     print(
         f"[train-ppo2] === TEST {test_months[0].days[0].date_iso}->"

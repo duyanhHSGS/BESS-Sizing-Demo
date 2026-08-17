@@ -412,6 +412,8 @@ def build_training_command(
         )
         if seeds:
             cmd.extend(["--seeds", seeds])
+        if payload.get("ppo2_fit_test") is True:
+            cmd.append("--fit-test")
     return {"cmd": cmd, "tag": tag, "checkpoint": str(checkpoint), "algo": algo,
             "obs_variant": obs_variant, "device": device}
 
