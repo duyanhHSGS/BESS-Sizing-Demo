@@ -4671,7 +4671,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         item.style.display = algo === "ppo2" ? "inline-flex" : "none";
       });
       document.querySelectorAll(".train-day-split-field").forEach((item) => {
-        item.style.display = algo === "ppo2" ? "none" : "inline-flex";
+        item.style.display = "none";
       });
       const ppo2Mode = algo === "ppo2";
       trainObservation.disabled = true;
@@ -4701,10 +4701,6 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       }
       const days = Number(selected.dataset.days || 0);
       const algo = trainAlgo.value;
-      const valDays = Math.max(0, Number(trainValDays.value || 0));
-      const testDays = Math.max(0, Number(trainTestDays.value || 0));
-      const splitDays = valDays + testDays;
-      const trainDays = days - splitDays;
       const nativeDt = selectedNativeDt();
       const controlDt = selectedControlDt();
       const validControlDt = isCompatibleControlDt(controlDt, nativeDt);
@@ -4728,17 +4724,15 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           : `PPO2 reference plan: ${document.getElementById("train-ppo2-steps").value} steps; fixed 15m/17D reference environment; calendar-month split with ${valMonths} validation + ${testMonths} newest test month(s), ≥${formatNumber(coverage, 0)}% coverage; λ_energy ${document.getElementById("train-ppo2-lam-energy").value}; λ_peak sweep ${document.getElementById("train-ppo2-lam-peak").value}; internal fixed-block month Oracle; CPU threads ${document.getElementById("train-ppo2-torch-threads").value}. No shared rolling-Oracle cache is required.`;
         return;
       }
-      trainButton.disabled = valDays < 1 || testDays < 1 || trainDays < 1 || !validControlDt;
-      if (valDays < 1 || testDays < 1) {
-        trainPlan.textContent = "Validation days and test days must both be at least 1.";
-      } else if (trainDays < 1) {
-        trainPlan.textContent = `${days} days found; validation ${valDays} + test ${testDays} leaves no training days.`;
+      trainButton.disabled = days < 1 || !validControlDt;
+      if (days < 1) {
+        trainPlan.textContent = "PPO fit test requires at least 1 usable supplied day.";
       } else if (!validControlDt) {
         trainPlan.textContent = `Invalid control Δt ${controlDt}m. It must be a native-or-coarser multiple that divides both 30 minutes and 24 hours.`;
       } else {
         const budget = `${trainSteps.value} PPO steps; gamma ${trainGamma.value}; lambda ${trainLambda.value}`;
         const brainLabel = "BrainEnv (7 eyes)";
-        trainPlan.textContent = `Checking required data... Plan: ${brainLabel}; device ${trainDevice.value}; train ${trainDays} days, validation ${valDays}, test ${testDays}; ${budget}; sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action); E/P ${trainEcap.value}/${trainPrated.value}.`;
+        trainPlan.textContent = `Checking required data... PPO FIT TEST: ${brainLabel}; ALL ${days} supplied day(s) are reused for training, validation, and test; device ${trainDevice.value}; ${budget}; sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action); E/P ${trainEcap.value}/${trainPrated.value}. This measures fit/memorization ONLY, not unseen-data generalization.`;
         trainOracleStatusTimer = setTimeout(refreshTrainingOracleStatus, 250);
       }
     }

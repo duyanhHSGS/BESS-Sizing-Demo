@@ -64,3 +64,12 @@ def test_training_ui_wires_explicit_ppo2_fit_test_flag() -> None:
     assert 'id="train-ppo2-fit-test"' in template
     assert 'ppo2_fit_test: document.getElementById("train-ppo2-fit-test").checked' in template
     assert "PPO2 FIT TEST:" in template
+
+
+def test_training_ui_allows_ppo_full_dataset_fit_test() -> None:
+    template = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+    assert 'item.style.display = "none";' in template
+    assert "trainButton.disabled = days < 1 || !validControlDt;" in template
+    assert "PPO FIT TEST:" in template
+    assert "ALL ${days} supplied day(s) are reused for training, validation, and test" in template
+    assert "trainButton.disabled = valDays < 1 || testDays < 1 || trainDays < 1" not in template
