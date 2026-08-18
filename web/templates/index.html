@@ -4504,10 +4504,11 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         && nearInteger(1440 / value);
     }
 
-    function refreshControlDtOptions(resetToNative = false, preferredValue = null) {
+    function refreshControlDtOptions(resetToDefault = false, preferredValue = null) {
       const nativeDt = selectedNativeDt();
-      const previous = resetToNative
-        ? nativeDt
+      const defaultDt = trainAlgo.value === "ppo" ? 30 : nativeDt;
+      const previous = resetToDefault
+        ? defaultDt
         : (preferredValue == null ? selectedControlDt() : Number(preferredValue));
       const safe = [];
       for (let value = Math.ceil(nativeDt); value <= 30; value += 1) {
@@ -4518,10 +4519,12 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       )).join("") + `<option value="custom">Custom...</option>`;
       if (safe.includes(previous)) {
         trainControlDt.value = String(previous);
+      } else if (safe.includes(defaultDt)) {
+        trainControlDt.value = String(defaultDt);
       } else {
         trainControlDt.value = String(nativeDt);
       }
-      trainControlDtCustom.value = String(previous || nativeDt);
+      trainControlDtCustom.value = String(previous || defaultDt || nativeDt);
       trainControlDtCustomWrap.style.display = trainControlDt.value === "custom" ? "inline-flex" : "none";
     }
 
@@ -4670,16 +4673,20 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         item.style.display = "none";
       });
       const ppo2Mode = algo === "ppo2";
+      const ppoMode = algo === "ppo";
       trainObservation.disabled = true;
       trainObservation.value = ppo2Mode ? "base" : "brain7";
       trainDevice.disabled = ppo2Mode;
-      trainControlDt.disabled = ppo2Mode;
-      trainControlDtCustom.disabled = ppo2Mode;
+      trainControlDt.disabled = ppo2Mode || ppoMode;
+      trainControlDtCustom.disabled = ppo2Mode || ppoMode;
       if (ppo2Mode) {
         trainDevice.value = "cpu";
         if (Array.from(trainControlDt.options).some((option) => option.value === "15")) {
           trainControlDt.value = "15";
         }
+        trainControlDtCustomWrap.style.display = "none";
+      } else if (ppoMode && Array.from(trainControlDt.options).some((option) => option.value === "30")) {
+        trainControlDt.value = "30";
         trainControlDtCustomWrap.style.display = "none";
       }
       trainControlDtCustomWrap.style.display = (!ppo2Mode && trainControlDt.value === "custom") ? "inline-flex" : "none";

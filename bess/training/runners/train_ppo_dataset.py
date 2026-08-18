@@ -51,6 +51,7 @@ ORACLE_BC_MAX_EPOCHS = 100
 ORACLE_BC_LEARNING_RATE = 1e-3
 ORACLE_BC_MINIBATCH = 256
 ORACLE_BC_TARGET_MSE = 1e-4
+PPO_BC_FINE_TUNE_LOG_STD = -1.5
 LOG_EVERY_UPDATES = 1
 
 
@@ -665,8 +666,17 @@ def main() -> None:
     )
     post_bc_cost = validate_policy_cost()
     use_bc = post_bc_cost < raw_initial_cost
-    if not use_bc:
+    if use_bc:
+        # The deterministic BC actor is already strong. Start PPO with a narrower
+        # stochastic cloud so exploration stays local instead of repeatedly asking
+        # physics to project huge infeasible actions. PPO may still learn log_std.
+        with torch.no_grad():
+            agent.net.log_std.fill_(PPO_BC_FINE_TUNE_LOG_STD)
+        agent._sync_collector()
+    else:
         agent.restore_training_state(raw_initial_state)
+    bc_stats["ppo_start_log_std"] = float(agent.net.log_std.detach().cpu().item())
+    bc_stats["ppo_start_action_std"] = float(agent.net.log_std.detach().exp().cpu().item())
 
     agent.meta["oracle_behavior_cloning"] = {
         **bc_stats,
