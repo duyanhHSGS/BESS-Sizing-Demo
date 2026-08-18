@@ -149,7 +149,7 @@ def _collect_oracle_teacher_samples(
         for start in range(0, native_rows, native_steps):
             stop = min(start + native_steps, native_rows)
             action = _oracle_teacher_action(dispatch, start, stop, cfg)
-            observations.append(observation_array(observation, obs_dim=OBSERVATION_DIM))
+            observations.append(observation_array(observation))
             targets.append(action)
             transition = step_brain_control(
                 env,
