@@ -149,8 +149,8 @@ def _collect_oracle_teacher_samples(
     power_scale_kw: float,
     battery_wear_cost: float,
     native_steps: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Replay Oracle dispatch through canonical BrainEnv and collect brain7 lessons."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Replay Oracle dispatch and collect brain7 actions plus real rewards."""
     if len(oracle_dispatch) != len(month.days):
         raise ValueError("Oracle dispatch day count must match the teacher month")
     env = make_brain_env(
@@ -162,6 +162,7 @@ def _collect_oracle_teacher_samples(
     observation = env.reset()
     observations: list[np.ndarray] = []
     targets: list[float] = []
+    rewards: list[float] = []
 
     for day, dispatch in zip(month.days, oracle_dispatch, strict=True):
         native_rows = len(day.load)
@@ -179,10 +180,15 @@ def _collect_oracle_teacher_samples(
                 action,
                 native_steps=stop - start,
             )
+            rewards.append(transition.reward_million_vnd)
             if transition.next_observation is not None:
                 observation = transition.next_observation
 
-    return np.asarray(observations, dtype=np.float32), np.asarray(targets, dtype=np.float32)
+    return (
+        np.asarray(observations, dtype=np.float32),
+        np.asarray(targets, dtype=np.float32),
+        np.asarray(rewards, dtype=np.float32),
+    )
 
 
 def _behavior_clone_actor(
@@ -237,6 +243,67 @@ def _behavior_clone_actor(
         "epochs_completed": int(epochs_completed),
         "initial_mse": initial_mse,
         "final_mse": final_mse,
+    }
+
+
+def _behavior_clone_critic(
+    agent: PPOAgent,
+    observations: np.ndarray,
+    rewards: np.ndarray,
+    *,
+    gamma: float,
+    seed: int,
+) -> dict[str, float | int]:
+    """Warm-start the existing critic on Oracle-path discounted reward-to-go."""
+    if observations.ndim != 2 or observations.shape[1] != OBSERVATION_DIM:
+        raise ValueError("Oracle critic observations must have shape (N, OBSERVATION_DIM)")
+    if rewards.ndim != 1 or len(rewards) != len(observations) or len(rewards) == 0:
+        raise ValueError("Oracle critic rewards must be one non-empty reward per observation")
+    if not 0.0 <= gamma <= 1.0:
+        raise ValueError("Oracle critic gamma must be in [0, 1]")
+
+    returns = np.empty_like(rewards, dtype=np.float32)
+    running_return = 0.0
+    for index in range(len(rewards) - 1, -1, -1):
+        running_return = float(rewards[index]) + gamma * running_return
+        returns[index] = running_return
+
+    obs_t = torch.as_tensor(observations, dtype=torch.float32, device=agent.device)
+    return_t = torch.as_tensor(returns, dtype=torch.float32, device=agent.device)
+    optimizer = torch.optim.Adam(agent.net.critic.parameters(), lr=ORACLE_BC_LEARNING_RATE)
+    rng = np.random.default_rng(seed)
+
+    @torch.inference_mode()
+    def full_mse() -> float:
+        prediction = agent.net.value(obs_t)
+        return float(torch.mean((prediction - return_t) ** 2).cpu())
+
+    initial_mse = full_mse()
+    epochs_completed = 0
+    for epoch in range(ORACLE_BC_MAX_EPOCHS):
+        indexes = rng.permutation(len(observations))
+        for start in range(0, len(indexes), ORACLE_BC_MINIBATCH):
+            mb = torch.as_tensor(
+                indexes[start:start + ORACLE_BC_MINIBATCH],
+                dtype=torch.long,
+                device=agent.device,
+            )
+            prediction = agent.net.value(obs_t[mb])
+            loss = torch.mean((prediction - return_t[mb]) ** 2)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        epochs_completed = epoch + 1
+        if full_mse() <= ORACLE_BC_TARGET_MSE:
+            break
+
+    agent._sync_collector()
+    return {
+        "critic_epochs_completed": int(epochs_completed),
+        "critic_initial_mse": initial_mse,
+        "critic_final_mse": full_mse(),
+        "critic_target_mean": float(np.mean(returns)),
+        "critic_target_std": float(np.std(returns)),
     }
 
 
@@ -567,7 +634,7 @@ def main() -> None:
 
     raw_initial_cost = validate_policy_cost()
     raw_initial_state = agent.snapshot_training_state()
-    teacher_observations, teacher_targets = _collect_oracle_teacher_samples(
+    teacher_observations, teacher_targets, teacher_rewards = _collect_oracle_teacher_samples(
         train_months[0],
         oracle_dispatch,
         cfg,
@@ -581,6 +648,15 @@ def main() -> None:
         teacher_observations,
         teacher_targets,
         seed=args.seed,
+    )
+    bc_stats.update(
+        _behavior_clone_critic(
+            agent,
+            teacher_observations,
+            teacher_rewards,
+            gamma=args.gamma,
+            seed=args.seed,
+        )
     )
     bc_stats["seconds"] = time.perf_counter() - bc_started
     bc_stats["teacher_mean_abs_action"] = float(np.mean(np.abs(teacher_targets)))
@@ -604,7 +680,8 @@ def main() -> None:
     write_report(report_path, report)
     print(
         f"[train-ds] ORACLE TEACHER | {bc_stats['samples']} lessons | "
-        f"MSE {bc_stats['initial_mse']:.5f}->{bc_stats['final_mse']:.5f} | "
+        f"actor MSE {bc_stats['initial_mse']:.5f}->{bc_stats['final_mse']:.5f} | "
+        f"critic MSE {bc_stats['critic_initial_mse']:.3f}->{bc_stats['critic_final_mse']:.3f} | "
         f"raw {raw_initial_cost/1e6:.1f}M -> BC {post_bc_cost/1e6:.1f}M | "
         f"{'USE BC' if use_bc else 'KEEP RAW'}",
         flush=True,

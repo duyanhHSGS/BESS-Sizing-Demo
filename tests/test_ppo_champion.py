@@ -13,6 +13,7 @@ from bess.agents.ppo_agent import PPOAgent, RolloutBuffer, _gae_advantages
 from bess.training.runners.train_ppo_dataset import (
     _action_mismatch_penalty_vnd,
     _behavior_clone_actor,
+    _behavior_clone_critic,
     _champion_curve_point,
     _initialize_champion,
     _oracle_dispatch_wear_cost_vnd,
@@ -128,6 +129,21 @@ class PPOOracleTeacherTests(unittest.TestCase):
         stats = _behavior_clone_actor(agent, observations, targets, seed=0)
         self.assertLess(stats["final_mse"], stats["initial_mse"])
         self.assertEqual(stats["samples"], 64)
+
+    def test_behavior_clone_critic_reduces_oracle_return_mse(self):
+        agent = PPOAgent(7, seed=0, device="cpu")
+        rng = np.random.default_rng(321)
+        observations = rng.normal(size=(64, 7)).astype(np.float32)
+        rewards = (0.05 * observations[:, 0] - 0.02 * observations[:, 1]).astype(np.float32)
+        stats = _behavior_clone_critic(
+            agent,
+            observations,
+            rewards,
+            gamma=0.999,
+            seed=0,
+        )
+        self.assertLess(stats["critic_final_mse"], stats["critic_initial_mse"])
+        self.assertEqual(stats["critic_epochs_completed"], 100)
 
 
 class PPOActionMismatchPenaltyTests(unittest.TestCase):
