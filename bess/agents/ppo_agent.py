@@ -269,6 +269,10 @@ class PPOAgent:
         approx_kls = []
         clip_fractions = []
         grad_norms = []
+        actor_grad_norms = []
+        critic_grad_norms = []
+        actor_params = [*self.net.actor.parameters(), self.net.log_std]
+        critic_params = list(self.net.critic.parameters())
         epochs_completed = 0
         early_stopped = False
 
@@ -298,7 +302,8 @@ class PPOAgent:
                 loss = pi_loss + self.vf_coef * v_loss - self.ent_coef * ent
                 self.opt.zero_grad()
                 loss.backward()
-                grad_norm = nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
+                actor_grad_norm = nn.utils.clip_grad_norm_(actor_params, 0.5)
+                critic_grad_norm = nn.utils.clip_grad_norm_(critic_params, 0.5)
                 self.opt.step()
 
                 pi_losses.append(float(pi_loss.detach().cpu()))
@@ -308,7 +313,11 @@ class PPOAgent:
                 approx_kls.append(kl_value)
                 epoch_kls.append(kl_value)
                 clip_fractions.append(float(clip_fraction.detach().cpu()))
-                grad_norms.append(float(grad_norm.detach().cpu()))
+                actor_grad_norm_value = float(actor_grad_norm.detach().cpu())
+                critic_grad_norm_value = float(critic_grad_norm.detach().cpu())
+                actor_grad_norms.append(actor_grad_norm_value)
+                critic_grad_norms.append(critic_grad_norm_value)
+                grad_norms.append(max(actor_grad_norm_value, critic_grad_norm_value))
 
             epochs_completed = epoch + 1
             if epoch_kls and float(np.mean(epoch_kls)) > self.target_kl:
@@ -325,6 +334,8 @@ class PPOAgent:
             "approx_kl": _mean(approx_kls),
             "clip_fraction": _mean(clip_fractions),
             "grad_norm": _mean(grad_norms),
+            "actor_grad_norm": _mean(actor_grad_norms),
+            "critic_grad_norm": _mean(critic_grad_norms),
             "advantage_mean_raw": raw_adv_mean,
             "advantage_std_raw": raw_adv_std,
             "return_mean": ret_mean,
