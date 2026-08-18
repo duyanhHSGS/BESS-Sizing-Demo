@@ -162,6 +162,21 @@ def _collect_oracle_teacher_samples(
     return np.asarray(observations, dtype=np.float32), np.asarray(targets, dtype=np.float32)
 
 
+def _balanced_teacher_weights(targets: np.ndarray) -> np.ndarray:
+    """Give charge, idle, and discharge teacher groups equal total loss weight."""
+    if targets.ndim != 1 or len(targets) == 0:
+        raise ValueError("Oracle BC targets must be a non-empty 1D array")
+
+    charge = targets < -1e-6
+    idle = np.abs(targets) <= 1e-6
+    discharge = targets > 1e-6
+    groups = [mask for mask in (charge, idle, discharge) if np.any(mask)]
+    weights = np.zeros(len(targets), dtype=np.float32)
+    for mask in groups:
+        weights[mask] = len(targets) / (len(groups) * int(np.count_nonzero(mask)))
+    return weights
+
+
 def _behavior_clone_actor(
     agent: PPOAgent,
     observations: np.ndarray,
@@ -169,23 +184,28 @@ def _behavior_clone_actor(
     *,
     seed: int,
 ) -> dict[str, float | int]:
-    """Supervised-fit the existing generic PPO actor to Oracle teacher actions."""
+    """Supervised-fit the generic PPO actor with balanced Oracle action groups."""
     if observations.ndim != 2 or observations.shape[1] != OBSERVATION_DIM:
         raise ValueError("Oracle BC observations must have shape (N, OBSERVATION_DIM)")
     if targets.ndim != 1 or len(targets) != len(observations) or len(targets) == 0:
         raise ValueError("Oracle BC targets must be one non-empty action per observation")
 
+    sample_weights = _balanced_teacher_weights(targets)
     obs_t = torch.as_tensor(observations, dtype=torch.float32, device=agent.device)
     target_t = torch.as_tensor(targets, dtype=torch.float32, device=agent.device)
+    weight_t = torch.as_tensor(sample_weights, dtype=torch.float32, device=agent.device)
     optimizer = torch.optim.Adam(agent.net.actor.parameters(), lr=ORACLE_BC_LEARNING_RATE)
     rng = np.random.default_rng(seed)
 
     @torch.inference_mode()
-    def full_mse() -> float:
+    def losses() -> tuple[float, float]:
         prediction = torch.tanh(agent.net.actor(obs_t)).squeeze(-1)
-        return float(torch.mean((prediction - target_t) ** 2).cpu())
+        squared_error = (prediction - target_t) ** 2
+        plain = torch.mean(squared_error)
+        balanced = torch.mean(weight_t * squared_error)
+        return float(plain.cpu()), float(balanced.cpu())
 
-    initial_mse = full_mse()
+    initial_mse, initial_balanced_mse = losses()
     epochs_completed = 0
     for epoch in range(ORACLE_BC_MAX_EPOCHS):
         indexes = rng.permutation(len(observations))
@@ -196,21 +216,28 @@ def _behavior_clone_actor(
                 device=agent.device,
             )
             prediction = torch.tanh(agent.net.actor(obs_t[mb])).squeeze(-1)
-            loss = torch.mean((prediction - target_t[mb]) ** 2)
+            squared_error = (prediction - target_t[mb]) ** 2
+            loss = torch.mean(weight_t[mb] * squared_error)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
         epochs_completed = epoch + 1
-        if full_mse() <= ORACLE_BC_TARGET_MSE:
+        _plain_mse, balanced_mse = losses()
+        if balanced_mse <= ORACLE_BC_TARGET_MSE:
             break
 
-    final_mse = full_mse()
+    final_mse, final_balanced_mse = losses()
     agent._sync_collector()
     return {
         "samples": len(observations),
+        "charge_samples": int(np.count_nonzero(targets < -1e-6)),
+        "idle_samples": int(np.count_nonzero(np.abs(targets) <= 1e-6)),
+        "discharge_samples": int(np.count_nonzero(targets > 1e-6)),
         "epochs_completed": int(epochs_completed),
         "initial_mse": initial_mse,
         "final_mse": final_mse,
+        "initial_balanced_mse": initial_balanced_mse,
+        "final_balanced_mse": final_balanced_mse,
     }
 
 

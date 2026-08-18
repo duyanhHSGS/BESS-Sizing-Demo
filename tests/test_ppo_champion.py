@@ -12,6 +12,7 @@ import torch
 from bess.agents.ppo_agent import PPOAgent, RolloutBuffer, _gae_advantages
 from bess.training.runners.train_ppo_dataset import (
     _action_mismatch_penalty_vnd,
+    _balanced_teacher_weights,
     _behavior_clone_actor,
     _champion_curve_point,
     _initialize_champion,
@@ -105,13 +106,23 @@ class PPOOracleTeacherTests(unittest.TestCase):
         self.assertAlmostEqual(discharge, 100.0 / 450.0)
         self.assertAlmostEqual(charge, -90.0 / 450.0)
 
+    def test_balanced_teacher_weights_equalize_action_group_vote(self):
+        targets = np.asarray([-0.8, 0.0, 0.0, 0.0, 0.0, 0.6], dtype=np.float32)
+        weights = _balanced_teacher_weights(targets)
+        charge_weight = float(weights[targets < -1e-6].sum())
+        idle_weight = float(weights[np.abs(targets) <= 1e-6].sum())
+        discharge_weight = float(weights[targets > 1e-6].sum())
+        self.assertAlmostEqual(charge_weight, idle_weight)
+        self.assertAlmostEqual(idle_weight, discharge_weight)
+        self.assertAlmostEqual(float(weights.mean()), 1.0)
+
     def test_behavior_clone_actor_reduces_teacher_mse(self):
         agent = PPOAgent(7, seed=0, device="cpu")
         rng = np.random.default_rng(123)
         observations = rng.normal(size=(64, 7)).astype(np.float32)
         targets = np.tanh(observations[:, 0] * 0.5).astype(np.float32)
         stats = _behavior_clone_actor(agent, observations, targets, seed=0)
-        self.assertLess(stats["final_mse"], stats["initial_mse"])
+        self.assertLess(stats["final_balanced_mse"], stats["initial_balanced_mse"])
         self.assertEqual(stats["samples"], 64)
 
 
