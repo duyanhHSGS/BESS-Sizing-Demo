@@ -10,11 +10,13 @@ import numpy as np
 import torch
 
 from bess.agents.ppo_agent import PPOAgent, RolloutBuffer, _gae_advantages
+from bess.core.bess_env import OBSERVATION_DIM
 from bess.training.runners.train_ppo_dataset import (
     _action_mismatch_penalty_vnd,
     _behavior_clone_actor,
-    _behavior_clone_critic,
     _champion_curve_point,
+    _discounted_returns,
+    _fit_critic_returns,
     _initialize_champion,
     _oracle_dispatch_wear_cost_vnd,
     _oracle_teacher_action,
@@ -122,28 +124,33 @@ class PPOOracleTeacherTests(unittest.TestCase):
         self.assertAlmostEqual(wear, 25_000.0)
 
     def test_behavior_clone_actor_reduces_teacher_mse(self):
-        agent = PPOAgent(7, seed=0, device="cpu")
+        agent = PPOAgent(OBSERVATION_DIM, seed=0, device="cpu")
         rng = np.random.default_rng(123)
-        observations = rng.normal(size=(64, 7)).astype(np.float32)
+        observations = rng.normal(size=(64, OBSERVATION_DIM)).astype(np.float32)
         targets = np.tanh(observations[:, 0] * 0.5).astype(np.float32)
         stats = _behavior_clone_actor(agent, observations, targets, seed=0)
         self.assertLess(stats["final_mse"], stats["initial_mse"])
         self.assertEqual(stats["samples"], 64)
 
-    def test_behavior_clone_critic_reduces_oracle_return_mse(self):
-        agent = PPOAgent(7, seed=0, device="cpu")
+    def test_critic_return_fit_reduces_on_policy_target_mse(self):
+        agent = PPOAgent(OBSERVATION_DIM, seed=0, device="cpu")
         rng = np.random.default_rng(321)
-        observations = rng.normal(size=(64, 7)).astype(np.float32)
+        observations = rng.normal(size=(64, OBSERVATION_DIM)).astype(np.float32)
         rewards = (0.05 * observations[:, 0] - 0.02 * observations[:, 1]).astype(np.float32)
-        stats = _behavior_clone_critic(
+        returns = _discounted_returns(rewards, gamma=0.999)
+        actor_before = copy.deepcopy(agent.net.actor.state_dict())
+        log_std_before = agent.net.log_std.detach().clone()
+        stats = _fit_critic_returns(
             agent,
             observations,
-            rewards,
-            gamma=0.999,
+            returns,
             seed=0,
         )
         self.assertLess(stats["critic_final_mse"], stats["critic_initial_mse"])
         self.assertEqual(stats["critic_epochs_completed"], 100)
+        for name, value in actor_before.items():
+            self.assertTrue(torch.equal(agent.net.actor.state_dict()[name], value))
+        self.assertTrue(torch.equal(agent.net.log_std.detach(), log_std_before))
 
 
 class PPOActionMismatchPenaltyTests(unittest.TestCase):

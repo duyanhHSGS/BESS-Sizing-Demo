@@ -88,7 +88,7 @@ class RemovedAlgorithmTests(unittest.TestCase):
 
 
 class GenericPPOLauncherTests(unittest.TestCase):
-    def test_fit_mode_resolves_control_to_30_minute_meter_blocks(self):
+    def test_fit_mode_resolves_generic_ppo_control_to_native_timestep(self):
         with tempfile.TemporaryDirectory() as directory:
             csv_path = Path(directory) / "site.csv"
             rows = ["date_iso,day_index,step,day_type,P_load_kW,P_pv_kW"]
@@ -101,7 +101,7 @@ class GenericPPOLauncherTests(unittest.TestCase):
                     {"algo": "ppo", "control_dt_minutes": 15},
                     csv_path,
                 ),
-                30,
+                15,
             )
             self.assertEqual(
                 _control_dt_minutes(

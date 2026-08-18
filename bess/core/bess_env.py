@@ -88,11 +88,11 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-OBSERVATION_DIM = 7
+OBSERVATION_DIM = 8
 ACTION_DIM = 1
 ACTION_MIN = -1.0
 ACTION_MAX = 1.0
-BrainObservation = tuple[float, float, float, float, float, float, float]
+BrainObservation = tuple[float, float, float, float, float, float, float, float]
 
 # Lower-level callers use this fallback; owned episodes provide a site-aware ruler.
 POWER_SCALE_KW = 1000.0
@@ -1241,7 +1241,7 @@ class BrainEnv:
         return self.current_observation()
 
     def current_observation(self) -> BrainObservation:
-        """Build the seven-eye observation for the current owned episode timestep."""
+        """Build the eight-eye observation for the current owned episode timestep."""
         if self.episode is None:
             raise RuntimeError("BrainEnv.current_observation() requires a configured BrainEpisode")
         if self.bess_world.timestep_index != self.raw_world.timestep_index:
@@ -1265,6 +1265,9 @@ class BrainEnv:
             ),
             monthly_peak_kw=self.bess_world.meter_state.monthly_peak_kw,
             is_working_day=timestep.is_working_day,
+            open_block_kw=(
+                self.bess_world.meter_state.block_energy_kwh / DEMAND_BLOCK_HOURS
+            ),
             power_scale_kw=self.episode.power_scale_kw,
         )
 
@@ -1497,9 +1500,10 @@ def build_observation(
     maximum_tariff_vnd_per_kwh: float,
     monthly_peak_kw: float,
     is_working_day: bool,
+    open_block_kw: float,
     power_scale_kw: float = POWER_SCALE_KW,
 ) -> BrainObservation:
-    """Build the tiny 7-eye observation the agent gets to see."""
+    """Build the tiny 8-eye observation the agent gets to see."""
     if steps_per_day <= 0:
         raise ValueError("steps_per_day must be greater than 0")
     if power_scale_kw <= 0.0:
@@ -1529,8 +1533,9 @@ def build_observation(
     # Current tariff is normalized against the configured maximum tariff.
     normalized_tariff = max(float(tariff_vnd_per_kwh), 0.0) / float(maximum_tariff_vnd_per_kwh)
 
-    # Peak and net load share the same site-aware power ruler.
+    # Peak, open-block demand, and net load share the same site-aware power ruler.
     normalized_monthly_peak = max(float(monthly_peak_kw), 0.0) / power_scale_kw
+    open_block_kw = max(float(open_block_kw), 0.0) / power_scale_kw
 
     working_day = 1.0 if is_working_day else 0.0
 
@@ -1542,4 +1547,5 @@ def build_observation(
         normalized_tariff,
         normalized_monthly_peak,
         working_day,
+        open_block_kw,
     )
