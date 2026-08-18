@@ -41,6 +41,7 @@ from bess.training.training_reports import (
 VALIDATE_EVERY_UPDATES = 4
 CHALLENGER_RESET_PATIENCE = 3
 CHALLENGER_RESETS_ENABLED = False
+ACTION_MISMATCH_SHAPING_SCALE = 0.1
 LOG_EVERY_UPDATES = 1
 
 
@@ -215,7 +216,8 @@ def main() -> None:
         "obs_dim": OBSERVATION_DIM,
         "battery_wear_cost": battery_wear_cost,
         "reward_mode": "brain_savings_vnd_v1",
-        "training_reward_shaping": "infeasible_request_phantom_wear_v1",
+        "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2",
+        "training_reward_shaping_scale": ACTION_MISMATCH_SHAPING_SCALE,
         "initial_soc": float(cfg.SOC_min),
         "gamma": gamma,
         "lambda": args.lambda_value,
@@ -269,7 +271,8 @@ def main() -> None:
         "economics": {
             "battery_wear_cost": battery_wear_cost,
             "reward_mode": "brain_savings_vnd_v1",
-            "training_reward_shaping": "infeasible_request_phantom_wear_v1",
+            "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2",
+            "training_reward_shaping_scale": ACTION_MISMATCH_SHAPING_SCALE,
             "champion_scoring_uses_shaping": False,
         },
         "training": {
@@ -487,7 +490,10 @@ def main() -> None:
         # Keep the PPO action/log-prob pair exact. We shape only the learning
         # reward so repeatedly requesting battery power that physics rejects is
         # no longer free. Champion/test evaluation never includes this penalty.
-        reward = transition.reward_million_vnd - mismatch_penalty_vnd / REWARD_SCALE_VND
+        reward = (
+            transition.reward_million_vnd
+            - ACTION_MISMATCH_SHAPING_SCALE * mismatch_penalty_vnd / REWARD_SCALE_VND
+        )
         buffer.add(obs, action, logp, reward, value, float(done), latent=latent)
         steps += 1
         perf["decisions"] += 1
@@ -524,6 +530,9 @@ def main() -> None:
             "projected_action_pct": rollout_projected / rollout_count * 100.0,
             "action_mismatch_kwh": rollout_mismatch_kwh,
             "action_mismatch_penalty_vnd": rollout_mismatch_penalty_vnd,
+            "action_mismatch_shaping_penalty_vnd": (
+                ACTION_MISMATCH_SHAPING_SCALE * rollout_mismatch_penalty_vnd
+            ),
             "mean_action_mismatch_penalty_vnd": rollout_mismatch_penalty_vnd / rollout_count,
         }
         report["training"]["updates"] = updates
