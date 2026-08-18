@@ -73,7 +73,7 @@ SYSTEM_CONFIG = {
 # PPO training defaults. Generic PPO deliberately uses an undiscounted monthly
 # operating-cost objective; PPO2 remains separately configured below.
 PPO_GAMMA = 1.0
-PPO_LAMBDA = 0.97
+PPO_LAMBDA = 1.0
 PPO2_GAMMA = 1.0
 PPO2_LAM_ENERGY = 0.97
 PPO2_LAM_PEAK = 0.97
