@@ -123,10 +123,35 @@ class RolloutBuffer:
         return self.ptr >= self.size
 
 
+def _gae_advantages(
+    rewards: np.ndarray,
+    values: np.ndarray,
+    dones: np.ndarray,
+    *,
+    last_val: float,
+    gamma: float,
+    lam: float,
+) -> np.ndarray:
+    """Compute GAE without allowing value/advantage to cross done boundaries."""
+    n = len(rewards)
+    if len(values) != n or len(dones) != n:
+        raise ValueError("rewards, values, and dones must have equal length")
+    adv = np.zeros(n, np.float32)
+    gae = 0.0
+    next_val = float(last_val)
+    for i in reversed(range(n)):
+        nonterminal = 1.0 - float(dones[i])
+        delta = rewards[i] + gamma * next_val * nonterminal - values[i]
+        gae = delta + gamma * lam * nonterminal * gae
+        adv[i] = gae
+        next_val = float(values[i])
+    return adv
+
+
 class PPOAgent:
-    def __init__(self, obs_dim: int, lr=3e-4, gamma=PPO_GAMMA, lam=PPO_LAMBDA,
-                 clip=0.2, epochs=8, minibatch=256, ent_coef=3e-3,
-                 vf_coef=0.5, seed=0, device="auto"):
+    def __init__(self, obs_dim: int, lr=1e-4, gamma=PPO_GAMMA, lam=PPO_LAMBDA,
+                 clip=0.2, epochs=4, minibatch=256, ent_coef=3e-3,
+                 vf_coef=0.5, target_kl=0.02, seed=0, device="auto"):
         torch.manual_seed(seed)
         self.rng = np.random.default_rng(seed)
         self.device = torch.device(resolve_ppo_device(device))
@@ -140,6 +165,8 @@ class PPOAgent:
         self.gamma, self.lam, self.clip = gamma, lam, clip
         self.epochs, self.minibatch = epochs, minibatch
         self.ent_coef, self.vf_coef = ent_coef, vf_coef
+        self.target_kl = float(target_kl)
+        self.last_update_stats = {}
         self.meta = {}          # deployment context (p_ref_kw, obs_variant)
 
     @torch.inference_mode()
@@ -201,17 +228,34 @@ class PPOAgent:
     # ------------------------------------------------------------------
     def update(self, buf: RolloutBuffer, last_val: float):
         n = buf.ptr
-        adv = np.zeros(n, np.float32)
-        gae = 0.0
-        next_val, next_nonterm = last_val, 1.0
-        for i in reversed(range(n)):
-            delta = buf.rew[i] + self.gamma * next_val * next_nonterm - buf.val[i]
-            gae = delta + self.gamma * self.lam * next_nonterm * gae
-            adv[i] = gae
-            next_val = buf.val[i]
-            next_nonterm = 1.0 - buf.done[i]
+        if n <= 0:
+            raise ValueError("PPO update requires at least one rollout transition")
+
+        # GAE must mask the bootstrap with the *current transition's* done flag.
+        # Using the previous loop iteration's flag leaks value/advantage across
+        # episode boundaries whenever one rollout contains multiple episodes.
+        adv = _gae_advantages(
+            buf.rew[:n],
+            buf.val[:n],
+            buf.done[:n],
+            last_val=last_val,
+            gamma=self.gamma,
+            lam=self.lam,
+        )
         ret = adv + buf.val[:n]
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+        raw_adv_mean = float(adv.mean())
+        raw_adv_std = float(adv.std())
+        ret_mean = float(ret.mean())
+        ret_std = float(ret.std())
+        reward_mean = float(buf.rew[:n].mean())
+        reward_std = float(buf.rew[:n].std())
+        return_variance = float(np.var(ret))
+        explained_variance = (
+            1.0 - float(np.var(ret - buf.val[:n])) / return_variance
+            if return_variance > 1e-12
+            else 0.0
+        )
+        adv = (adv - raw_adv_mean) / (raw_adv_std + 1e-8)
 
         obs = torch.as_tensor(buf.obs[:n], device=self.device)
         latent = torch.as_tensor(buf.latent[:n], device=self.device)
@@ -219,8 +263,18 @@ class PPOAgent:
         adv_t = torch.as_tensor(adv, device=self.device)
         ret_t = torch.as_tensor(ret, device=self.device)
 
-        for _ in range(self.epochs):
+        pi_losses = []
+        value_losses = []
+        entropies = []
+        approx_kls = []
+        clip_fractions = []
+        grad_norms = []
+        epochs_completed = 0
+        early_stopped = False
+
+        for epoch in range(self.epochs):
             idx = self.rng.permutation(n)
+            epoch_kls = []
             for s in range(0, n, self.minibatch):
                 mb = torch.as_tensor(
                     idx[s:s + self.minibatch], dtype=torch.long,
@@ -228,7 +282,8 @@ class PPOAgent:
                 )
                 dist = self.net.dist(obs[mb])
                 logp = _squashed_log_prob_from_latent(dist, latent[mb])
-                ratio = torch.exp(logp - logp_old[mb])
+                log_ratio = logp - logp_old[mb]
+                ratio = torch.exp(log_ratio)
                 surr1 = ratio * adv_t[mb]
                 surr2 = torch.clamp(ratio, 1 - self.clip, 1 + self.clip) * adv_t[mb]
                 pi_loss = -torch.min(surr1, surr2).mean()
@@ -238,13 +293,52 @@ class PPOAgent:
                     deterministic=False,
                 )
                 ent = -entropy_log_probability.mean()
+                approx_kl = ((ratio - 1.0) - log_ratio).mean()
+                clip_fraction = ((ratio - 1.0).abs() > self.clip).float().mean()
                 loss = pi_loss + self.vf_coef * v_loss - self.ent_coef * ent
                 self.opt.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
+                grad_norm = nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
                 self.opt.step()
+
+                pi_losses.append(float(pi_loss.detach().cpu()))
+                value_losses.append(float(v_loss.detach().cpu()))
+                entropies.append(float(ent.detach().cpu()))
+                kl_value = float(approx_kl.detach().cpu())
+                approx_kls.append(kl_value)
+                epoch_kls.append(kl_value)
+                clip_fractions.append(float(clip_fraction.detach().cpu()))
+                grad_norms.append(float(grad_norm.detach().cpu()))
+
+            epochs_completed = epoch + 1
+            if epoch_kls and float(np.mean(epoch_kls)) > self.target_kl:
+                early_stopped = True
+                break
+
+        def _mean(values):
+            return float(np.mean(values)) if values else 0.0
+
+        self.last_update_stats = {
+            "policy_loss": _mean(pi_losses),
+            "value_loss": _mean(value_losses),
+            "entropy": _mean(entropies),
+            "approx_kl": _mean(approx_kls),
+            "clip_fraction": _mean(clip_fractions),
+            "grad_norm": _mean(grad_norms),
+            "advantage_mean_raw": raw_adv_mean,
+            "advantage_std_raw": raw_adv_std,
+            "return_mean": ret_mean,
+            "return_std": ret_std,
+            "reward_mean": reward_mean,
+            "reward_std": reward_std,
+            "explained_variance": explained_variance,
+            "log_std": float(self.net.log_std.detach().cpu().item()),
+            "epochs_completed": epochs_completed,
+            "kl_early_stop": early_stopped,
+        }
         self._sync_collector()
         buf.ptr = 0
+        return dict(self.last_update_stats)
 
     # ------------------------------------------------------------------
     # self.meta carries deployment context (e.g. p_ref_kw the observation

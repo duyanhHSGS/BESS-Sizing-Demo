@@ -28,7 +28,6 @@ from bess.core.settings import PPO_GAMMA, PPO_LAMBDA
 from bess.evaluation.baselines import run_drl_policy, run_no_bess
 from bess.evaluation.oracle.oracle_cache import load_cached_training_grids
 from bess.training.training_common import (
-    augment_month,
     build_training_bess_config,
     load_training_days,
 )
@@ -38,7 +37,8 @@ from bess.training.training_reports import (
     write_report,
 )
 
-ROLLOUT_DAYS = 32
+VALIDATE_EVERY_UPDATES = 4
+CHALLENGER_RESET_PATIENCE = 3
 LOG_EVERY_UPDATES = 1
 
 
@@ -81,15 +81,12 @@ def _initialize_champion(agent: PPOAgent, validate_cost, checkpoint_path: Path) 
 
 
 def _resolve_challenger(
-    agent: PPOAgent,
-    champion_state: dict,
     champion_cost: float,
     candidate_cost: float,
 ) -> tuple[float, bool]:
-    """Accept only strict cost improvements; otherwise restore the Champion learner."""
+    """Keep the trusted Champion monotonic without mutating the live learner."""
     if candidate_cost < champion_cost:
         return candidate_cost, True
-    agent.restore_training_state(champion_state)
     return champion_cost, False
 
 
@@ -183,6 +180,8 @@ def main() -> None:
     val_month = MonthData(days=val_days, source="val:full-overlap")
     gamma = args.gamma
     native_steps = native_steps_per_action(cfg.dt, args.control_dt_minutes)
+    decisions_per_day = len(days[0].load) // native_steps
+    decisions_per_episode = decisions_per_day * len(train_days)
     learner_device = resolve_ppo_device(args.device)
     agent = PPOAgent(
         OBSERVATION_DIM,
@@ -201,6 +200,9 @@ def main() -> None:
         "reward_mode": "brain_savings_vnd_v1",
         "gamma": gamma,
         "lambda": args.lambda_value,
+        "learning_rate": float(agent.opt.param_groups[0]["lr"]),
+        "ppo_epochs": agent.epochs,
+        "target_kl": agent.target_kl,
         "native_dt_minutes": csv_dt * 60.0,
         "control_dt_minutes": args.control_dt_minutes,
         "native_steps_per_action": native_steps,
@@ -213,9 +215,12 @@ def main() -> None:
         "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
         "temporary_full_dataset_overlap": True,
         "data_overlap_note": "TEMP DEBUG: train/validation/test all use the full dataset",
+        "training_augmentation_enabled": False,
+        "rollout_decisions": decisions_per_episode,
+        "validation_every_updates": VALIDATE_EVERY_UPDATES,
+        "challenger_reset_patience": CHALLENGER_RESET_PATIENCE,
     }
-    decisions_per_day = len(days[0].load) // native_steps
-    buffer = RolloutBuffer(decisions_per_day * ROLLOUT_DAYS, OBSERVATION_DIM)
+    buffer = RolloutBuffer(decisions_per_episode, OBSERVATION_DIM)
 
     val_base = score_month(run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
     oracle_grids = load_cached_training_grids(
@@ -250,14 +255,24 @@ def main() -> None:
             "seed": args.seed,
             "gamma": gamma,
             "lambda": args.lambda_value,
-            "rollout_days": ROLLOUT_DAYS,
+            "learning_rate": float(agent.opt.param_groups[0]["lr"]),
+            "ppo_epochs": agent.epochs,
+            "target_kl": agent.target_kl,
+            "rollout_days": len(train_days),
+            "rollout_decisions": decisions_per_episode,
+            "augmentation_enabled": False,
+            "validation_every_updates": VALIDATE_EVERY_UPDATES,
+            "challenger_reset_patience": CHALLENGER_RESET_PATIENCE,
             "native_dt_minutes": csv_dt * 60.0,
             "control_dt_minutes": args.control_dt_minutes,
             "native_steps_per_action": native_steps,
             "device_requested": args.device,
             "device": learner_device,
+            "updates": 0,
+            "candidate_evaluations": 0,
             "accepted_updates": 0,
             "rejected_updates": 0,
+            "learner_resets": 0,
             "acceptance_rate_pct": 0.0,
         },
         "billing_mode": billing,
@@ -277,10 +292,8 @@ def main() -> None:
         flush=True,
     )
 
-    rng = np.random.default_rng(args.seed)
     curve = []
     perf = {
-        "augment": 0.0,
         "rollout": 0.0,
         "update": 0.0,
         "validation": 0.0,
@@ -323,7 +336,7 @@ def main() -> None:
     def print_performance() -> None:
         rollout_seconds = max(perf["rollout"], 1e-9)
         print(
-            f"  perf rollout {perf['rollout']:.2f}s | augment {perf['augment']:.2f}s | "
+            f"  perf rollout {perf['rollout']:.2f}s | "
             f"ppo {perf['update']:.2f}s | validate {perf['validation']:.2f}s | "
             f"score {perf['scoring']:.2f}s | io {perf['io']:.2f}s | "
             f"checkpoint {perf['checkpoint']:.2f}s | "
@@ -343,6 +356,7 @@ def main() -> None:
         )
 
     champion_cost = _initialize_champion(agent, validate_policy_cost, checkpoint_path)
+    champion_state = agent.snapshot_training_state()
     initial_point = _champion_curve_point(
         steps=0,
         candidate_cost=champion_cost,
@@ -360,16 +374,68 @@ def main() -> None:
         flush=True,
     )
 
-    month_index = 0
-    augment_started = time.perf_counter()
-    first_month = augment_month(train_months[0], rng)
-    perf["augment"] += time.perf_counter() - augment_started
-    env = make_training_env(first_month)
+    # Fit-test means fit the exact supplied episode. Do not quietly mutate the
+    # load/PV data while asking whether PPO can memorize it.
+    env = make_training_env(train_months[0])
     obs = observation_array(env.reset())
     steps = 0
     updates = 0
+    candidate_evaluations = 0
+    consecutive_rejections = 0
+    last_validated_update = 0
+    rollout_action_sum = 0.0
+    rollout_action_abs_sum = 0.0
+    rollout_action_saturation = 0
+    rollout_projected = 0
+    rollout_count = 0
     started = time.time()
     rollout_started = time.perf_counter()
+
+    def evaluate_live_candidate(*, allow_reset: bool) -> tuple[dict, float, bool, bool]:
+        nonlocal champion_cost
+        nonlocal champion_state
+        nonlocal candidate_evaluations
+        nonlocal consecutive_rejections
+        nonlocal last_validated_update
+
+        candidate_evaluations += 1
+        candidate_cost = validate_policy_cost()
+        champion_cost, accepted = _resolve_challenger(champion_cost, candidate_cost)
+        reset_to_champion = False
+        if accepted:
+            report["training"]["accepted_updates"] += 1
+            consecutive_rejections = 0
+            champion_state = agent.snapshot_training_state()
+            checkpoint_started = time.perf_counter()
+            if _save_accepted_champion(agent, checkpoint_path, accepted=True):
+                perf["checkpoint"] += time.perf_counter() - checkpoint_started
+        else:
+            report["training"]["rejected_updates"] += 1
+            consecutive_rejections += 1
+            if allow_reset and consecutive_rejections >= CHALLENGER_RESET_PATIENCE:
+                agent.restore_training_state(champion_state)
+                report["training"]["learner_resets"] += 1
+                consecutive_rejections = 0
+                reset_to_champion = True
+
+        last_validated_update = updates
+        report["training"]["candidate_evaluations"] = candidate_evaluations
+        report["training"]["consecutive_rejections"] = consecutive_rejections
+        report["training"]["acceptance_rate_pct"] = (
+            report["training"]["accepted_updates"] / candidate_evaluations * 100.0
+        )
+        point = _champion_curve_point(
+            steps=steps,
+            candidate_cost=candidate_cost,
+            champion_cost=champion_cost,
+            accepted=accepted,
+            val_base=val_base,
+            val_oracle=val_oracle,
+        )
+        curve.append(point)
+        persist_progress()
+        return point, candidate_cost, accepted, reset_to_champion
+
     while steps < args.steps:
         action, logp, latent, value = agent.act_with_latent(obs)
         transition = step_brain_control(
@@ -383,13 +449,14 @@ def main() -> None:
         steps += 1
         perf["decisions"] += 1
         perf["native_rows"] += len(transition.native_results)
+        rollout_action_sum += action
+        rollout_action_abs_sum += abs(action)
+        rollout_action_saturation += int(abs(action) >= 0.98)
+        rollout_projected += int(transition.adjusted_action)
+        rollout_count += 1
+
         if done:
-            month_index += 1
-            augment_started = time.perf_counter()
-            source_month = train_months[month_index % len(train_months)]
-            next_month = augment_month(source_month, rng)
-            perf["augment"] += time.perf_counter() - augment_started
-            env = make_training_env(next_month)
+            env = make_training_env(train_months[0])
             next_obs = observation_array(env.reset())
         else:
             if transition.next_observation is None:
@@ -398,58 +465,78 @@ def main() -> None:
         obs = next_obs
         if not buffer.full():
             continue
+
         perf["rollout"] += time.perf_counter() - rollout_started
         updates += 1
         _, _, last_value = agent.act(obs)
-        champion_state = agent.snapshot_training_state()
         update_started = time.perf_counter()
-        agent.update(buffer, 0.0 if done else last_value)
+        update_stats = agent.update(buffer, 0.0 if done else last_value)
         perf["update"] += time.perf_counter() - update_started
-        candidate_cost = validate_policy_cost()
-        champion_cost, accepted = _resolve_challenger(
-            agent,
-            champion_state,
-            champion_cost,
-            candidate_cost,
-        )
-        if accepted:
-            report["training"]["accepted_updates"] += 1
-        else:
-            report["training"]["rejected_updates"] += 1
-        checkpoint_started = time.perf_counter()
-        if _save_accepted_champion(agent, checkpoint_path, accepted):
-            perf["checkpoint"] += time.perf_counter() - checkpoint_started
-        report["training"]["acceptance_rate_pct"] = (
-            report["training"]["accepted_updates"] / updates * 100.0
-        )
-        point = _champion_curve_point(
-            steps=steps,
-            candidate_cost=candidate_cost,
-            champion_cost=champion_cost,
-            accepted=accepted,
-            val_base=val_base,
-            val_oracle=val_oracle,
-        )
-        curve.append(point)
-        persist_progress()
+        rollout_stats = {
+            "mean_action": rollout_action_sum / rollout_count,
+            "mean_abs_action": rollout_action_abs_sum / rollout_count,
+            "action_saturation_pct": rollout_action_saturation / rollout_count * 100.0,
+            "projected_action_pct": rollout_projected / rollout_count * 100.0,
+        }
+        report["training"]["updates"] = updates
+        report["training"]["last_update"] = {**update_stats, **rollout_stats}
+
+        should_validate = updates % VALIDATE_EVERY_UPDATES == 0
         should_log = updates == 1 or updates % LOG_EVERY_UPDATES == 0
-        if should_log:
-            verdict = "ACCEPTED 👑" if accepted else "REJECTED 💀"
+        if should_validate:
+            point, candidate_cost, accepted, reset_to_champion = evaluate_live_candidate(
+                allow_reset=True
+            )
+            if should_log:
+                verdict = "ACCEPTED 👑" if accepted else "REJECTED 💀"
+                reset_note = " | RESET→CHAMPION" if reset_to_champion else ""
+                print(
+                    f"  update {updates:>4} | step {steps:>7} | "
+                    f"candidate {candidate_cost/1e6:8.1f}M | champion {champion_cost/1e6:8.1f}M | "
+                    f"{verdict}{reset_note} | saving {point['saving_vs_nobess_pct']:5.1f}% | "
+                    f"gap {point['oracle_gap_pct']:6.1f}% | {steps/(time.time()-started):,.0f} sps",
+                    flush=True,
+                )
+        elif should_log:
             print(
-                f"  update {updates:>4} | step {steps:>7} | "
-                f"candidate {candidate_cost/1e6:8.1f}M | champion {champion_cost/1e6:8.1f}M | "
-                f"{verdict} | saving {point['saving_vs_nobess_pct']:5.1f}% | "
-                f"gap {point['oracle_gap_pct']:6.1f}% | {steps/(time.time()-started):,.0f} sps",
+                f"  update {updates:>4} | step {steps:>7} | learner continues | "
+                f"KL {update_stats['approx_kl']:.4f} | clip {update_stats['clip_fraction']*100:4.1f}% | "
+                f"EV {update_stats['explained_variance']:+.3f} | "
+                f"{steps/(time.time()-started):,.0f} sps",
                 flush=True,
             )
+
+        if should_log:
             print(
-                f"  champion stats | accepted {report['training']['accepted_updates']} / {updates} | "
-                f"rejected {report['training']['rejected_updates']} / {updates} | "
+                f"  champion stats | accepted {report['training']['accepted_updates']} / "
+                f"{candidate_evaluations} evals | rejected {report['training']['rejected_updates']} / "
+                f"{candidate_evaluations} | resets {report['training']['learner_resets']} | "
                 f"rate {report['training']['acceptance_rate_pct']:.1f}%",
                 flush=True,
             )
             print_performance()
+
+        rollout_action_sum = 0.0
+        rollout_action_abs_sum = 0.0
+        rollout_action_saturation = 0
+        rollout_projected = 0
+        rollout_count = 0
         rollout_started = time.perf_counter()
+
+    # The requested step budget may end after 1-3 unvalidated full PPO updates.
+    # Score that final learner once so a late improvement is not thrown away.
+    if updates > last_validated_update:
+        point, candidate_cost, accepted, _reset_to_champion = evaluate_live_candidate(
+            allow_reset=False
+        )
+        verdict = "ACCEPTED 👑" if accepted else "REJECTED 💀"
+        print(
+            f"  final candidate | update {updates:>4} | step {steps:>7} | "
+            f"candidate {candidate_cost/1e6:8.1f}M | champion {champion_cost/1e6:8.1f}M | "
+            f"{verdict} | saving {point['saving_vs_nobess_pct']:5.1f}% | "
+            f"gap {point['oracle_gap_pct']:6.1f}%",
+            flush=True,
+        )
 
     persist_progress()
 

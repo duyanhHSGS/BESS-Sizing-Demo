@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from bess.agents.ppo_agent import PPOAgent, RolloutBuffer
+from bess.agents.ppo_agent import PPOAgent, RolloutBuffer, _gae_advantages
 from bess.training.runners.train_ppo_dataset import (
     _champion_curve_point,
     _initialize_champion,
@@ -55,7 +55,7 @@ def _assert_nested_equal(testcase: unittest.TestCase, left, right) -> None:
 
 
 class PPOTrainingStateTests(unittest.TestCase):
-    def test_rejected_challenger_restores_network_optimizer_and_collector_but_not_rng(self):
+    def test_explicit_restore_recovers_network_optimizer_and_collector_but_not_rng(self):
         agent = PPOAgent(obs_dim=4, seed=7, device="cpu", epochs=1, minibatch=4)
 
         # Give Adam real momentum/history so rollback tests more than just weights.
@@ -74,15 +74,8 @@ class PPOTrainingStateTests(unittest.TestCase):
             )
         )
 
-        restored_cost, accepted = _resolve_challenger(
-            agent,
-            champion_state,
-            champion_cost=100.0,
-            candidate_cost=120.0,
-        )
+        agent.restore_training_state(champion_state)
 
-        self.assertFalse(accepted)
-        self.assertEqual(restored_cost, 100.0)
         _assert_nested_equal(self, agent.net.state_dict(), champion_state["network"])
         _assert_nested_equal(self, agent.opt.state_dict(), champion_state["optimizer"])
         for key, value in agent.collector_net.state_dict().items():
@@ -90,14 +83,53 @@ class PPOTrainingStateTests(unittest.TestCase):
         self.assertEqual(agent.rng.bit_generator.state, rng_after_update)
 
 
+class PPOGAETests(unittest.TestCase):
+    def test_done_boundary_blocks_advantage_leak_from_next_episode(self):
+        advantages = _gae_advantages(
+            np.array([0.0, 1.0, 100.0], dtype=np.float32),
+            np.zeros(3, dtype=np.float32),
+            np.array([0.0, 1.0, 0.0], dtype=np.float32),
+            last_val=0.0,
+            gamma=1.0,
+            lam=1.0,
+        )
+        np.testing.assert_allclose(advantages, [1.0, 1.0, 100.0])
+
+    def test_terminal_transition_never_bootstraps_last_value(self):
+        advantages = _gae_advantages(
+            np.array([5.0], dtype=np.float32),
+            np.array([2.0], dtype=np.float32),
+            np.array([1.0], dtype=np.float32),
+            last_val=999.0,
+            gamma=1.0,
+            lam=1.0,
+        )
+        np.testing.assert_allclose(advantages, [3.0])
+
+
+class PPODeterminismTests(unittest.TestCase):
+    def test_same_seed_replays_the_same_collection_and_update(self):
+        def run_once(seed: int):
+            agent = PPOAgent(obs_dim=4, seed=seed, device="cpu", epochs=2, minibatch=4)
+            buffer = _make_buffer(agent, size=8, seed=seed + 100)
+            stats = agent.update(buffer, 0.0)
+            state = {
+                key: value.detach().clone()
+                for key, value in agent.net.state_dict().items()
+            }
+            return state, stats
+
+        first_state, first_stats = run_once(23)
+        second_state, second_stats = run_once(23)
+
+        for key in first_state:
+            self.assertTrue(torch.equal(first_state[key], second_state[key]), key)
+        self.assertEqual(first_stats, second_stats)
+
+
 class PPOChampionSelectionTests(unittest.TestCase):
     def test_accept_improvement_and_reject_same_or_worse(self):
-        agent = PPOAgent(obs_dim=3, seed=3, device="cpu")
-        champion_state = agent.snapshot_training_state()
-
         improved_cost, accepted = _resolve_challenger(
-            agent,
-            champion_state,
             champion_cost=100.0,
             candidate_cost=90.0,
         )
@@ -107,8 +139,6 @@ class PPOChampionSelectionTests(unittest.TestCase):
         for candidate_cost in (90.0, 95.0):
             with self.subTest(candidate_cost=candidate_cost):
                 restored_cost, accepted = _resolve_challenger(
-                    agent,
-                    agent.snapshot_training_state(),
                     champion_cost=90.0,
                     candidate_cost=candidate_cost,
                 )
@@ -116,13 +146,10 @@ class PPOChampionSelectionTests(unittest.TestCase):
                 self.assertEqual(restored_cost, 90.0)
 
     def test_champion_cost_is_monotonic_for_fake_candidates(self):
-        agent = PPOAgent(obs_dim=3, seed=4, device="cpu")
         champion_cost = 100.0
         accepted_sequence = [champion_cost]
         for candidate_cost in (80.0, 95.0, 70.0, 120.0):
             champion_cost, _accepted = _resolve_challenger(
-                agent,
-                agent.snapshot_training_state(),
                 champion_cost,
                 candidate_cost,
             )

@@ -72,8 +72,9 @@ SYSTEM_CONFIG = {
     },
 }
 
-# PPO training defaults. PPO_GAMMA is also used by potential-based SOC shaping.
-PPO_GAMMA = 0.995
+# PPO training defaults. Generic PPO deliberately uses an undiscounted monthly
+# operating-cost objective; PPO2 remains separately configured below.
+PPO_GAMMA = 1.0
 PPO_LAMBDA = 0.97
 PPO2_GAMMA = 1.0
 PPO2_LAM_ENERGY = 0.97
