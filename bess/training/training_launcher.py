@@ -38,6 +38,7 @@ TRAINING_MODULES = {
     "ppo2": "bess.training.runners.train_ppo2_dataset",
 }
 ALGORITHMS = SUPPORTED_POLICY_ALGORITHMS
+PPO_FIT_CONTROL_DT_MINUTES = 30.0
 
 
 class TrainingLaunchError(ValueError):
@@ -166,7 +167,12 @@ def _split_days(payload: dict) -> tuple[int, int]:
 
 def _control_dt_minutes(payload: dict, csv_path: Path) -> int:
     native_minutes = float(detect_resolution_minutes(csv_path))
-    requested = _float(payload, "control_dt_minutes", native_minutes)
+    algo = str(payload.get("algo", "ppo")).strip().lower()
+    requested = (
+        PPO_FIT_CONTROL_DT_MINUTES
+        if algo == "ppo"
+        else _float(payload, "control_dt_minutes", native_minutes)
+    )
     try:
         validate_control_interval_minutes(native_minutes, requested)
     except ValueError as exc:
@@ -238,6 +244,7 @@ def write_training_run_settings(
         "checkpoint": Path(spec["checkpoint"]).name,
         "dataset_export": str(csv_path),
         "training_request": payload,
+        "resolved_control_dt_minutes": spec.get("control_dt_minutes"),
         "resolved_training_config": training_config,
         "resolved_sizing_parameters": resolved_parameters,
         "runner_command": spec["cmd"],
@@ -413,8 +420,15 @@ def build_training_command(
             cmd.extend(["--seeds", seeds])
         if payload.get("ppo2_fit_test") is True:
             cmd.append("--fit-test")
-    return {"cmd": cmd, "tag": tag, "checkpoint": str(checkpoint), "algo": algo,
-            "obs_variant": obs_variant, "device": device}
+    return {
+        "cmd": cmd,
+        "tag": tag,
+        "checkpoint": str(checkpoint),
+        "algo": algo,
+        "obs_variant": obs_variant,
+        "device": device,
+        "control_dt_minutes": control_dt_minutes,
+    }
 
 
 def training_oracle_parameters(payload: dict, parameters: dict) -> tuple[Path, dict]:

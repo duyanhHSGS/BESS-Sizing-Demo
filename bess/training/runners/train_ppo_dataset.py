@@ -46,6 +46,7 @@ VALIDATE_EVERY_UPDATES = 4
 CHALLENGER_RESET_PATIENCE = 3
 CHALLENGER_RESETS_ENABLED = False
 ACTION_MISMATCH_SHAPING_SCALE = 0.1
+PPO_FIT_CONTROL_DT_MINUTES = 30.0
 ORACLE_BC_MAX_EPOCHS = 100
 ORACLE_BC_LEARNING_RATE = 1e-3
 ORACLE_BC_MINIBATCH = 256
@@ -97,6 +98,28 @@ def _score_ppo_operating_month(
         "wear_cost_vnd": wear_cost_vnd,
         "total_operating_cost_vnd": utility["total_cost_vnd"] + wear_cost_vnd,
     }
+
+
+def _oracle_dispatch_wear_cost_vnd(
+    dispatch_days: list[dict[str, list[float]]],
+    *,
+    timestep_hours: float,
+    wear_vnd_per_kwh: float,
+) -> float:
+    """Score Oracle charge/discharge throughput with the same LP wear convention."""
+    throughput_kwh = float(timestep_hours) * sum(
+        sum(
+            discharge + grid_charge + solar_charge
+            for discharge, grid_charge, solar_charge in zip(
+                day["discharge"],
+                day["grid_charge"],
+                day["solar_charge"],
+                strict=True,
+            )
+        )
+        for day in dispatch_days
+    )
+    return throughput_kwh * float(wear_vnd_per_kwh)
 
 
 def _oracle_teacher_action(
@@ -162,21 +185,6 @@ def _collect_oracle_teacher_samples(
     return np.asarray(observations, dtype=np.float32), np.asarray(targets, dtype=np.float32)
 
 
-def _balanced_teacher_weights(targets: np.ndarray) -> np.ndarray:
-    """Give charge, idle, and discharge teacher groups equal total loss weight."""
-    if targets.ndim != 1 or len(targets) == 0:
-        raise ValueError("Oracle BC targets must be a non-empty 1D array")
-
-    charge = targets < -1e-6
-    idle = np.abs(targets) <= 1e-6
-    discharge = targets > 1e-6
-    groups = [mask for mask in (charge, idle, discharge) if np.any(mask)]
-    weights = np.zeros(len(targets), dtype=np.float32)
-    for mask in groups:
-        weights[mask] = len(targets) / (len(groups) * int(np.count_nonzero(mask)))
-    return weights
-
-
 def _behavior_clone_actor(
     agent: PPOAgent,
     observations: np.ndarray,
@@ -184,28 +192,23 @@ def _behavior_clone_actor(
     *,
     seed: int,
 ) -> dict[str, float | int]:
-    """Supervised-fit the generic PPO actor with balanced Oracle action groups."""
+    """Supervised-fit the existing generic PPO actor to Oracle teacher actions."""
     if observations.ndim != 2 or observations.shape[1] != OBSERVATION_DIM:
         raise ValueError("Oracle BC observations must have shape (N, OBSERVATION_DIM)")
     if targets.ndim != 1 or len(targets) != len(observations) or len(targets) == 0:
         raise ValueError("Oracle BC targets must be one non-empty action per observation")
 
-    sample_weights = _balanced_teacher_weights(targets)
     obs_t = torch.as_tensor(observations, dtype=torch.float32, device=agent.device)
     target_t = torch.as_tensor(targets, dtype=torch.float32, device=agent.device)
-    weight_t = torch.as_tensor(sample_weights, dtype=torch.float32, device=agent.device)
     optimizer = torch.optim.Adam(agent.net.actor.parameters(), lr=ORACLE_BC_LEARNING_RATE)
     rng = np.random.default_rng(seed)
 
     @torch.inference_mode()
-    def losses() -> tuple[float, float]:
+    def full_mse() -> float:
         prediction = torch.tanh(agent.net.actor(obs_t)).squeeze(-1)
-        squared_error = (prediction - target_t) ** 2
-        plain = torch.mean(squared_error)
-        balanced = torch.mean(weight_t * squared_error)
-        return float(plain.cpu()), float(balanced.cpu())
+        return float(torch.mean((prediction - target_t) ** 2).cpu())
 
-    initial_mse, initial_balanced_mse = losses()
+    initial_mse = full_mse()
     epochs_completed = 0
     for epoch in range(ORACLE_BC_MAX_EPOCHS):
         indexes = rng.permutation(len(observations))
@@ -216,17 +219,15 @@ def _behavior_clone_actor(
                 device=agent.device,
             )
             prediction = torch.tanh(agent.net.actor(obs_t[mb])).squeeze(-1)
-            squared_error = (prediction - target_t[mb]) ** 2
-            loss = torch.mean(weight_t[mb] * squared_error)
+            loss = torch.mean((prediction - target_t[mb]) ** 2)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
         epochs_completed = epoch + 1
-        _plain_mse, balanced_mse = losses()
-        if balanced_mse <= ORACLE_BC_TARGET_MSE:
+        if full_mse() <= ORACLE_BC_TARGET_MSE:
             break
 
-    final_mse, final_balanced_mse = losses()
+    final_mse = full_mse()
     agent._sync_collector()
     return {
         "samples": len(observations),
@@ -236,8 +237,6 @@ def _behavior_clone_actor(
         "epochs_completed": int(epochs_completed),
         "initial_mse": initial_mse,
         "final_mse": final_mse,
-        "initial_balanced_mse": initial_balanced_mse,
-        "final_balanced_mse": final_balanced_mse,
     }
 
 
@@ -311,6 +310,15 @@ def main() -> None:
         raise SystemExit("gamma must be finite and in (0, 1]")
     if not math.isfinite(args.lambda_value) or not 0.0 <= args.lambda_value <= 1.0:
         raise SystemExit("lambda must be finite and in [0, 1]")
+    if not math.isclose(
+        args.control_dt_minutes,
+        PPO_FIT_CONTROL_DT_MINUTES,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        raise SystemExit(
+            "Generic PPO fit mode requires 30-minute control aligned to demand-meter blocks"
+        )
 
     configure_ppo_determinism(args.seed)
 
@@ -399,13 +407,22 @@ def main() -> None:
     buffer = RolloutBuffer(decisions_per_episode, OBSERVATION_DIM)
 
     val_base = score_month(run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
-    oracle_grids = load_cached_training_grids(
-        args.oracle_cache, [day.day_index for day in val_days]
+    val_day_indexes = [day.day_index for day in val_days]
+    train_day_indexes = [day.day_index for day in train_days]
+    oracle_grids = load_cached_training_grids(args.oracle_cache, val_day_indexes)
+    oracle_dispatch = load_cached_training_dispatch(args.oracle_cache, train_day_indexes)
+    val_oracle_dispatch = (
+        oracle_dispatch
+        if train_day_indexes == val_day_indexes
+        else load_cached_training_dispatch(args.oracle_cache, val_day_indexes)
     )
-    oracle_dispatch = load_cached_training_dispatch(
-        args.oracle_cache, [day.day_index for day in train_days]
+    val_oracle_utility = score_month(oracle_grids, cfg, days=val_days)["total_cost_vnd"]
+    val_oracle_wear = _oracle_dispatch_wear_cost_vnd(
+        val_oracle_dispatch,
+        timestep_hours=cfg.dt,
+        wear_vnd_per_kwh=battery_wear_cost,
     )
-    val_oracle = score_month(oracle_grids, cfg, days=val_days)["total_cost_vnd"]
+    val_oracle = val_oracle_utility + val_oracle_wear
     curve_path = RESULTS_DIR / f"training_curve_{tag}.csv"
     report_path = RESULTS_DIR / f"training_report_{tag}.json"
     report = {
@@ -465,7 +482,12 @@ def main() -> None:
         },
         "billing_mode": billing,
         "p_ref_kw": p_ref,
-        "validation": {"no_bess_vnd": val_base, "oracle_vnd": val_oracle},
+        "validation": {
+            "no_bess_vnd": val_base,
+            "oracle_vnd": val_oracle,
+            "oracle_utility_vnd": val_oracle_utility,
+            "oracle_wear_vnd": val_oracle_wear,
+        },
     }
     write_curve(curve_path, [], fields=PPO_CHAMPION_CURVE_FIELDS)
     write_report(report_path, report)

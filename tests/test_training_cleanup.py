@@ -14,6 +14,7 @@ from bess.training.training_common import augment_month, build_training_bess_con
 from bess.training.training_launcher import (
     TrainingLaunchError,
     UnsupportedAlgorithm,
+    _control_dt_minutes,
     build_training_command,
     write_training_config,
 )
@@ -84,6 +85,31 @@ class RemovedAlgorithmTests(unittest.TestCase):
                     Path("unused.json"),
                     Path("unused_oracle.json"),
                 )
+
+
+class GenericPPOLauncherTests(unittest.TestCase):
+    def test_fit_mode_resolves_control_to_30_minute_meter_blocks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            csv_path = Path(directory) / "site.csv"
+            rows = ["date_iso,day_index,step,day_type,P_load_kW,P_pv_kW"]
+            rows.extend(
+                f"2026-01-01,1,{step},working,100,0" for step in range(96)
+            )
+            csv_path.write_text("\n".join(rows), encoding="utf-8")
+            self.assertEqual(
+                _control_dt_minutes(
+                    {"algo": "ppo", "control_dt_minutes": 15},
+                    csv_path,
+                ),
+                30,
+            )
+            self.assertEqual(
+                _control_dt_minutes(
+                    {"algo": "ppo2", "control_dt_minutes": 15},
+                    csv_path,
+                ),
+                15,
+            )
 
 
 class PPO2LauncherTests(unittest.TestCase):
