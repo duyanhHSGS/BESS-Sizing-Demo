@@ -12,8 +12,8 @@ def _checkpoint(algo: str) -> dict:
     reference_env = "ppo2_senior_15m_v1" if algo == "ppo2" else None
     meta = {
         "algo": algo,
-        "obs_dim": 17 if algo == "ppo2" else 8,
-        "obs_variant": "base" if algo == "ppo2" else "brain8",
+        "obs_dim": 17 if algo == "ppo2" else 7,
+        "obs_variant": "base" if algo == "ppo2" else "brain7",
         "native_dt_minutes": 15.0,
         "control_dt_minutes": 15.0,
         "native_steps_per_action": 1,

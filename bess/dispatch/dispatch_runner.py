@@ -181,7 +181,7 @@ def prepare_policy_forecast(
     if meta.get("obs_variant") == "fc":
         raise DispatchRunWarning(
             f"{checkpoint_name}: legacy forecast-eye checkpoints are incompatible "
-            "with the fixed 8-eye BrainEnv; retrain this policy"
+            "with the fixed 7-eye BrainEnv; retrain this policy"
         )
 
 
@@ -190,7 +190,7 @@ def forecast_portability_error(meta: dict) -> str | None:
         return None
     obs_dim = meta.get("obs_dim")
     if meta.get("obs_variant") == "fc":
-        return "Legacy forecast-eye checkpoint is incompatible with the fixed 8-eye BrainEnv; retrain it."
+        return "Legacy forecast-eye checkpoint is incompatible with the fixed 7-eye BrainEnv; retrain it."
     if obs_dim is not None and int(obs_dim) != OBSERVATION_DIM:
         return (
             f"Legacy {int(obs_dim)}-eye checkpoint is incompatible with the fixed "

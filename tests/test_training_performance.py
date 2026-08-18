@@ -78,7 +78,6 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         )
         obs = observation_array(env.reset())
         self.assertEqual(obs.shape, (OBSERVATION_DIM,))
-        self.assertEqual(float(obs[-1]), 0.0)
         recorder = BrainTrajectoryRecorder(month, 0.50)
         rewards = []
         done = False
@@ -90,16 +89,6 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
                 native_steps=1,
                 recorder=recorder,
             )
-            if step == 0:
-                self.assertIsNotNone(transition.next_observation)
-                expected_open_block_kw = (
-                    env.bess_world.meter_state.block_energy_kwh / 0.5 / 1000.0
-                )
-                self.assertAlmostEqual(
-                    float(transition.next_observation[-1]),
-                    expected_open_block_kw,
-                    places=7,
-                )
             rewards.append(transition.reward_vnd)
             done = transition.done
 

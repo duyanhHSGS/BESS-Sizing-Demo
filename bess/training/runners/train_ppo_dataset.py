@@ -46,13 +46,11 @@ VALIDATE_EVERY_UPDATES = 4
 CHALLENGER_RESET_PATIENCE = 3
 CHALLENGER_RESETS_ENABLED = True
 ACTION_MISMATCH_SHAPING_SCALE = 0.1
+PPO_FIT_CONTROL_DT_MINUTES = 30.0
 ORACLE_BC_MAX_EPOCHS = 100
 ORACLE_BC_LEARNING_RATE = 1e-3
 ORACLE_BC_MINIBATCH = 256
 ORACLE_BC_TARGET_MSE = 1e-4
-CRITIC_RUNWAY_ROLLOUTS = 3
-CRITIC_RUNWAY_EPOCHS = 100
-CRITIC_RUNWAY_LEARNING_RATE = 1e-3
 LOG_EVERY_UPDATES = 1
 
 
@@ -151,8 +149,8 @@ def _collect_oracle_teacher_samples(
     power_scale_kw: float,
     battery_wear_cost: float,
     native_steps: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Replay Oracle dispatch and collect Brain8 action lessons."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Replay Oracle dispatch and collect brain7 actions plus real rewards."""
     if len(oracle_dispatch) != len(month.days):
         raise ValueError("Oracle dispatch day count must match the teacher month")
     env = make_brain_env(
@@ -164,6 +162,7 @@ def _collect_oracle_teacher_samples(
     observation = env.reset()
     observations: list[np.ndarray] = []
     targets: list[float] = []
+    rewards: list[float] = []
 
     for day, dispatch in zip(month.days, oracle_dispatch, strict=True):
         native_rows = len(day.load)
@@ -181,12 +180,14 @@ def _collect_oracle_teacher_samples(
                 action,
                 native_steps=stop - start,
             )
+            rewards.append(transition.reward_million_vnd)
             if transition.next_observation is not None:
                 observation = transition.next_observation
 
     return (
         np.asarray(observations, dtype=np.float32),
         np.asarray(targets, dtype=np.float32),
+        np.asarray(rewards, dtype=np.float32),
     )
 
 
@@ -245,59 +246,41 @@ def _behavior_clone_actor(
     }
 
 
-def _discounted_returns(rewards: np.ndarray, gamma: float) -> np.ndarray:
-    """Return one episode's discounted reward-to-go targets."""
-    if rewards.ndim != 1 or len(rewards) == 0:
-        raise ValueError("critic runway rewards must be one non-empty episode")
+def _behavior_clone_critic(
+    agent: PPOAgent,
+    observations: np.ndarray,
+    rewards: np.ndarray,
+    *,
+    gamma: float,
+    seed: int,
+) -> dict[str, float | int]:
+    """Warm-start the existing critic on Oracle-path discounted reward-to-go."""
+    if observations.ndim != 2 or observations.shape[1] != OBSERVATION_DIM:
+        raise ValueError("Oracle critic observations must have shape (N, OBSERVATION_DIM)")
+    if rewards.ndim != 1 or len(rewards) != len(observations) or len(rewards) == 0:
+        raise ValueError("Oracle critic rewards must be one non-empty reward per observation")
     if not 0.0 <= gamma <= 1.0:
-        raise ValueError("critic runway gamma must be in [0, 1]")
+        raise ValueError("Oracle critic gamma must be in [0, 1]")
 
     returns = np.empty_like(rewards, dtype=np.float32)
     running_return = 0.0
     for index in range(len(rewards) - 1, -1, -1):
         running_return = float(rewards[index]) + gamma * running_return
         returns[index] = running_return
-    return returns
-
-
-def _fit_critic_returns(
-    agent: PPOAgent,
-    observations: np.ndarray,
-    returns: np.ndarray,
-    *,
-    seed: int,
-) -> dict[str, float | int]:
-    """Fit only the existing critic; actor and log_std never enter the optimizer."""
-    if observations.ndim != 2 or observations.shape[1] != OBSERVATION_DIM:
-        raise ValueError("critic runway observations must have shape (N, OBSERVATION_DIM)")
-    if returns.ndim != 1 or len(returns) != len(observations) or len(returns) == 0:
-        raise ValueError("critic runway returns must be one target per observation")
 
     obs_t = torch.as_tensor(observations, dtype=torch.float32, device=agent.device)
     return_t = torch.as_tensor(returns, dtype=torch.float32, device=agent.device)
-    optimizer = torch.optim.Adam(
-        agent.net.critic.parameters(),
-        lr=CRITIC_RUNWAY_LEARNING_RATE,
-    )
+    optimizer = torch.optim.Adam(agent.net.critic.parameters(), lr=ORACLE_BC_LEARNING_RATE)
     rng = np.random.default_rng(seed)
 
     @torch.inference_mode()
-    def predictions() -> np.ndarray:
-        return agent.net.value(obs_t).detach().cpu().numpy()
+    def full_mse() -> float:
+        prediction = agent.net.value(obs_t)
+        return float(torch.mean((prediction - return_t) ** 2).cpu())
 
-    def diagnostics(prediction: np.ndarray) -> tuple[float, float]:
-        mse = float(np.mean((prediction - returns) ** 2))
-        target_variance = float(np.var(returns))
-        explained_variance = (
-            1.0 - float(np.var(returns - prediction)) / target_variance
-            if target_variance > 1e-12
-            else 0.0
-        )
-        return mse, explained_variance
-
-    initial_mse, initial_explained_variance = diagnostics(predictions())
+    initial_mse = full_mse()
     epochs_completed = 0
-    for epoch in range(CRITIC_RUNWAY_EPOCHS):
+    for epoch in range(ORACLE_BC_MAX_EPOCHS):
         indexes = rng.permutation(len(observations))
         for start in range(0, len(indexes), ORACLE_BC_MINIBATCH):
             mb = torch.as_tensor(
@@ -311,108 +294,17 @@ def _fit_critic_returns(
             loss.backward()
             optimizer.step()
         epochs_completed = epoch + 1
+        if full_mse() <= ORACLE_BC_TARGET_MSE:
+            break
 
-    final_mse, final_explained_variance = diagnostics(predictions())
     agent._sync_collector()
     return {
         "critic_epochs_completed": int(epochs_completed),
         "critic_initial_mse": initial_mse,
-        "critic_final_mse": final_mse,
-        "critic_initial_explained_variance": initial_explained_variance,
-        "critic_final_explained_variance": final_explained_variance,
+        "critic_final_mse": full_mse(),
         "critic_target_mean": float(np.mean(returns)),
         "critic_target_std": float(np.std(returns)),
     }
-
-
-def _critic_runway(
-    agent: PPOAgent,
-    month: MonthData,
-    cfg,
-    *,
-    power_scale_kw: float,
-    battery_wear_cost: float,
-    native_steps: int,
-    gamma: float,
-    seed: int,
-) -> dict[str, float | int]:
-    """Teach the critic on seeded stochastic rollouts while leaving the actor untouched."""
-    actor_before = {
-        name: parameter.detach().cpu().clone()
-        for name, parameter in agent.net.actor.named_parameters()
-    }
-    log_std_before = agent.net.log_std.detach().cpu().clone()
-    rollout_observations: list[np.ndarray] = []
-    rollout_returns: list[np.ndarray] = []
-    rollout_rewards: list[float] = []
-    projected_actions = 0
-    decisions = 0
-
-    for _ in range(CRITIC_RUNWAY_ROLLOUTS):
-        env = make_brain_env(
-            month,
-            cfg,
-            power_scale_kw=power_scale_kw,
-            battery_wear_vnd_per_kwh=battery_wear_cost,
-        )
-        observation = observation_array(env.reset())
-        episode_observations: list[np.ndarray] = []
-        episode_rewards: list[float] = []
-        done = False
-        while not done:
-            action, _, _, _ = agent.act_with_latent(observation)
-            transition = step_brain_control(
-                env,
-                action,
-                native_steps=native_steps,
-            )
-            mismatch_penalty_vnd = _action_mismatch_penalty_vnd(
-                transition,
-                timestep_hours=cfg.dt,
-                wear_vnd_per_kwh=battery_wear_cost,
-            )
-            reward = (
-                transition.reward_million_vnd
-                - ACTION_MISMATCH_SHAPING_SCALE
-                * mismatch_penalty_vnd
-                / REWARD_SCALE_VND
-            )
-            episode_observations.append(observation.copy())
-            episode_rewards.append(reward)
-            projected_actions += int(transition.adjusted_action)
-            decisions += 1
-            done = transition.done
-            if not done:
-                if transition.next_observation is None:
-                    raise RuntimeError("critic runway transition lost its next observation")
-                observation = observation_array(transition.next_observation)
-
-        rewards = np.asarray(episode_rewards, dtype=np.float32)
-        rollout_observations.append(np.asarray(episode_observations, dtype=np.float32))
-        rollout_returns.append(_discounted_returns(rewards, gamma))
-        rollout_rewards.extend(episode_rewards)
-
-    observations = np.concatenate(rollout_observations, axis=0)
-    returns = np.concatenate(rollout_returns, axis=0)
-    stats = _fit_critic_returns(agent, observations, returns, seed=seed)
-
-    for name, parameter in agent.net.actor.named_parameters():
-        if not torch.equal(parameter.detach().cpu(), actor_before[name]):
-            raise RuntimeError("critic runway changed actor weights")
-    if not torch.equal(agent.net.log_std.detach().cpu(), log_std_before):
-        raise RuntimeError("critic runway changed log_std")
-
-    stats.update(
-        {
-            "rollouts": CRITIC_RUNWAY_ROLLOUTS,
-            "samples": len(observations),
-            "mean_reward": float(np.mean(rollout_rewards)),
-            "projected_action_pct": (
-                100.0 * projected_actions / decisions if decisions else 0.0
-            ),
-        }
-    )
-    return stats
 
 
 def _initialize_champion(agent: PPOAgent, validate_cost, checkpoint_path: Path) -> float:
@@ -478,13 +370,23 @@ def main() -> None:
     parser.add_argument("--oracle-cache", required=True)
     parser.add_argument("--val-days", type=int, default=30)
     parser.add_argument("--test-days", type=int, default=30)
-    parser.add_argument("--obs-variant", choices=("brain8",), default="brain8")
+    parser.add_argument("--obs-variant", choices=("brain7",), default="brain7")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     args = parser.parse_args()
     if not math.isfinite(args.gamma) or not 0.0 < args.gamma <= 1.0:
         raise SystemExit("gamma must be finite and in (0, 1]")
     if not math.isfinite(args.lambda_value) or not 0.0 <= args.lambda_value <= 1.0:
         raise SystemExit("lambda must be finite and in [0, 1]")
+    if not math.isclose(
+        args.control_dt_minutes,
+        PPO_FIT_CONTROL_DT_MINUTES,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        raise SystemExit(
+            "Generic PPO fit mode requires 30-minute control aligned to demand-meter blocks"
+        )
+
     configure_ppo_determinism(args.seed)
 
     days = load_training_days(args.csv, weather="csv")
@@ -535,7 +437,7 @@ def main() -> None:
         "p_ref_kw": p_ref,
         "e_cap_kwh": args.e_cap,
         "p_rated_kw": args.p_rated,
-        "obs_variant": "brain8",
+        "obs_variant": "brain7",
         "obs_dim": OBSERVATION_DIM,
         "battery_wear_cost": battery_wear_cost,
         "reward_mode": "brain_savings_vnd_v1",
@@ -568,10 +470,6 @@ def main() -> None:
         "oracle_behavior_cloning_enabled": True,
         "oracle_behavior_cloning_max_epochs": ORACLE_BC_MAX_EPOCHS,
         "oracle_behavior_cloning_learning_rate": ORACLE_BC_LEARNING_RATE,
-        "critic_runway_enabled": True,
-        "critic_runway_rollouts": CRITIC_RUNWAY_ROLLOUTS,
-        "critic_runway_epochs": CRITIC_RUNWAY_EPOCHS,
-        "critic_runway_learning_rate": CRITIC_RUNWAY_LEARNING_RATE,
     }
     buffer = RolloutBuffer(decisions_per_episode, OBSERVATION_DIM)
 
@@ -736,7 +634,7 @@ def main() -> None:
 
     raw_initial_cost = validate_policy_cost()
     raw_initial_state = agent.snapshot_training_state()
-    teacher_observations, teacher_targets = _collect_oracle_teacher_samples(
+    teacher_observations, teacher_targets, teacher_rewards = _collect_oracle_teacher_samples(
         train_months[0],
         oracle_dispatch,
         cfg,
@@ -751,6 +649,15 @@ def main() -> None:
         teacher_targets,
         seed=args.seed,
     )
+    bc_stats.update(
+        _behavior_clone_critic(
+            agent,
+            teacher_observations,
+            teacher_rewards,
+            gamma=args.gamma,
+            seed=args.seed,
+        )
+    )
     bc_stats["seconds"] = time.perf_counter() - bc_started
     bc_stats["teacher_mean_abs_action"] = float(np.mean(np.abs(teacher_targets)))
     bc_stats["teacher_nonzero_action_pct"] = float(
@@ -761,46 +668,22 @@ def main() -> None:
     if not use_bc:
         agent.restore_training_state(raw_initial_state)
 
-    runway_started = time.perf_counter()
-    critic_runway_stats = _critic_runway(
-        agent,
-        train_months[0],
-        cfg,
-        power_scale_kw=p_ref,
-        battery_wear_cost=battery_wear_cost,
-        native_steps=native_steps,
-        gamma=args.gamma,
-        seed=args.seed,
-    )
-    critic_runway_stats["seconds"] = time.perf_counter() - runway_started
-
     agent.meta["oracle_behavior_cloning"] = {
         **bc_stats,
         "raw_initial_validation_cost_vnd": raw_initial_cost,
         "post_bc_validation_cost_vnd": post_bc_cost,
         "selected_for_ppo": use_bc,
     }
-    agent.meta["critic_runway"] = critic_runway_stats
     report["training"]["oracle_behavior_cloning"] = dict(
         agent.meta["oracle_behavior_cloning"]
     )
-    report["training"]["critic_runway"] = dict(critic_runway_stats)
     write_report(report_path, report)
     print(
         f"[train-ds] ORACLE TEACHER | {bc_stats['samples']} lessons | "
         f"actor MSE {bc_stats['initial_mse']:.5f}->{bc_stats['final_mse']:.5f} | "
+        f"critic MSE {bc_stats['critic_initial_mse']:.3f}->{bc_stats['critic_final_mse']:.3f} | "
         f"raw {raw_initial_cost/1e6:.1f}M -> BC {post_bc_cost/1e6:.1f}M | "
         f"{'USE BC' if use_bc else 'KEEP RAW'}",
-        flush=True,
-    )
-    print(
-        f"[train-ds] CRITIC RUNWAY | {critic_runway_stats['rollouts']} rollouts | "
-        f"{critic_runway_stats['samples']} samples | "
-        f"MSE {critic_runway_stats['critic_initial_mse']:.3f}"
-        f"->{critic_runway_stats['critic_final_mse']:.3f} | "
-        f"EV {critic_runway_stats['critic_initial_explained_variance']:.3f}"
-        f"->{critic_runway_stats['critic_final_explained_variance']:.3f} | "
-        f"projected {critic_runway_stats['projected_action_pct']:.1f}%",
         flush=True,
     )
 

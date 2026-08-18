@@ -1430,7 +1430,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           </label>
           <label>Brain contract
             <select id="train-observation" disabled>
-              <option value="brain8">BrainEnv — 8 eyes</option>
+              <option value="brain7">BrainEnv — 7 eyes</option>
               <option value="base">PPO2 senior reference — 17 inputs</option>
             </select>
           </label>
@@ -4595,8 +4595,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         : `gamma ${training.gamma ?? meta.gamma ?? "?"}, lambda ${training.lambda ?? meta.lambda ?? "?"}`;
       const details = [
         ["Algorithm", checkpoint.algo || saved.algorithm],
-        ["Brain contract", meta.obs_variant === "brain8"
-          ? `BrainEnv — ${meta.obs_dim || 8} eyes`
+        ["Brain contract", meta.obs_variant === "brain7"
+          ? `BrainEnv — ${meta.obs_dim || 7} eyes`
           : checkpoint.algo === "ppo2"
             ? `PPO2 senior reference — ${meta.obs_dim || 17} inputs`
             : `Legacy/incompatible — ${meta.obs_dim || "?"} inputs`],
@@ -4671,23 +4671,18 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       });
       const ppo2Mode = algo === "ppo2";
       trainObservation.disabled = true;
-      trainObservation.value = ppo2Mode ? "base" : "brain8";
+      trainObservation.value = ppo2Mode ? "base" : "brain7";
       trainDevice.disabled = ppo2Mode;
-      trainControlDt.disabled = true;
-      trainControlDtCustom.disabled = true;
+      trainControlDt.disabled = ppo2Mode;
+      trainControlDtCustom.disabled = ppo2Mode;
       if (ppo2Mode) {
         trainDevice.value = "cpu";
         if (Array.from(trainControlDt.options).some((option) => option.value === "15")) {
           trainControlDt.value = "15";
         }
         trainControlDtCustomWrap.style.display = "none";
-      } else {
-        const nativeDt = selectedNativeDt();
-        if (Array.from(trainControlDt.options).some((option) => Number(option.value) === nativeDt)) {
-          trainControlDt.value = String(nativeDt);
-        }
       }
-      trainControlDtCustomWrap.style.display = "none";
+      trainControlDtCustomWrap.style.display = (!ppo2Mode && trainControlDt.value === "custom") ? "inline-flex" : "none";
       updateTrainPlan();
     }
 

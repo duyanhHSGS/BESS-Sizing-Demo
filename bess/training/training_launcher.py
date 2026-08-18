@@ -38,6 +38,9 @@ TRAINING_MODULES = {
     "ppo2": "bess.training.runners.train_ppo2_dataset",
 }
 ALGORITHMS = SUPPORTED_POLICY_ALGORITHMS
+PPO_FIT_CONTROL_DT_MINUTES = 30.0
+
+
 class TrainingLaunchError(ValueError):
     pass
 
@@ -166,7 +169,7 @@ def _control_dt_minutes(payload: dict, csv_path: Path) -> int:
     native_minutes = float(detect_resolution_minutes(csv_path))
     algo = str(payload.get("algo", "ppo")).strip().lower()
     requested = (
-        native_minutes
+        PPO_FIT_CONTROL_DT_MINUTES
         if algo == "ppo"
         else _float(payload, "control_dt_minutes", native_minutes)
     )
@@ -187,7 +190,7 @@ def _training_tag(
     p_rated: float,
     algo: str,
     control_dt_minutes: int,
-    obs_variant: str = "brain8",
+    obs_variant: str = "brain7",
 ) -> str:
     explicit = sanitize_tag(payload.get("tag", ""))
     if explicit:
@@ -273,17 +276,17 @@ def build_training_command(
         # entire exported dataset for train/validation/test.
         val_days, test_days = 0, 0
     dataset_id = str(payload.get("dataset_id", "dataset"))
-    default_obs_variant = "base" if algo == "ppo2" else "brain8"
+    default_obs_variant = "base" if algo == "ppo2" else "brain7"
     obs_variant = str(payload.get("obs_variant", default_obs_variant)).strip().lower()
     if algo == "ppo2":
         if obs_variant != "base":
             raise TrainingLaunchError(
                 "PPO2 senior-reference mode requires obs_variant=base"
             )
-    elif obs_variant != "brain8":
+    elif obs_variant != "brain7":
         raise TrainingLaunchError(
-            "The canonical BrainEnv has exactly eight eyes; use obs_variant=brain8. "
-            "Legacy observation contracts must be retrained."
+            "The canonical BrainEnv has exactly seven eyes; use obs_variant=brain7. "
+            "Legacy base/fc observation contracts were removed."
         )
     device = str(payload.get("device", "auto")).strip().lower()
     if device not in {"auto", "cpu", "cuda"}:

@@ -231,7 +231,7 @@ def step_brain_control(
 
 
 def observation_array(observation: BrainObservation) -> np.ndarray:
-    """Convert the env's immutable eight-eye tuple to agent-friendly float32."""
+    """Convert the env's immutable seven-eye tuple to agent-friendly float32."""
     array = np.asarray(observation, dtype=np.float32)
     if array.shape != (OBSERVATION_DIM,):
         raise RuntimeError(f"BrainEnv returned unexpected observation shape {array.shape}")
