@@ -40,6 +40,7 @@ from bess.training.training_reports import (
 
 VALIDATE_EVERY_UPDATES = 4
 CHALLENGER_RESET_PATIENCE = 3
+CHALLENGER_RESETS_ENABLED = False
 LOG_EVERY_UPDATES = 1
 
 
@@ -237,6 +238,7 @@ def main() -> None:
         "rollout_decisions": decisions_per_episode,
         "validation_every_updates": VALIDATE_EVERY_UPDATES,
         "challenger_reset_patience": CHALLENGER_RESET_PATIENCE,
+        "challenger_resets_enabled": CHALLENGER_RESETS_ENABLED,
     }
     buffer = RolloutBuffer(decisions_per_episode, OBSERVATION_DIM)
 
@@ -284,6 +286,7 @@ def main() -> None:
             "augmentation_enabled": False,
             "validation_every_updates": VALIDATE_EVERY_UPDATES,
             "challenger_reset_patience": CHALLENGER_RESET_PATIENCE,
+            "challenger_resets_enabled": CHALLENGER_RESETS_ENABLED,
             "native_dt_minutes": csv_dt * 60.0,
             "control_dt_minutes": args.control_dt_minutes,
             "native_steps_per_action": native_steps,
@@ -435,7 +438,11 @@ def main() -> None:
         else:
             report["training"]["rejected_updates"] += 1
             consecutive_rejections += 1
-            if allow_reset and consecutive_rejections >= CHALLENGER_RESET_PATIENCE:
+            if (
+                CHALLENGER_RESETS_ENABLED
+                and allow_reset
+                and consecutive_rejections >= CHALLENGER_RESET_PATIENCE
+            ):
                 agent.restore_training_state(champion_state)
                 report["training"]["learner_resets"] += 1
                 consecutive_rejections = 0
