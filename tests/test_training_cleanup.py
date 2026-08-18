@@ -53,7 +53,6 @@ class SharedTrainingHelpersTests(unittest.TestCase):
             "discharge_efficiency": 0.95,
             "minimum_soc": 0.10,
             "maximum_soc": 0.90,
-            "required_final_soc": 0.50,
         }
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "training_config.json"

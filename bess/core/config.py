@@ -18,7 +18,6 @@ def _system_default_config() -> dict:
         "soc_min": battery["soc_min"],
         "soc_max": battery["soc_max"],
         "soc_safety_buffer": battery["soc_safety_buffer"],
-        "soc_eod": battery["soc_eod"],
         "soc_min_emergency": battery["soc_min_emergency"],
         "dt_hours": float(time_config["dt_hours"]),
         "price_peak": tariff["price_peak_VND_per_kWh"],
@@ -43,8 +42,6 @@ def _resolve_config(config: dict | None = None) -> dict:
     resolved = dict(DEFAULT_CONFIG)
     if config:
         resolved.update(config)
-    if resolved.get("soc_eod") is None:
-        resolved["soc_eod"] = resolved["soc_min"] + resolved["soc_safety_buffer"]
     return resolved
 
 
@@ -62,7 +59,6 @@ class BESSConfig:
         self.SOC_max = float(cfg["soc_max"])
         self.SOC_chg = self.SOC_max
         self.SOC_safety = float(cfg["soc_safety_buffer"])
-        self.SOC_eod = float(cfg["soc_eod"])
         self.SOC_min_emergency = float(cfg["soc_min_emergency"])
         self.SOC_SAFETY_BUFFER = self.SOC_safety
         self.peak_windows = str(cfg.get("peak_windows", ""))

@@ -5,11 +5,11 @@ from unittest.mock import patch
 
 import numpy as np
 
-from bess.evaluation.baselines import run_drl_policy, validate_dispatch_sampling
 from bess.core.common import load_system_config, make_bess_config
-from bess.dispatch.dispatch_runner import DispatchRunWarning, run_policy_dispatch
 from bess.core.scenario_gen import DayData, MonthData
 from bess.core.settings import DEFAULT_PARAMETERS
+from bess.dispatch.dispatch_runner import DispatchRunWarning, run_policy_dispatch
+from bess.evaluation.baselines import run_drl_policy, validate_dispatch_sampling
 
 
 class CountingPolicy:
@@ -58,7 +58,7 @@ class CrossResolutionDispatchTests(unittest.TestCase):
     def test_legacy_policy_uses_96_decisions_and_1440_native_updates(self):
         policy = CountingPolicy()
         cfg = dense_config()
-        initial_soc = cfg.SOC_eod
+        initial_soc = cfg.SOC_min
 
         result = run_drl_policy(dense_month(), cfg, policy, p_ref_kw=1500.0)
 
@@ -66,7 +66,9 @@ class CrossResolutionDispatchTests(unittest.TestCase):
         self.assertEqual(len(result["p_grid_days"][0]), 1440)
         self.assertEqual(len(result["p_bess_days"][0]), 1440)
         self.assertEqual(len(result["soc_days"][0]), 1441)
-        expected_soc = initial_soc + 500.0 * cfg.eta_ch * (15.0 / 60.0) / cfg.E_cap
+        # BrainEnv action power is battery-side power, so SOC integrates it
+        # directly; charge efficiency only affects the outside/grid power.
+        expected_soc = initial_soc + 500.0 * (15.0 / 60.0) / cfg.E_cap
         self.assertAlmostEqual(result["soc_days"][0][15], expected_soc, places=12)
         np.testing.assert_allclose(result["p_bess_days"][0][:15], -500.0)
 
@@ -126,13 +128,12 @@ class CrossResolutionDispatchTests(unittest.TestCase):
         with patch(
             "bess.dispatch.dispatch_runner.load_policy",
             return_value=(policy, "ppo", policy.meta),
-        ):
-            with self.assertRaisesRegex(DispatchRunWarning, "not an exact multiple"):
-                run_policy_dispatch(
-                    "policy_old_deprecated.pt",
-                    parameters,
-                    month=dense_month(),
-                )
+        ), self.assertRaisesRegex(DispatchRunWarning, "not an exact multiple"):
+            run_policy_dispatch(
+                "policy_old_deprecated.pt",
+                parameters,
+                month=dense_month(),
+            )
 
 
 if __name__ == "__main__":

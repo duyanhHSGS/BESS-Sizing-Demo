@@ -212,7 +212,6 @@ def write_training_config(parameters: dict, output_dir: Path = USER_DATA_DIR) ->
         "discharge_efficiency": float(parameters.get("discharge_efficiency", 0.95)),
         "minimum_soc": float(parameters.get("minimum_soc", 0.10)),
         "maximum_soc": float(parameters.get("maximum_soc", 0.90)),
-        "required_final_soc": float(parameters.get("required_final_soc", 0.50)),
         "battery_wear_cost": float(parameters.get("battery_wear_cost", 0.0)),
     }
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")

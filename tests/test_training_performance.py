@@ -18,12 +18,13 @@ from bess.core.brain_runtime import (
 )
 from bess.core.common import load_system_config, make_bess_config
 from bess.core.scenario_gen import DayData, MonthData
+from bess.evaluation.baselines import run_drl_policy
 from bess.evaluation.benchmark import _rolling_30_minute_average
 
 
 def _reference_fixed_30_minute_meter(values, dt):
     values = np.asarray(values, dtype=np.float64)
-    samples_per_block = int(round(0.5 / dt))
+    samples_per_block = round(0.5 / dt)
     if len(values) % samples_per_block:
         raise ValueError("Grid day must contain complete 30-minute meter intervals")
     block_averages = values.reshape(-1, samples_per_block).mean(axis=1)
@@ -104,6 +105,44 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
             float(fixed_block_averages.max()),
             places=9,
         )
+
+    def test_policy_rollout_starts_at_soc_min_without_terminal_soc_target(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 500.0, base.P_target_user)
+        cfg.dt = 0.25
+        steps = 96
+        day = DayData(
+            load=np.full(steps, 700.0, dtype=np.float64),
+            pv=np.zeros(steps, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=0,
+            date_iso="2026-01-01",
+        )
+        month = MonthData(days=[day], source="soc-min-start-test")
+
+        class AlwaysChargeAgent:
+            def __init__(self):
+                self.meta = {
+                    "obs_dim": OBSERVATION_DIM,
+                    "control_dt_minutes": 15.0,
+                    "battery_wear_cost": 0.0,
+                }
+
+            @staticmethod
+            def predict_action(_observation):
+                return -1.0
+
+        result = run_drl_policy(
+            month,
+            cfg,
+            AlwaysChargeAgent(),
+            p_ref_kw=1000.0,
+        )
+
+        self.assertAlmostEqual(float(result["soc_days"][0][0]), cfg.SOC_min)
+        self.assertAlmostEqual(float(result["soc_days"][-1][-1]), cfg.SOC_max)
+        self.assertGreater(result["blocked_action_pct"], 0.0)
 
     def test_seeded_update_stays_finite_and_checkpoint_is_compatible(self):
         agent = PPOAgent(obs_dim=OBSERVATION_DIM, seed=11, epochs=1, minibatch=8)

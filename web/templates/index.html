@@ -933,10 +933,6 @@
                 data-tip="MaximumSOC: the highest allowed battery fill level. 0.90 means stop charging around 90% full.">?</span></span><input
               type="number" id="tf-maxsoc" name="maximum_soc" step="any"
               value="{{ maximum_soc }}"></label>
-          <label><span class="field-name">Required final SOC<span class="hint" tabindex="0"
-                data-tip="RequiredFinalSOC: the minimum battery fill level wanted at the end of the simulated day or horizon.">?</span></span><input
-              type="number" id="tf-finalsoc" name="required_final_soc" step="any"
-              value="{{ required_final_soc }}"></label>
         </div>
         <div class="info">Load(t) and PV(t) come from the selected CSV columns P_load_kW and P_pv_kW. The detected dt
           converts power snapshots into energy.</div>

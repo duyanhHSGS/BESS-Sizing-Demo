@@ -3,18 +3,17 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
-
-from bess.paths import PROJECT_ROOT
-from typing import Any, Callable
+from typing import Any
 
 from bess.evaluation.benchmark import selected_data_path
-
+from bess.paths import PROJECT_ROOT
 
 BASE_DIR = PROJECT_ROOT
 CACHE_DIR = BASE_DIR / "user_data" / "oracle_lp_cache"
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 
 ORACLE_PARAMETER_KEYS = (
     "selected_data_csv",
@@ -26,7 +25,6 @@ ORACLE_PARAMETER_KEYS = (
     "battery_wear_cost",
     "minimum_soc",
     "maximum_soc",
-    "required_final_soc",
     "billing_mode",
     "billing_sunday",
     "billing_expensive",
@@ -46,7 +44,6 @@ NUMERIC_PARAMETER_KEYS = frozenset(
         "battery_wear_cost",
         "minimum_soc",
         "maximum_soc",
-        "required_final_soc",
         "billing_expensive",
         "billing_normal",
         "billing_cheap",

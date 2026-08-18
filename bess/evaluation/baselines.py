@@ -36,7 +36,7 @@ def run_no_bess(month: MonthData, cfg) -> dict:
         grid = np.maximum(0.0, day.load - day.pv)
         n_steps = len(grid)
         grids.append(grid)
-        socs.append(np.full(n_steps + 1, cfg.SOC_eod))
+        socs.append(np.full(n_steps + 1, cfg.SOC_min))
         pbs.append(np.zeros(n_steps))
     return _result(grids, socs, pbs)
 

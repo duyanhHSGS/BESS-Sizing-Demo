@@ -14,7 +14,6 @@ DEFAULT_PARAMETERS = {
     "battery_wear_cost": "500",
     "minimum_soc": "0.20",
     "maximum_soc": "0.90",
-    "required_final_soc": "0.50",
     "billing_mode": "2tc",
     "billing_sunday": True,
     "billing_expensive": "2251",
@@ -45,7 +44,6 @@ SYSTEM_CONFIG = {
         "soc_min": float(DEFAULT_PARAMETERS["minimum_soc"]),
         "soc_max": float(DEFAULT_PARAMETERS["maximum_soc"]),
         "soc_safety_buffer": 0.05,
-        "soc_eod": float(DEFAULT_PARAMETERS["required_final_soc"]),
         "soc_min_emergency": 0.05,
     },
     "Tariff": {

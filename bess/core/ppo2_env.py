@@ -9,7 +9,7 @@ DayData/MonthData types. The reference contract is intentionally 15-minute-only:
 from __future__ import annotations
 
 import calendar
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date as date_cls
 
 import numpy as np
@@ -40,7 +40,7 @@ class PPO2NetLoadHistory:
             return 0.0
         return self.window[-1] - self.window[-PPO2_HISTORY_WINDOW_SLOTS]
 
-    def update(self, effective_load_kw: float) -> "PPO2NetLoadHistory":
+    def update(self, effective_load_kw: float) -> PPO2NetLoadHistory:
         value = float(effective_load_kw)
         ewma = (
             value
@@ -166,11 +166,6 @@ class PPO2Env:
         self.log_pbess: list[np.ndarray] = []
 
     @property
-    def soc_eod(self) -> float:
-        """Senior config derives start SOC from soc_min + safety buffer."""
-        return min(self.cfg.SOC_max, self.cfg.SOC_min + self.cfg.SOC_safety)
-
-    @property
     def history_ready(self) -> bool:
         return self.net_load.is_ready
 
@@ -193,7 +188,7 @@ class PPO2Env:
         self.month = month
         self.day = 0
         self.t = 0
-        self.soc = float(soc_init if soc_init is not None else self.soc_eod)
+        self.soc = float(soc_init if soc_init is not None else self.cfg.SOC_min)
         self.soc_start = self.soc
         self.d_run = 0.0
         self.d_run_nb = 0.0

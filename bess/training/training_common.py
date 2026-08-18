@@ -6,8 +6,8 @@ from pathlib import Path
 
 import numpy as np
 
-from bess.core.config import BESSConfig
 from bess.core.common import TOU_RULES, load_system_config
+from bess.core.config import BESSConfig
 from bess.core.scenario_gen import DayData, MonthData
 
 
@@ -132,7 +132,6 @@ def build_training_bess_config(
         "soc_min": float(tariff.get("minimum_soc", base.SOC_min)),
         "soc_max": float(tariff.get("maximum_soc", base.SOC_max)),
         "soc_safety_buffer": base.SOC_safety,
-        "soc_eod": float(tariff.get("required_final_soc", base.SOC_eod)),
         "soc_min_emergency": base.SOC_min_emergency,
         "dt_hours": float(dt_hours),
         "price_peak": float(tariff.get("price_peak", base.price_peak)),

@@ -4,19 +4,20 @@ from pathlib import Path
 from bess.evaluation.benchmark import (
     _annotate_day_billing,
     _day_energy_cost,
+    _demand_charge,
     _demand_windows,
     _detect_dt_from_rows,
-    _demand_charge,
     _group_days,
     _load_rows,
     _month_peaks,
     _month_start_day,
     _prices_for_day,
-    _rounded_series,
     _rolling_30_minute_average,
+    _rounded_series,
     _to_float,
     selected_data_path,
 )
+
 
 def build_oracle_lp(parameters):
     try:
@@ -43,7 +44,6 @@ def build_oracle_lp(parameters):
     discharge_efficiency = _clamp(_to_float(parameters.get("discharge_efficiency"), 1.0), 0.001, 1.0)
     minimum_soc = _clamp(_to_float(parameters.get("minimum_soc"), 0.0), 0.0, 1.0)
     maximum_soc = _clamp(_to_float(parameters.get("maximum_soc"), 1.0), minimum_soc, 1.0)
-    required_final_soc = _clamp(_to_float(parameters.get("required_final_soc"), minimum_soc), minimum_soc, maximum_soc)
 
     if not base_days:
         return {"available": True, "status": "No CSV rows found.", "days": [], "summary": _empty_summary()}
@@ -68,7 +68,6 @@ def build_oracle_lp(parameters):
                 discharge_efficiency,
                 minimum_soc,
                 maximum_soc,
-                required_final_soc,
             )
         )
 
@@ -105,7 +104,6 @@ def _solve_month(
     discharge_efficiency,
     minimum_soc,
     maximum_soc,
-    required_final_soc,
 ):
     load = _flatten(days, "load")
     pv = _flatten(days, "pv")
@@ -139,7 +137,7 @@ def _solve_month(
         capacity,
         charge_efficiency,
         discharge_efficiency,
-        required_final_soc,
+        minimum_soc,
     )
     a_ub, b_ub = _build_inequalities(
         lil_matrix,
@@ -148,7 +146,6 @@ def _solve_month(
         idx,
         power_limit,
         dt,
-        required_final_soc,
     )
 
     result = linprog(
@@ -192,14 +189,14 @@ def _build_equalities(
     capacity,
     charge_efficiency,
     discharge_efficiency,
-    required_final_soc,
+    initial_soc,
 ):
     a_eq = lil_matrix((1 + steps * 2, variable_count))
     b_eq = [0.0] * (1 + steps * 2)
 
     row = 0
     a_eq[row, idx.soc(0)] = 1.0
-    b_eq[row] = required_final_soc
+    b_eq[row] = initial_soc
     row += 1
 
     charge_soc_gain = charge_efficiency * dt / capacity
@@ -228,11 +225,10 @@ def _build_inequalities(
     idx,
     power_limit,
     dt,
-    required_final_soc,
 ):
     demand_windows = _demand_windows(steps, dt)
-    a_ub = lil_matrix((steps + len(demand_windows) + 1, variable_count))
-    b_ub = [0.0] * (steps + len(demand_windows) + 1)
+    a_ub = lil_matrix((steps + len(demand_windows), variable_count))
+    b_ub = [0.0] * (steps + len(demand_windows))
 
     row = 0
     for step in range(steps):
@@ -247,8 +243,6 @@ def _build_inequalities(
         a_ub[row, idx.peak] = -1.0
         row += 1
 
-    a_ub[row, idx.soc(steps)] = -1.0
-    b_ub[row] = -required_final_soc
     return a_ub, b_ub
 
 
@@ -298,7 +292,6 @@ def _slice_days(days, solution, idx, parameters, dt):
 
 def _build_summary(base_days, oracle_days, parameters, dt):
     solved_days = [day for day in oracle_days if day.get("solved")]
-    day_count = len(base_days)
     before_energy = sum(_day_energy_cost(day, parameters, dt) for day in base_days)
     after_energy = sum(day.get("energy_cost_vnd", 0.0) for day in solved_days)
     wear_cost = sum(day.get("wear_cost_vnd", 0.0) for day in solved_days)

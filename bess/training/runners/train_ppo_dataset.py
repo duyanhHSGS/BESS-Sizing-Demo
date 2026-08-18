@@ -215,6 +215,7 @@ def main() -> None:
         "battery_wear_cost": battery_wear_cost,
         "reward_mode": "brain_savings_vnd_v1",
         "training_reward_shaping": "infeasible_request_phantom_wear_v1",
+        "initial_soc": float(cfg.SOC_min),
         "gamma": gamma,
         "lambda": args.lambda_value,
         "learning_rate": float(agent.opt.param_groups[0]["lr"]),
@@ -277,6 +278,7 @@ def main() -> None:
             "learning_rate": float(agent.opt.param_groups[0]["lr"]),
             "ppo_epochs": agent.epochs,
             "target_kl": agent.target_kl,
+            "initial_soc": float(cfg.SOC_min),
             "rollout_days": len(train_days),
             "rollout_decisions": decisions_per_episode,
             "augmentation_enabled": False,
@@ -606,6 +608,8 @@ def main() -> None:
         "saving_pct": test_saving,
         "wear_cost_vnd": test_operating["wear_cost_vnd"],
         "throughput_kwh": test_operating["throughput_kwh"],
+        "initial_soc": float(cfg.SOC_min),
+        "final_soc": float(result["soc_days"][-1][-1]),
     }
     write_report(report_path, report)
     print(

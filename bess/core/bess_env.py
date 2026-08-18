@@ -88,7 +88,6 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-
 OBSERVATION_DIM = 7
 ACTION_DIM = 1
 ACTION_MIN = -1.0
@@ -1181,7 +1180,6 @@ class BrainEnv:
         demand_charge_vnd_per_kw: float,
         battery_wear_vnd_per_kwh: float,
         episode: BrainEpisode | None = None,
-        required_final_soc: float | None = None,
     ) -> None:
         self.bess_world = BessWorld(
             state_of_charge=initial_state_of_charge,
@@ -1203,55 +1201,6 @@ class BrainEnv:
             raise TypeError("episode must be a BrainEpisode or None")
         self.episode = episode
         self._initial_state_of_charge = float(initial_state_of_charge)
-        self.required_final_soc = None if required_final_soc is None else float(required_final_soc)
-        if self.required_final_soc is not None and not (
-            minimum_state_of_charge <= self.required_final_soc <= maximum_state_of_charge
-        ):
-            raise ValueError("required_final_soc must be inside the configured SOC limits")
-        self._future_charge_soc: tuple[float, ...] = ()
-        self._future_discharge_soc: tuple[float, ...] = ()
-        if episode is not None and self.required_final_soc is not None:
-            charge_per_step = battery_power_kw * timestep_hours / battery_capacity_kwh
-            discharge = [
-                min(battery_power_kw, max(0.0, step.net_load_kw) / discharge_efficiency)
-                * timestep_hours
-                / battery_capacity_kwh
-                for step in episode.timesteps
-            ]
-            count = len(episode.timesteps)
-            charge_suffix = [0.0] * (count + 1)
-            discharge_suffix = [0.0] * (count + 1)
-            for index in range(count - 1, -1, -1):
-                charge_suffix[index] = charge_suffix[index + 1] + charge_per_step
-                discharge_suffix[index] = discharge_suffix[index + 1] + discharge[index]
-            self._future_charge_soc = tuple(charge_suffix)
-            self._future_discharge_soc = tuple(discharge_suffix)
-            if self._initial_state_of_charge < self.required_final_soc - charge_suffix[0] - 1e-12:
-                raise ValueError("episode cannot charge enough to reach required_final_soc")
-            if self._initial_state_of_charge > self.required_final_soc + discharge_suffix[0] + 1e-12:
-                raise ValueError("episode load cannot absorb enough discharge to reach required_final_soc")
-
-    def _project_action_for_horizon(self, action: float, timestep_index: int) -> float:
-        """O(1) projection that keeps exact terminal SOC physically reachable."""
-        if self.episode is None or self.required_final_soc is None:
-            return action
-        next_index = timestep_index + 1
-        minimum_next_soc = max(
-            self.bess_world.minimum_state_of_charge,
-            self.required_final_soc - self._future_charge_soc[next_index],
-        )
-        maximum_next_soc = min(
-            self.bess_world.maximum_state_of_charge,
-            self.required_final_soc + self._future_discharge_soc[next_index],
-        )
-        current_soc = self.bess_world.state_of_charge
-        capacity = self.bess_world.battery_capacity_kwh
-        dt = self.bess_world.timestep_hours
-        minimum_power = (current_soc - maximum_next_soc) * capacity / dt
-        maximum_power = (current_soc - minimum_next_soc) * capacity / dt
-        requested_power = action * self.bess_world.battery_power_kw
-        projected_power = min(max(requested_power, minimum_power), maximum_power)
-        return min(1.0, max(-1.0, projected_power / self.bess_world.battery_power_kw))
 
     @property
     def electricity_energy_savings_vnd(self) -> float:
@@ -1419,7 +1368,7 @@ class BrainEnv:
                 raise ValueError("tariff_vnd_per_kwh must not be negative")
 
         requested_action = action_value
-        projected_action = self._project_action_for_horizon(action_value, timestep_index)
+        projected_action = action_value
 
         # The public step wrapper snapshots both universes before either mutates.
         bess_result = self.bess_world.step(
@@ -1504,13 +1453,6 @@ class BrainEnv:
 
         assert self.episode is not None
         done = self.bess_world.timestep_index >= len(self.episode.timesteps)
-        if done and self.required_final_soc is not None and not math.isclose(
-            self.bess_world.state_of_charge,
-            self.required_final_soc,
-            rel_tol=0.0,
-            abs_tol=1e-9,
-        ):
-            raise RuntimeError("BrainEnv episode ended without the required final SOC")
         next_observation = None if done else self.current_observation()
 
         return BrainEnvironmentStepResult(

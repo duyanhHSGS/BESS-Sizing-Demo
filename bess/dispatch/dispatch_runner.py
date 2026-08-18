@@ -109,7 +109,6 @@ def build_dispatch_config(parameters: dict[str, Any], e_cap_kwh: float, p_rated_
             "soc_min": _to_float(parameters.get("minimum_soc"), base.SOC_min),
             "soc_max": _to_float(parameters.get("maximum_soc"), base.SOC_max),
             "soc_safety_buffer": base.SOC_safety,
-            "soc_eod": _to_float(parameters.get("required_final_soc"), base.SOC_eod),
             "soc_min_emergency": base.SOC_min_emergency,
             "dt_hours": dt_hours,
             "price_peak": _to_float(parameters.get("billing_expensive"), base.price_peak),

@@ -62,7 +62,7 @@ def test_ppo2_observation_is_senior_style_17d() -> None:
     assert obs[0] == pytest.approx(0.0)
     assert obs[1] == pytest.approx(1.0)
     assert obs[7] == pytest.approx(env.cfg.price_off / env.cfg.price_peak)
-    assert obs[6] == pytest.approx(env.cfg.SOC_min + env.cfg.SOC_safety)
+    assert obs[6] == pytest.approx(env.cfg.SOC_min)
     assert env.n_steps == 96
     assert env.block_slots == 2
 
@@ -233,7 +233,7 @@ def test_shared_rollout_uses_ppo2_reference_environment_from_meta() -> None:
     }
     result = run_drl_policy(_month(load_kw=100.0), cfg, agent, p_ref_kw=500.0)
     assert result["decision_count"] == 96
-    assert result["soc_days"][0][0] == pytest.approx(cfg.SOC_min + cfg.SOC_safety)
+    assert result["soc_days"][0][0] == pytest.approx(cfg.SOC_min)
 
 
 def test_adv_share_of_return_matches_variance_ratio() -> None:

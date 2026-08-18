@@ -13,19 +13,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from bess.paths import PROJECT_ROOT
+import numpy as np
 
+from bess.core.config import BESSConfig, tariff_for_step
 from bess.core.settings import DEFAULT_PARAMETERS, SYSTEM_CONFIG
 from bess.core.timebase import fixed_demand_block_averages, steps_per_day_from_dt
-
-import numpy as np
+from bess.paths import PROJECT_ROOT
 
 DRL_DIR = PROJECT_ROOT
 ROOT = PROJECT_ROOT
 DATA_DIR = ROOT / "data"
 RESULTS_DIR = ROOT / "checkpoints"
-
-from bess.core.config import BESSConfig, tariff_for_step  # noqa: E402
 
 
 def ensure_inside_directory(path: Path, base_dir: Path, *, label: str = "project") -> Path:
@@ -97,7 +95,6 @@ def load_system_config() -> BESSConfig:
         "soc_min": battery["soc_min"],
         "soc_max": battery["soc_max"],
         "soc_safety_buffer": battery["soc_safety_buffer"],
-        "soc_eod": battery["soc_eod"],
         "soc_min_emergency": battery["soc_min_emergency"],
         "dt_hours": dt_hours,
         "price_peak": tariff["price_peak_VND_per_kWh"],
@@ -129,7 +126,6 @@ def make_bess_config(base: BESSConfig, e_cap_kwh: float,
         "soc_min": base.SOC_min,
         "soc_max": base.SOC_max,
         "soc_safety_buffer": base.SOC_safety,
-        "soc_eod": base.SOC_eod,
         "soc_min_emergency": base.SOC_min_emergency,
         "dt_hours": base.dt,
         "price_peak": base.price_peak,

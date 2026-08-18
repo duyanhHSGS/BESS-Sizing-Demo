@@ -102,12 +102,11 @@ def make_brain_env(
     power_scale_kw: float,
     battery_wear_vnd_per_kwh: float = 0.0,
     initial_state_of_charge: float | None = None,
-    required_final_soc: float | None = None,
 ) -> BrainEnv:
-    """Construct the canonical ``BrainEnv`` directly from current repo inputs."""
+    """Construct canonical ``BrainEnv``; episodes start at SOC_min by default."""
     episode = build_brain_episode(month, cfg, power_scale_kw=power_scale_kw)
     initial_soc = (
-        float(cfg.SOC_eod)
+        float(cfg.SOC_min)
         if initial_state_of_charge is None
         else float(initial_state_of_charge)
     )
@@ -123,7 +122,6 @@ def make_brain_env(
         demand_charge_vnd_per_kw=float(cfg.T_cap),
         battery_wear_vnd_per_kwh=float(battery_wear_vnd_per_kwh),
         episode=episode,
-        required_final_soc=required_final_soc,
     )
 
 
