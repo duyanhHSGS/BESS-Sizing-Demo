@@ -150,7 +150,7 @@ def _gae_advantages(
 
 class PPOAgent:
     def __init__(self, obs_dim: int, lr=1e-4, gamma=PPO_GAMMA, lam=PPO_LAMBDA,
-                 clip=0.2, epochs=4, minibatch=256, ent_coef=3e-3,
+                 clip=0.2, epochs=4, minibatch=256, ent_coef=0.0,
                  vf_coef=0.5, target_kl=0.02, seed=0, device="auto"):
         torch.manual_seed(seed)
         self.rng = np.random.default_rng(seed)
