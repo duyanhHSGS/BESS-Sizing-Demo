@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from bess.agents.ppo_agent import (
     PPOAgent,
@@ -27,7 +28,10 @@ from bess.core.common import RESULTS_DIR, score_month
 from bess.core.scenario_gen import MonthData
 from bess.core.settings import PPO_GAMMA, PPO_LAMBDA
 from bess.evaluation.baselines import run_drl_policy, run_no_bess
-from bess.evaluation.oracle.oracle_cache import load_cached_training_grids
+from bess.evaluation.oracle.oracle_cache import (
+    load_cached_training_dispatch,
+    load_cached_training_grids,
+)
 from bess.training.training_common import (
     build_training_bess_config,
     load_training_days,
@@ -40,8 +44,12 @@ from bess.training.training_reports import (
 
 VALIDATE_EVERY_UPDATES = 4
 CHALLENGER_RESET_PATIENCE = 3
-CHALLENGER_RESETS_ENABLED = True
+CHALLENGER_RESETS_ENABLED = False
 ACTION_MISMATCH_SHAPING_SCALE = 0.1
+ORACLE_BC_MAX_EPOCHS = 100
+ORACLE_BC_LEARNING_RATE = 1e-3
+ORACLE_BC_MINIBATCH = 256
+ORACLE_BC_TARGET_MSE = 1e-4
 LOG_EVERY_UPDATES = 1
 
 
@@ -88,6 +96,121 @@ def _score_ppo_operating_month(
         "throughput_kwh": throughput_kwh,
         "wear_cost_vnd": wear_cost_vnd,
         "total_operating_cost_vnd": utility["total_cost_vnd"] + wear_cost_vnd,
+    }
+
+
+def _oracle_teacher_action(
+    dispatch: dict[str, list[float]],
+    start: int,
+    stop: int,
+    cfg,
+) -> float:
+    """Map Oracle outside-world flows into one held BrainEnv battery-side action."""
+    battery_side_kw = []
+    for step in range(start, stop):
+        discharge_kw = float(dispatch["discharge"][step]) / float(cfg.eta_dis)
+        charge_kw = (
+            float(dispatch["grid_charge"][step])
+            + float(dispatch["solar_charge"][step])
+        ) * float(cfg.eta_ch)
+        battery_side_kw.append(discharge_kw - charge_kw)
+    mean_battery_kw = float(np.mean(battery_side_kw)) if battery_side_kw else 0.0
+    return float(np.clip(mean_battery_kw / float(cfg.P_rated_nominal), -1.0, 1.0))
+
+
+def _collect_oracle_teacher_samples(
+    month: MonthData,
+    oracle_dispatch: list[dict[str, list[float]]],
+    cfg,
+    *,
+    power_scale_kw: float,
+    battery_wear_cost: float,
+    native_steps: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Replay Oracle dispatch through canonical BrainEnv and collect brain7 lessons."""
+    if len(oracle_dispatch) != len(month.days):
+        raise ValueError("Oracle dispatch day count must match the teacher month")
+    env = make_brain_env(
+        month,
+        cfg,
+        power_scale_kw=power_scale_kw,
+        battery_wear_vnd_per_kwh=battery_wear_cost,
+    )
+    observation = env.reset()
+    observations: list[np.ndarray] = []
+    targets: list[float] = []
+
+    for day, dispatch in zip(month.days, oracle_dispatch, strict=True):
+        native_rows = len(day.load)
+        if any(len(values) != native_rows for values in dispatch.values()):
+            raise ValueError(
+                f"Oracle dispatch length does not match dataset day {day.day_index}"
+            )
+        for start in range(0, native_rows, native_steps):
+            stop = min(start + native_steps, native_rows)
+            action = _oracle_teacher_action(dispatch, start, stop, cfg)
+            observations.append(observation_array(observation, obs_dim=OBSERVATION_DIM))
+            targets.append(action)
+            transition = step_brain_control(
+                env,
+                action,
+                native_steps=stop - start,
+            )
+            if transition.next_observation is not None:
+                observation = transition.next_observation
+
+    return np.asarray(observations, dtype=np.float32), np.asarray(targets, dtype=np.float32)
+
+
+def _behavior_clone_actor(
+    agent: PPOAgent,
+    observations: np.ndarray,
+    targets: np.ndarray,
+    *,
+    seed: int,
+) -> dict[str, float | int]:
+    """Supervised-fit the existing generic PPO actor to Oracle teacher actions."""
+    if observations.ndim != 2 or observations.shape[1] != OBSERVATION_DIM:
+        raise ValueError("Oracle BC observations must have shape (N, OBSERVATION_DIM)")
+    if targets.ndim != 1 or len(targets) != len(observations) or len(targets) == 0:
+        raise ValueError("Oracle BC targets must be one non-empty action per observation")
+
+    obs_t = torch.as_tensor(observations, dtype=torch.float32, device=agent.device)
+    target_t = torch.as_tensor(targets, dtype=torch.float32, device=agent.device)
+    optimizer = torch.optim.Adam(agent.net.actor.parameters(), lr=ORACLE_BC_LEARNING_RATE)
+    rng = np.random.default_rng(seed)
+
+    @torch.inference_mode()
+    def full_mse() -> float:
+        prediction = torch.tanh(agent.net.actor(obs_t)).squeeze(-1)
+        return float(torch.mean((prediction - target_t) ** 2).cpu())
+
+    initial_mse = full_mse()
+    epochs_completed = 0
+    for epoch in range(ORACLE_BC_MAX_EPOCHS):
+        indexes = rng.permutation(len(observations))
+        for start in range(0, len(indexes), ORACLE_BC_MINIBATCH):
+            mb = torch.as_tensor(
+                indexes[start:start + ORACLE_BC_MINIBATCH],
+                dtype=torch.long,
+                device=agent.device,
+            )
+            prediction = torch.tanh(agent.net.actor(obs_t[mb])).squeeze(-1)
+            loss = torch.mean((prediction - target_t[mb]) ** 2)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        epochs_completed = epoch + 1
+        if full_mse() <= ORACLE_BC_TARGET_MSE:
+            break
+
+    final_mse = full_mse()
+    agent._sync_collector()
+    return {
+        "samples": len(observations),
+        "epochs_completed": int(epochs_completed),
+        "initial_mse": initial_mse,
+        "final_mse": final_mse,
     }
 
 
@@ -242,12 +365,18 @@ def main() -> None:
         "validation_every_updates": VALIDATE_EVERY_UPDATES,
         "challenger_reset_patience": CHALLENGER_RESET_PATIENCE,
         "challenger_resets_enabled": CHALLENGER_RESETS_ENABLED,
+        "oracle_behavior_cloning_enabled": True,
+        "oracle_behavior_cloning_max_epochs": ORACLE_BC_MAX_EPOCHS,
+        "oracle_behavior_cloning_learning_rate": ORACLE_BC_LEARNING_RATE,
     }
     buffer = RolloutBuffer(decisions_per_episode, OBSERVATION_DIM)
 
     val_base = score_month(run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
     oracle_grids = load_cached_training_grids(
         args.oracle_cache, [day.day_index for day in val_days]
+    )
+    oracle_dispatch = load_cached_training_dispatch(
+        args.oracle_cache, [day.day_index for day in train_days]
     )
     val_oracle = score_month(oracle_grids, cfg, days=val_days)["total_cost_vnd"]
     curve_path = RESULTS_DIR / f"training_curve_{tag}.csv"
@@ -292,6 +421,9 @@ def main() -> None:
             "validation_every_updates": VALIDATE_EVERY_UPDATES,
             "challenger_reset_patience": CHALLENGER_RESET_PATIENCE,
             "challenger_resets_enabled": CHALLENGER_RESETS_ENABLED,
+            "oracle_behavior_cloning_enabled": True,
+            "oracle_behavior_cloning_max_epochs": ORACLE_BC_MAX_EPOCHS,
+            "oracle_behavior_cloning_learning_rate": ORACLE_BC_LEARNING_RATE,
             "native_dt_minutes": csv_dt * 60.0,
             "control_dt_minutes": args.control_dt_minutes,
             "native_steps_per_action": native_steps,
@@ -383,6 +515,51 @@ def main() -> None:
             power_scale_kw=p_ref,
             battery_wear_vnd_per_kwh=battery_wear_cost,
         )
+
+    raw_initial_cost = validate_policy_cost()
+    raw_initial_state = agent.snapshot_training_state()
+    teacher_observations, teacher_targets = _collect_oracle_teacher_samples(
+        train_months[0],
+        oracle_dispatch,
+        cfg,
+        power_scale_kw=p_ref,
+        battery_wear_cost=battery_wear_cost,
+        native_steps=native_steps,
+    )
+    bc_started = time.perf_counter()
+    bc_stats = _behavior_clone_actor(
+        agent,
+        teacher_observations,
+        teacher_targets,
+        seed=args.seed,
+    )
+    bc_stats["seconds"] = time.perf_counter() - bc_started
+    bc_stats["teacher_mean_abs_action"] = float(np.mean(np.abs(teacher_targets)))
+    bc_stats["teacher_nonzero_action_pct"] = float(
+        np.mean(np.abs(teacher_targets) > 1e-6) * 100.0
+    )
+    post_bc_cost = validate_policy_cost()
+    use_bc = post_bc_cost < raw_initial_cost
+    if not use_bc:
+        agent.restore_training_state(raw_initial_state)
+
+    agent.meta["oracle_behavior_cloning"] = {
+        **bc_stats,
+        "raw_initial_validation_cost_vnd": raw_initial_cost,
+        "post_bc_validation_cost_vnd": post_bc_cost,
+        "selected_for_ppo": use_bc,
+    }
+    report["training"]["oracle_behavior_cloning"] = dict(
+        agent.meta["oracle_behavior_cloning"]
+    )
+    write_report(report_path, report)
+    print(
+        f"[train-ds] ORACLE TEACHER | {bc_stats['samples']} lessons | "
+        f"MSE {bc_stats['initial_mse']:.5f}->{bc_stats['final_mse']:.5f} | "
+        f"raw {raw_initial_cost/1e6:.1f}M -> BC {post_bc_cost/1e6:.1f}M | "
+        f"{'USE BC' if use_bc else 'KEEP RAW'}",
+        flush=True,
+    )
 
     champion_cost = _initialize_champion(agent, validate_policy_cost, checkpoint_path)
     champion_state = agent.snapshot_training_state()

@@ -149,6 +149,49 @@ def load_cached_training_grids(
     return [[float(value) for value in by_index[index]["grid"]] for index in day_indexes]
 
 
+def load_cached_training_dispatch(
+    cache_path: str | Path,
+    day_indexes: list[int],
+) -> list[dict[str, list[float]]]:
+    """Load solved Oracle charge/discharge traces for supervised policy warm-start."""
+    path = Path(cache_path).resolve()
+    if path.parent != CACHE_DIR.resolve():
+        raise OracleCacheRequired(f"Oracle cache path is outside the cache directory: {path}")
+    payload = _read_cache(path)
+    result = payload.get("result") if payload else None
+    days = result.get("days") if isinstance(result, dict) else None
+    if not isinstance(days, list):
+        raise OracleCacheRequired("Oracle LP cache is missing or invalid.")
+
+    required_fields = ("discharge", "grid_charge", "solar_charge")
+    by_index = {
+        int(day["day_index"]): day
+        for day in days
+        if day.get("solved")
+        and all(isinstance(day.get(field), list) for field in required_fields)
+    }
+    missing = [index for index in day_indexes if index not in by_index]
+    if missing:
+        raise OracleCacheRequired(
+            f"Oracle LP cache does not contain training dispatch day indexes: {missing[:10]}"
+        )
+
+    dispatch: list[dict[str, list[float]]] = []
+    for index in day_indexes:
+        day = by_index[index]
+        converted = {
+            field: [float(value) for value in day[field]]
+            for field in required_fields
+        }
+        lengths = {len(values) for values in converted.values()}
+        if len(lengths) != 1:
+            raise OracleCacheRequired(
+                f"Oracle LP cache dispatch arrays have inconsistent lengths for day {index}."
+            )
+        dispatch.append(converted)
+    return dispatch
+
+
 def _payload(parameters: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     csv_path = selected_data_path(parameters)
     return {

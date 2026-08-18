@@ -12,8 +12,10 @@ import torch
 from bess.agents.ppo_agent import PPOAgent, RolloutBuffer, _gae_advantages
 from bess.training.runners.train_ppo_dataset import (
     _action_mismatch_penalty_vnd,
+    _behavior_clone_actor,
     _champion_curve_point,
     _initialize_champion,
+    _oracle_teacher_action,
     _resolve_challenger,
     _save_accepted_champion,
 )
@@ -83,6 +85,34 @@ class PPOTrainingStateTests(unittest.TestCase):
         for key, value in agent.collector_net.state_dict().items():
             self.assertTrue(torch.equal(value, champion_state["network"][key].cpu()))
         self.assertEqual(agent.rng.bit_generator.state, rng_after_update)
+
+
+class PPOOracleTeacherTests(unittest.TestCase):
+    def test_oracle_teacher_action_converts_outside_power_to_battery_side(self):
+        cfg = SimpleNamespace(eta_dis=0.9, eta_ch=0.9, P_rated_nominal=450.0)
+        discharge = _oracle_teacher_action(
+            {"discharge": [90.0], "grid_charge": [0.0], "solar_charge": [0.0]},
+            0,
+            1,
+            cfg,
+        )
+        charge = _oracle_teacher_action(
+            {"discharge": [0.0], "grid_charge": [100.0], "solar_charge": [0.0]},
+            0,
+            1,
+            cfg,
+        )
+        self.assertAlmostEqual(discharge, 100.0 / 450.0)
+        self.assertAlmostEqual(charge, -90.0 / 450.0)
+
+    def test_behavior_clone_actor_reduces_teacher_mse(self):
+        agent = PPOAgent(7, seed=0, device="cpu")
+        rng = np.random.default_rng(123)
+        observations = rng.normal(size=(64, 7)).astype(np.float32)
+        targets = np.tanh(observations[:, 0] * 0.5).astype(np.float32)
+        stats = _behavior_clone_actor(agent, observations, targets, seed=0)
+        self.assertLess(stats["final_mse"], stats["initial_mse"])
+        self.assertEqual(stats["samples"], 64)
 
 
 class PPOActionMismatchPenaltyTests(unittest.TestCase):
