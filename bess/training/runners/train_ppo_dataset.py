@@ -17,6 +17,7 @@ from bess.agents.ppo_agent import (
 )
 from bess.core.bess_env import OBSERVATION_DIM
 from bess.core.brain_runtime import (
+    REWARD_SCALE_VND,
     make_brain_env,
     native_steps_per_action,
     observation_array,
@@ -40,6 +41,21 @@ from bess.training.training_reports import (
 VALIDATE_EVERY_UPDATES = 4
 CHALLENGER_RESET_PATIENCE = 3
 LOG_EVERY_UPDATES = 1
+
+
+def _action_mismatch_penalty_vnd(transition, *, timestep_hours: float, wear_vnd_per_kwh: float) -> float:
+    """Penalize requested battery energy that physics refuses to execute.
+
+    PPO's sampled action and stored log-probability stay untouched, preserving
+    on-policy correctness. This is trainer-only reward shaping: Champion/test
+    scoring still uses the real economic objective with no shaping penalty.
+    """
+    mismatch_kwh = sum(
+        abs(result.requested_battery_kw - result.bess.physics.final_battery_kw)
+        * timestep_hours
+        for result in transition.native_results
+    )
+    return mismatch_kwh * wear_vnd_per_kwh
 
 
 def _load_ui_wear_cost(training_config_path: str | Path) -> float:
@@ -198,6 +214,7 @@ def main() -> None:
         "obs_dim": OBSERVATION_DIM,
         "battery_wear_cost": battery_wear_cost,
         "reward_mode": "brain_savings_vnd_v1",
+        "training_reward_shaping": "infeasible_request_phantom_wear_v1",
         "gamma": gamma,
         "lambda": args.lambda_value,
         "learning_rate": float(agent.opt.param_groups[0]["lr"]),
@@ -249,6 +266,8 @@ def main() -> None:
         "economics": {
             "battery_wear_cost": battery_wear_cost,
             "reward_mode": "brain_savings_vnd_v1",
+            "training_reward_shaping": "infeasible_request_phantom_wear_v1",
+            "champion_scoring_uses_shaping": False,
         },
         "training": {
             "requested_steps": args.steps,
@@ -387,6 +406,8 @@ def main() -> None:
     rollout_action_abs_sum = 0.0
     rollout_action_saturation = 0
     rollout_projected = 0
+    rollout_mismatch_penalty_vnd = 0.0
+    rollout_mismatch_kwh = 0.0
     rollout_count = 0
     started = time.time()
     rollout_started = time.perf_counter()
@@ -444,7 +465,20 @@ def main() -> None:
             native_steps=native_steps,
         )
         done = transition.done
-        reward = transition.reward_million_vnd
+        mismatch_penalty_vnd = _action_mismatch_penalty_vnd(
+            transition,
+            timestep_hours=cfg.dt,
+            wear_vnd_per_kwh=battery_wear_cost,
+        )
+        mismatch_kwh = (
+            mismatch_penalty_vnd / battery_wear_cost
+            if battery_wear_cost > 0.0
+            else 0.0
+        )
+        # Keep the PPO action/log-prob pair exact. We shape only the learning
+        # reward so repeatedly requesting battery power that physics rejects is
+        # no longer free. Champion/test evaluation never includes this penalty.
+        reward = transition.reward_million_vnd - mismatch_penalty_vnd / REWARD_SCALE_VND
         buffer.add(obs, action, logp, reward, value, float(done), latent=latent)
         steps += 1
         perf["decisions"] += 1
@@ -453,6 +487,8 @@ def main() -> None:
         rollout_action_abs_sum += abs(action)
         rollout_action_saturation += int(abs(action) >= 0.98)
         rollout_projected += int(transition.adjusted_action)
+        rollout_mismatch_penalty_vnd += mismatch_penalty_vnd
+        rollout_mismatch_kwh += mismatch_kwh
         rollout_count += 1
 
         if done:
@@ -477,6 +513,9 @@ def main() -> None:
             "mean_abs_action": rollout_action_abs_sum / rollout_count,
             "action_saturation_pct": rollout_action_saturation / rollout_count * 100.0,
             "projected_action_pct": rollout_projected / rollout_count * 100.0,
+            "action_mismatch_kwh": rollout_mismatch_kwh,
+            "action_mismatch_penalty_vnd": rollout_mismatch_penalty_vnd,
+            "mean_action_mismatch_penalty_vnd": rollout_mismatch_penalty_vnd / rollout_count,
         }
         report["training"]["updates"] = updates
         report["training"]["last_update"] = {**update_stats, **rollout_stats}
@@ -520,6 +559,8 @@ def main() -> None:
         rollout_action_abs_sum = 0.0
         rollout_action_saturation = 0
         rollout_projected = 0
+        rollout_mismatch_penalty_vnd = 0.0
+        rollout_mismatch_kwh = 0.0
         rollout_count = 0
         rollout_started = time.perf_counter()
 

@@ -4,12 +4,14 @@ import copy
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 
 from bess.agents.ppo_agent import PPOAgent, RolloutBuffer, _gae_advantages
 from bess.training.runners.train_ppo_dataset import (
+    _action_mismatch_penalty_vnd,
     _champion_curve_point,
     _initialize_champion,
     _resolve_challenger,
@@ -81,6 +83,52 @@ class PPOTrainingStateTests(unittest.TestCase):
         for key, value in agent.collector_net.state_dict().items():
             self.assertTrue(torch.equal(value, champion_state["network"][key].cpu()))
         self.assertEqual(agent.rng.bit_generator.state, rng_after_update)
+
+
+class PPOActionMismatchPenaltyTests(unittest.TestCase):
+    def test_penalty_matches_phantom_wear_of_rejected_requested_energy(self):
+        transition = SimpleNamespace(
+            native_results=(
+                SimpleNamespace(
+                    requested_battery_kw=-450.0,
+                    bess=SimpleNamespace(
+                        physics=SimpleNamespace(final_battery_kw=0.0),
+                    ),
+                ),
+                SimpleNamespace(
+                    requested_battery_kw=200.0,
+                    bess=SimpleNamespace(
+                        physics=SimpleNamespace(final_battery_kw=100.0),
+                    ),
+                ),
+            )
+        )
+        penalty = _action_mismatch_penalty_vnd(
+            transition,
+            timestep_hours=0.25,
+            wear_vnd_per_kwh=500.0,
+        )
+        self.assertEqual(penalty, (450.0 + 100.0) * 0.25 * 500.0)
+
+    def test_penalty_is_zero_when_physics_executes_the_requested_action(self):
+        transition = SimpleNamespace(
+            native_results=(
+                SimpleNamespace(
+                    requested_battery_kw=123.0,
+                    bess=SimpleNamespace(
+                        physics=SimpleNamespace(final_battery_kw=123.0),
+                    ),
+                ),
+            )
+        )
+        self.assertEqual(
+            _action_mismatch_penalty_vnd(
+                transition,
+                timestep_hours=0.25,
+                wear_vnd_per_kwh=500.0,
+            ),
+            0.0,
+        )
 
 
 class PPOGAETests(unittest.TestCase):
