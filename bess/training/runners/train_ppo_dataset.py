@@ -47,6 +47,7 @@ CHALLENGER_RESET_PATIENCE = 3
 CHALLENGER_RESETS_ENABLED = True
 ACTION_MISMATCH_SHAPING_SCALE = 0.1
 PPO_FIT_CONTROL_DT_MINUTES = 30.0
+PPO_FINE_TUNE_EPOCHS = 1
 ORACLE_BC_MAX_EPOCHS = 100
 ORACLE_BC_LEARNING_RATE = 1e-3
 ORACLE_BC_MINIBATCH = 256
@@ -431,6 +432,7 @@ def main() -> None:
         OBSERVATION_DIM,
         gamma=gamma,
         lam=args.lambda_value,
+        epochs=PPO_FINE_TUNE_EPOCHS,
         seed=args.seed,
         device=learner_device,
     )
