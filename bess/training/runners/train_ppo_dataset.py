@@ -43,10 +43,10 @@ from bess.training.training_reports import (
 )
 
 VALIDATE_EVERY_UPDATES = 1
-CHALLENGER_RESET_PATIENCE = 3
+CHALLENGER_RESET_PATIENCE = 6
 CHALLENGER_RESETS_ENABLED = True
 RESET_OPTIMIZER_ON_REANCHOR = True
-REANCHOR_SCOPE = "policy_only"
+REANCHOR_SCOPE = "full_state"
 ACTION_MISMATCH_SHAPING_SCALE = 0.1
 PPO_FIT_CONTROL_DT_MINUTES = 30.0
 PPO_FINE_TUNE_EPOCHS = 1
@@ -769,13 +769,12 @@ def main() -> None:
                 and allow_reset
                 and consecutive_rejections >= CHALLENGER_RESET_PATIENCE
             ):
-                # Champion scoring is actor-only. Re-anchor the trusted policy but
-                # keep the live critic learning instead of rewinding it every branch.
-                agent.restore_policy_state(champion_state)
+                # IQ-21 policy-only re-anchoring improved critic diagnostics but hurt
+                # the Champion. Restore the complete trusted training state again,
+                # then clear Adam so the longer branch starts fresh from Champion.
+                agent.restore_training_state(champion_state)
                 if RESET_OPTIMIZER_ON_REANCHOR:
-                    # Fresh Adam only for the policy branch; critic optimizer history
-                    # stays alive with the critic it belongs to.
-                    agent.clear_policy_optimizer_state()
+                    agent.opt.state.clear()
                 report["training"]["learner_resets"] += 1
                 consecutive_rejections = 0
                 reset_to_champion = True
