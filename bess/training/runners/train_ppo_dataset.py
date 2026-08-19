@@ -35,6 +35,7 @@ from bess.core.settings import (
     PPO_CLIP,
     PPO_CRITIC_GRAD_CLIP,
     PPO_ENTROPY_COEF,
+    PPO_EXPLORATION_LR_MULTIPLIER,
     PPO_FINE_TUNE_EPOCHS,
     PPO_FIT_CONTROL_DT_MINUTES,
     PPO_GAMMA,
@@ -416,6 +417,11 @@ def main() -> None:
     parser.add_argument("--gamma", type=float, default=PPO_GAMMA)
     parser.add_argument("--lambda", dest="lambda_value", type=float, default=PPO_LAMBDA)
     parser.add_argument("--learning-rate", type=float, default=PPO_LEARNING_RATE)
+    parser.add_argument(
+        "--exploration-lr-multiplier",
+        type=float,
+        default=PPO_EXPLORATION_LR_MULTIPLIER,
+    )
     parser.add_argument("--ppo-clip", type=float, default=PPO_CLIP)
     parser.add_argument("--ppo-epochs", type=int, default=PPO_FINE_TUNE_EPOCHS)
     parser.add_argument("--minibatch", type=int, default=PPO_MINIBATCH)
@@ -548,6 +554,13 @@ def main() -> None:
         maximum=1.0,
         minimum_inclusive=False,
     )
+    require_float(
+        "exploration-lr-multiplier",
+        args.exploration_lr_multiplier,
+        minimum=0.0,
+        maximum=1000.0,
+        minimum_inclusive=False,
+    )
     require_float("ppo-clip", args.ppo_clip, minimum=0.0, maximum=1.0, minimum_inclusive=False)
     require_float("entropy-coef", args.entropy_coef, minimum=0.0, maximum=100.0)
     require_float("value-coef", args.value_coef, minimum=0.0, maximum=100.0)
@@ -652,6 +665,7 @@ def main() -> None:
         device=learner_device,
         hidden_size=args.hidden_size,
         initial_log_std=args.initial_log_std,
+        exploration_lr_multiplier=args.exploration_lr_multiplier,
         actor_grad_clip=args.actor_grad_clip,
         critic_grad_clip=args.critic_grad_clip,
     )
@@ -674,6 +688,8 @@ def main() -> None:
         "gamma": gamma,
         "lambda": args.lambda_value,
         "learning_rate": float(agent.opt.param_groups[0]["lr"]),
+        "exploration_lr_multiplier": agent.exploration_lr_multiplier,
+        "exploration_learning_rate": agent.exploration_learning_rate,
         "ppo_clip": agent.clip,
         "ppo_epochs": agent.epochs,
         "ppo_minibatch": agent.minibatch,
@@ -766,6 +782,8 @@ def main() -> None:
             "gamma": gamma,
             "lambda": args.lambda_value,
             "learning_rate": float(agent.opt.param_groups[0]["lr"]),
+            "exploration_lr_multiplier": agent.exploration_lr_multiplier,
+            "exploration_learning_rate": agent.exploration_learning_rate,
             "ppo_clip": agent.clip,
             "ppo_epochs": agent.epochs,
             "ppo_minibatch": agent.minibatch,

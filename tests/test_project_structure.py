@@ -87,6 +87,7 @@ def test_generic_ppo_ui_exposes_and_sends_every_project_tunable() -> None:
         "gamma": "train-gamma",
         "lambda": "train-lambda",
         "learning_rate": "train-learning-rate",
+        "exploration_lr_multiplier": "train-exploration-lr-multiplier",
         "ppo_clip": "train-ppo-clip",
         "ppo_epochs": "train-ppo-epochs",
         "minibatch": "train-minibatch",

@@ -79,6 +79,7 @@ PPO_LAMBDA = 0.999
 PPO_STEPS = 400_000
 PPO_SEED = 0
 PPO_LEARNING_RATE = 1e-4
+PPO_EXPLORATION_LR_MULTIPLIER = 10.0
 PPO_CLIP = 0.2
 PPO_FINE_TUNE_EPOCHS = 1
 PPO_MINIBATCH = 256
@@ -111,6 +112,7 @@ PPO_TUNABLE_DEFAULTS = {
     "gamma": PPO_GAMMA,
     "lambda": PPO_LAMBDA,
     "learning_rate": PPO_LEARNING_RATE,
+    "exploration_lr_multiplier": PPO_EXPLORATION_LR_MULTIPLIER,
     "ppo_clip": PPO_CLIP,
     "ppo_epochs": PPO_FINE_TUNE_EPOCHS,
     "minibatch": PPO_MINIBATCH,

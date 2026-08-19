@@ -378,6 +378,14 @@ def build_training_command(
             minimum_inclusive=False,
             maximum=1.0,
         )
+        exploration_lr_multiplier = _bounded_float(
+            payload,
+            "exploration_lr_multiplier",
+            defaults["exploration_lr_multiplier"],
+            minimum=0.0,
+            minimum_inclusive=False,
+            maximum=1000.0,
+        )
         ppo_clip = _bounded_float(
             payload,
             "ppo_clip",
@@ -472,6 +480,8 @@ def build_training_command(
                 str(lambda_value),
                 "--learning-rate",
                 str(learning_rate),
+                "--exploration-lr-multiplier",
+                str(exploration_lr_multiplier),
                 "--ppo-clip",
                 str(ppo_clip),
                 "--ppo-epochs",

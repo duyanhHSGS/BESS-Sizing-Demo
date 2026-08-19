@@ -21,6 +21,7 @@ from torch import nn
 from bess.core.settings import (
     PPO_ACTOR_GRAD_CLIP,
     PPO_CRITIC_GRAD_CLIP,
+    PPO_EXPLORATION_LR_MULTIPLIER,
     PPO_GAMMA,
     PPO_HIDDEN_SIZE,
     PPO_INITIAL_LOG_STD,
@@ -197,6 +198,7 @@ class PPOAgent:
         device="auto",
         hidden_size=PPO_HIDDEN_SIZE,
         initial_log_std=PPO_INITIAL_LOG_STD,
+        exploration_lr_multiplier=PPO_EXPLORATION_LR_MULTIPLIER,
         actor_grad_clip=PPO_ACTOR_GRAD_CLIP,
         critic_grad_clip=PPO_CRITIC_GRAD_CLIP,
     ):
@@ -207,6 +209,10 @@ class PPOAgent:
         self.hidden_size = int(hidden_size)
         self.initial_log_std = float(initial_log_std)
         self.learning_rate = float(lr)
+        self.exploration_lr_multiplier = float(exploration_lr_multiplier)
+        self.exploration_learning_rate = (
+            self.learning_rate * self.exploration_lr_multiplier
+        )
         self.actor_grad_clip = float(actor_grad_clip)
         self.critic_grad_clip = float(critic_grad_clip)
         self.net = ActorCritic(
@@ -214,7 +220,7 @@ class PPOAgent:
             hidden_size=self.hidden_size,
             initial_log_std=self.initial_log_std,
         ).to(self.device)
-        self.opt = torch.optim.Adam(self.net.parameters(), lr=self.learning_rate)
+        self.opt = self._build_optimizer()
         # Keep tiny step-by-step environment inference on CPU. Only large PPO
         # minibatches cross to CUDA, avoiding thousands of tiny PCIe transfers.
         with torch.random.fork_rng(devices=[]):
@@ -230,6 +236,21 @@ class PPOAgent:
         self.target_kl = float(target_kl)
         self.last_update_stats = {}
         self.meta = {}          # deployment context (p_ref_kw, obs_variant)
+
+    def _build_optimizer(self):
+        exploration_params = list(self.net.log_std_delta.parameters())
+        exploration_ids = {id(parameter) for parameter in exploration_params}
+        base_params = [
+            parameter
+            for parameter in self.net.parameters()
+            if id(parameter) not in exploration_ids
+        ]
+        return torch.optim.Adam(
+            [
+                {"params": base_params, "lr": self.learning_rate},
+                {"params": exploration_params, "lr": self.exploration_learning_rate},
+            ]
+        )
 
     @torch.inference_mode()
     def _sync_collector(self):
@@ -464,6 +485,8 @@ class PPOAgent:
             "initial_log_std": self.initial_log_std,
             "exploration_mode": "state_dependent_log_std_delta_v1",
             "exploration_hidden_size": self.net.exploration_hidden_size,
+            "exploration_lr_multiplier": self.exploration_lr_multiplier,
+            "exploration_learning_rate": self.exploration_learning_rate,
         }
         self.meta = meta
         payload = {"algo": "ppo", "state_dict": state, "meta": meta}
@@ -477,7 +500,7 @@ class PPOAgent:
             hidden_size=self.hidden_size,
             initial_log_std=self.initial_log_std,
         ).to(self.device)
-        self.opt = torch.optim.Adam(self.net.parameters(), lr=self.learning_rate)
+        self.opt = self._build_optimizer()
         with torch.random.fork_rng(devices=[]):
             self.collector_net = ActorCritic(
                 self.obs_dim,
@@ -508,6 +531,12 @@ class PPOAgent:
         )
         self.initial_log_std = float(
             self.meta.get("initial_log_std", self.initial_log_std)
+        )
+        self.exploration_lr_multiplier = float(
+            self.meta.get("exploration_lr_multiplier", self.exploration_lr_multiplier)
+        )
+        self.exploration_learning_rate = (
+            self.learning_rate * self.exploration_lr_multiplier
         )
         if checkpoint_hidden_size != self.hidden_size:
             self._rebuild_network_for_hidden_size(checkpoint_hidden_size)

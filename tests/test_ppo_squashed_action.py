@@ -28,6 +28,24 @@ class PPOSquashedActionTests(unittest.TestCase):
 
         torch.testing.assert_close(actual_rng, expected_rng, rtol=0.0, atol=0.0)
 
+    def test_adaptive_exploration_uses_faster_optimizer_group(self):
+        agent = PPOAgent(
+            obs_dim=7,
+            seed=3,
+            device="cpu",
+            lr=1e-4,
+            exploration_lr_multiplier=10.0,
+        )
+
+        self.assertEqual(len(agent.opt.param_groups), 2)
+        self.assertAlmostEqual(agent.opt.param_groups[0]["lr"], 1e-4)
+        self.assertAlmostEqual(agent.opt.param_groups[1]["lr"], 1e-3)
+        exploration_ids = {id(parameter) for parameter in agent.net.log_std_delta.parameters()}
+        optimizer_exploration_ids = {
+            id(parameter) for parameter in agent.opt.param_groups[1]["params"]
+        }
+        self.assertEqual(optimizer_exploration_ids, exploration_ids)
+
     def test_adaptive_exploration_starts_at_exact_scalar_baseline(self):
         agent = PPOAgent(obs_dim=7, seed=3, device="cpu", initial_log_std=-1.5)
         observations = torch.tensor(
