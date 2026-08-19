@@ -46,6 +46,7 @@ VALIDATE_EVERY_UPDATES = 1
 CHALLENGER_RESET_PATIENCE = 3
 CHALLENGER_RESETS_ENABLED = True
 RESET_OPTIMIZER_ON_REANCHOR = True
+REANCHOR_SCOPE = "policy_only"
 ACTION_MISMATCH_SHAPING_SCALE = 0.1
 PPO_FIT_CONTROL_DT_MINUTES = 30.0
 PPO_FINE_TUNE_EPOCHS = 1
@@ -472,6 +473,7 @@ def main() -> None:
         "challenger_reset_patience": CHALLENGER_RESET_PATIENCE,
         "challenger_resets_enabled": CHALLENGER_RESETS_ENABLED,
         "reset_optimizer_on_reanchor": RESET_OPTIMIZER_ON_REANCHOR,
+        "reanchor_scope": REANCHOR_SCOPE,
         "oracle_behavior_cloning_enabled": True,
         "oracle_behavior_cloning_max_epochs": ORACLE_BC_MAX_EPOCHS,
         "oracle_behavior_cloning_learning_rate": ORACLE_BC_LEARNING_RATE,
@@ -538,6 +540,7 @@ def main() -> None:
             "challenger_reset_patience": CHALLENGER_RESET_PATIENCE,
             "challenger_resets_enabled": CHALLENGER_RESETS_ENABLED,
             "reset_optimizer_on_reanchor": RESET_OPTIMIZER_ON_REANCHOR,
+            "reanchor_scope": REANCHOR_SCOPE,
             "oracle_behavior_cloning_enabled": True,
             "oracle_behavior_cloning_max_epochs": ORACLE_BC_MAX_EPOCHS,
             "oracle_behavior_cloning_learning_rate": ORACLE_BC_LEARNING_RATE,
@@ -766,11 +769,13 @@ def main() -> None:
                 and allow_reset
                 and consecutive_rejections >= CHALLENGER_RESET_PATIENCE
             ):
-                agent.restore_training_state(champion_state)
+                # Champion scoring is actor-only. Re-anchor the trusted policy but
+                # keep the live critic learning instead of rewinding it every branch.
+                agent.restore_policy_state(champion_state)
                 if RESET_OPTIMIZER_ON_REANCHOR:
-                    # Keep the trusted Champion weights, but discard Adam's old
-                    # momentum so each re-anchor is a genuinely fresh local search.
-                    agent.opt.state.clear()
+                    # Fresh Adam only for the policy branch; critic optimizer history
+                    # stays alive with the critic it belongs to.
+                    agent.clear_policy_optimizer_state()
                 report["training"]["learner_resets"] += 1
                 consecutive_rejections = 0
                 reset_to_champion = True

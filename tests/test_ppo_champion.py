@@ -88,6 +88,31 @@ class PPOTrainingStateTests(unittest.TestCase):
             self.assertTrue(torch.equal(value, champion_state["network"][key].cpu()))
         self.assertEqual(agent.rng.bit_generator.state, rng_after_update)
 
+    def test_policy_only_restore_keeps_live_critic_and_clears_only_policy_adam(self):
+        agent = PPOAgent(obs_dim=4, seed=7, device="cpu", epochs=1, minibatch=4)
+        agent.update(_make_buffer(agent, seed=1), 0.0)
+        champion_state = agent.snapshot_training_state()
+
+        agent.update(_make_buffer(agent, seed=2), 0.0)
+        live_critic = copy.deepcopy(agent.net.critic.state_dict())
+
+        agent.restore_policy_state(champion_state)
+        agent.clear_policy_optimizer_state()
+
+        champion_actor = {
+            key[len("actor."):]: value
+            for key, value in champion_state["network"].items()
+            if key.startswith("actor.")
+        }
+        _assert_nested_equal(self, dict(agent.net.actor.state_dict()), champion_actor)
+        self.assertTrue(torch.equal(agent.net.log_std, champion_state["network"]["log_std"]))
+        _assert_nested_equal(self, agent.net.critic.state_dict(), live_critic)
+        _assert_nested_equal(self, agent.collector_net.state_dict(), agent.net.state_dict())
+
+        for param in [*agent.net.actor.parameters(), agent.net.log_std]:
+            self.assertNotIn(param, agent.opt.state)
+        self.assertTrue(any(param in agent.opt.state for param in agent.net.critic.parameters()))
+
 
 class PPOOracleTeacherTests(unittest.TestCase):
     def test_oracle_teacher_action_converts_outside_power_to_battery_side(self):

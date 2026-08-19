@@ -191,6 +191,24 @@ class PPOAgent:
         self.opt.load_state_dict(snapshot["optimizer"])
         self._sync_collector()
 
+    def restore_policy_state(self, snapshot: dict) -> None:
+        """Restore Champion actor/log-std while leaving the live critic untouched."""
+        network = snapshot["network"]
+        actor_state = {
+            key[len("actor."):]: value
+            for key, value in network.items()
+            if key.startswith("actor.")
+        }
+        self.net.actor.load_state_dict(actor_state)
+        with torch.no_grad():
+            self.net.log_std.copy_(network["log_std"])
+        self._sync_collector()
+
+    def clear_policy_optimizer_state(self) -> None:
+        """Discard Adam history only for actor/log-std parameters."""
+        for param in [*self.net.actor.parameters(), self.net.log_std]:
+            self.opt.state.pop(param, None)
+
     # ------------------------------------------------------------------
     @torch.inference_mode()
     def act_with_latent(self, obs: np.ndarray, deterministic: bool = False):
