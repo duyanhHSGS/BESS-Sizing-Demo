@@ -386,6 +386,13 @@ def build_training_command(
             minimum_inclusive=False,
             maximum=1000.0,
         )
+        soc_edge_log_std_penalty = _bounded_float(
+            payload,
+            "soc_edge_log_std_penalty",
+            defaults["soc_edge_log_std_penalty"],
+            minimum=0.0,
+            maximum=5.0,
+        )
         ppo_clip = _bounded_float(
             payload,
             "ppo_clip",
@@ -482,6 +489,8 @@ def build_training_command(
                 str(learning_rate),
                 "--exploration-lr-multiplier",
                 str(exploration_lr_multiplier),
+                "--soc-edge-log-std-penalty",
+                str(soc_edge_log_std_penalty),
                 "--ppo-clip",
                 str(ppo_clip),
                 "--ppo-epochs",

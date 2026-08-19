@@ -53,6 +53,7 @@ from bess.core.settings import (
     PPO_PRESERVE_CRITIC_ON_REANCHOR,
     PPO_RESET_OPTIMIZER_ON_REANCHOR,
     PPO_SEED,
+    PPO_SOC_EDGE_LOG_STD_PENALTY,
     PPO_STEPS,
     PPO_TARGET_KL,
     PPO_TORCH_THREADS,
@@ -422,6 +423,11 @@ def main() -> None:
         type=float,
         default=PPO_EXPLORATION_LR_MULTIPLIER,
     )
+    parser.add_argument(
+        "--soc-edge-log-std-penalty",
+        type=float,
+        default=PPO_SOC_EDGE_LOG_STD_PENALTY,
+    )
     parser.add_argument("--ppo-clip", type=float, default=PPO_CLIP)
     parser.add_argument("--ppo-epochs", type=int, default=PPO_FINE_TUNE_EPOCHS)
     parser.add_argument("--minibatch", type=int, default=PPO_MINIBATCH)
@@ -561,6 +567,12 @@ def main() -> None:
         maximum=1000.0,
         minimum_inclusive=False,
     )
+    require_float(
+        "soc-edge-log-std-penalty",
+        args.soc_edge_log_std_penalty,
+        minimum=0.0,
+        maximum=5.0,
+    )
     require_float("ppo-clip", args.ppo_clip, minimum=0.0, maximum=1.0, minimum_inclusive=False)
     require_float("entropy-coef", args.entropy_coef, minimum=0.0, maximum=100.0)
     require_float("value-coef", args.value_coef, minimum=0.0, maximum=100.0)
@@ -666,6 +678,7 @@ def main() -> None:
         hidden_size=args.hidden_size,
         initial_log_std=args.initial_log_std,
         exploration_lr_multiplier=args.exploration_lr_multiplier,
+        soc_edge_log_std_penalty=args.soc_edge_log_std_penalty,
         actor_grad_clip=args.actor_grad_clip,
         critic_grad_clip=args.critic_grad_clip,
     )
@@ -690,6 +703,7 @@ def main() -> None:
         "learning_rate": float(agent.opt.param_groups[0]["lr"]),
         "exploration_lr_multiplier": agent.exploration_lr_multiplier,
         "exploration_learning_rate": agent.exploration_learning_rate,
+        "soc_edge_log_std_penalty": agent.soc_edge_log_std_penalty,
         "ppo_clip": agent.clip,
         "ppo_epochs": agent.epochs,
         "ppo_minibatch": agent.minibatch,
@@ -700,7 +714,7 @@ def main() -> None:
         "critic_grad_clip": agent.critic_grad_clip,
         "hidden_size": agent.hidden_size,
         "initial_log_std": agent.initial_log_std,
-        "exploration_mode": "state_dependent_log_std_delta_v1",
+        "exploration_mode": "state_dependent_log_std_delta_soc_edge_v2",
         "exploration_hidden_size": agent.net.exploration_hidden_size,
         "native_dt_minutes": csv_dt * 60.0,
         "control_dt_minutes": args.control_dt_minutes,
@@ -784,6 +798,7 @@ def main() -> None:
             "learning_rate": float(agent.opt.param_groups[0]["lr"]),
             "exploration_lr_multiplier": agent.exploration_lr_multiplier,
             "exploration_learning_rate": agent.exploration_learning_rate,
+            "soc_edge_log_std_penalty": agent.soc_edge_log_std_penalty,
             "ppo_clip": agent.clip,
             "ppo_epochs": agent.epochs,
             "ppo_minibatch": agent.minibatch,
@@ -794,7 +809,7 @@ def main() -> None:
             "critic_grad_clip": agent.critic_grad_clip,
             "hidden_size": agent.hidden_size,
             "initial_log_std": agent.initial_log_std,
-            "exploration_mode": "state_dependent_log_std_delta_v1",
+            "exploration_mode": "state_dependent_log_std_delta_soc_edge_v2",
             "exploration_hidden_size": agent.net.exploration_hidden_size,
             "initial_soc": float(cfg.SOC_min),
             "rollout_days": len(train_days),

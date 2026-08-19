@@ -26,6 +26,7 @@ from bess.core.settings import (
     PPO_HIDDEN_SIZE,
     PPO_INITIAL_LOG_STD,
     PPO_LAMBDA,
+    PPO_SOC_EDGE_LOG_STD_PENALTY,
     PPO_TORCH_THREADS,
 )
 
@@ -102,8 +103,11 @@ class ActorCritic(nn.Module):
         *,
         hidden_size: int = PPO_HIDDEN_SIZE,
         initial_log_std: float = PPO_INITIAL_LOG_STD,
+        soc_edge_log_std_penalty: float = 0.0,
     ):
         super().__init__()
+        self.obs_dim = int(obs_dim)
+        self.soc_edge_log_std_penalty = float(soc_edge_log_std_penalty)
         self.actor = _mlp(obs_dim, 1, hidden=hidden_size)
         self.critic = _mlp(obs_dim, 1, hidden=hidden_size)
         self.log_std = nn.Parameter(torch.full((1,), float(initial_log_std)))
@@ -124,7 +128,12 @@ class ActorCritic(nn.Module):
             nn.init.zeros_(self.log_std_delta[-1].weight)
 
     def effective_log_std(self, obs):
-        return self.log_std + self.log_std_delta(obs)
+        delta = self.log_std_delta(obs)
+        if self.obs_dim > 3 and self.soc_edge_log_std_penalty > 0.0:
+            soc = obs[..., 3:4]
+            edge_strength = (2.0 * soc - 1.0).square()
+            delta = delta - self.soc_edge_log_std_penalty * edge_strength
+        return self.log_std + delta
 
     def dist(self, obs):
         mean = self.actor(obs)
@@ -199,6 +208,7 @@ class PPOAgent:
         hidden_size=PPO_HIDDEN_SIZE,
         initial_log_std=PPO_INITIAL_LOG_STD,
         exploration_lr_multiplier=PPO_EXPLORATION_LR_MULTIPLIER,
+        soc_edge_log_std_penalty=PPO_SOC_EDGE_LOG_STD_PENALTY,
         actor_grad_clip=PPO_ACTOR_GRAD_CLIP,
         critic_grad_clip=PPO_CRITIC_GRAD_CLIP,
     ):
@@ -213,12 +223,14 @@ class PPOAgent:
         self.exploration_learning_rate = (
             self.learning_rate * self.exploration_lr_multiplier
         )
+        self.soc_edge_log_std_penalty = float(soc_edge_log_std_penalty)
         self.actor_grad_clip = float(actor_grad_clip)
         self.critic_grad_clip = float(critic_grad_clip)
         self.net = ActorCritic(
             self.obs_dim,
             hidden_size=self.hidden_size,
             initial_log_std=self.initial_log_std,
+            soc_edge_log_std_penalty=self.soc_edge_log_std_penalty,
         ).to(self.device)
         self.opt = self._build_optimizer()
         # Keep tiny step-by-step environment inference on CPU. Only large PPO
@@ -228,6 +240,7 @@ class PPOAgent:
                 self.obs_dim,
                 hidden_size=self.hidden_size,
                 initial_log_std=self.initial_log_std,
+                soc_edge_log_std_penalty=self.soc_edge_log_std_penalty,
             ).cpu()
         self._sync_collector()
         self.gamma, self.lam, self.clip = gamma, lam, clip
@@ -483,10 +496,11 @@ class PPOAgent:
             **dict(self.meta),
             "hidden_size": self.hidden_size,
             "initial_log_std": self.initial_log_std,
-            "exploration_mode": "state_dependent_log_std_delta_v1",
+            "exploration_mode": "state_dependent_log_std_delta_soc_edge_v2",
             "exploration_hidden_size": self.net.exploration_hidden_size,
             "exploration_lr_multiplier": self.exploration_lr_multiplier,
             "exploration_learning_rate": self.exploration_learning_rate,
+            "soc_edge_log_std_penalty": self.soc_edge_log_std_penalty,
         }
         self.meta = meta
         payload = {"algo": "ppo", "state_dict": state, "meta": meta}
@@ -499,6 +513,7 @@ class PPOAgent:
             self.obs_dim,
             hidden_size=self.hidden_size,
             initial_log_std=self.initial_log_std,
+            soc_edge_log_std_penalty=self.soc_edge_log_std_penalty,
         ).to(self.device)
         self.opt = self._build_optimizer()
         with torch.random.fork_rng(devices=[]):
@@ -506,6 +521,7 @@ class PPOAgent:
                 self.obs_dim,
                 hidden_size=self.hidden_size,
                 initial_log_std=self.initial_log_std,
+                soc_edge_log_std_penalty=self.soc_edge_log_std_penalty,
             ).cpu()
 
     def load(self, path):
@@ -538,6 +554,9 @@ class PPOAgent:
         self.exploration_learning_rate = (
             self.learning_rate * self.exploration_lr_multiplier
         )
+        self.soc_edge_log_std_penalty = float(
+            self.meta.get("soc_edge_log_std_penalty", 0.0)
+        )
         if checkpoint_hidden_size != self.hidden_size:
             self._rebuild_network_for_hidden_size(checkpoint_hidden_size)
 
@@ -555,5 +574,7 @@ class PPOAgent:
             for key in missing_exploration:
                 state_dict[key] = current_state[key]
         self.net.load_state_dict(state_dict)
+        self.net.soc_edge_log_std_penalty = self.soc_edge_log_std_penalty
+        self.collector_net.soc_edge_log_std_penalty = self.soc_edge_log_std_penalty
         self._sync_collector()
         self.net.eval()

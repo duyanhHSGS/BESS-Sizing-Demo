@@ -47,7 +47,13 @@ class PPOSquashedActionTests(unittest.TestCase):
         self.assertEqual(optimizer_exploration_ids, exploration_ids)
 
     def test_adaptive_exploration_starts_at_exact_scalar_baseline(self):
-        agent = PPOAgent(obs_dim=7, seed=3, device="cpu", initial_log_std=-1.5)
+        agent = PPOAgent(
+            obs_dim=7,
+            seed=3,
+            device="cpu",
+            initial_log_std=-1.5,
+            soc_edge_log_std_penalty=0.0,
+        )
         observations = torch.tensor(
             [
                 [0.0, 1.0, 0.2, 0.0, 0.4, 0.2, 1.0],
@@ -65,6 +71,27 @@ class PPOSquashedActionTests(unittest.TestCase):
             rtol=0.0,
             atol=0.0,
         )
+
+    def test_soc_edge_prior_narrows_only_near_soc_limits(self):
+        agent = PPOAgent(
+            obs_dim=7,
+            seed=3,
+            device="cpu",
+            initial_log_std=-1.5,
+            soc_edge_log_std_penalty=0.2,
+        )
+        observations = torch.tensor(
+            [
+                [0.0, 1.0, 0.2, 0.0, 0.4, 0.2, 1.0],
+                [1.0, 0.0, 0.8, 0.5, 1.0, 0.7, 1.0],
+                [0.0, -1.0, 0.4, 1.0, 0.2, 0.9, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        effective = agent.net.effective_log_std(observations)
+        expected = torch.tensor([[-1.7], [-1.5], [-1.7]], dtype=torch.float32)
+        torch.testing.assert_close(effective, expected, rtol=0.0, atol=1e-7)
 
     def test_adaptive_exploration_can_learn_different_state_widths(self):
         agent = PPOAgent(obs_dim=7, seed=3, device="cpu", initial_log_std=-1.5)
@@ -86,7 +113,7 @@ class PPOSquashedActionTests(unittest.TestCase):
         self.assertNotEqual(low_std, high_std)
 
     def test_pre_iq29_checkpoint_loads_with_zero_adaptive_delta(self):
-        source = PPOAgent(obs_dim=3, seed=5, device="cpu", initial_log_std=-1.5)
+        source = PPOAgent(obs_dim=7, seed=5, device="cpu", initial_log_std=-1.5)
         legacy_state = {
             key: value
             for key, value in source.net.state_dict().items()
@@ -104,11 +131,19 @@ class PPOSquashedActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = f"{directory}/legacy-ppo.pt"
             torch.save(payload, path)
-            loaded = PPOAgent(obs_dim=3, seed=9, device="cpu")
+            loaded = PPOAgent(
+                obs_dim=7,
+                seed=9,
+                device="cpu",
+                soc_edge_log_std_penalty=0.2,
+            )
             loaded.load(path)
 
         observations = torch.tensor(
-            [[0.1, 0.2, 0.3], [-0.4, 0.5, -0.6]],
+            [
+                [0.1, 0.2, 0.3, 0.0, 0.4, 0.5, 1.0],
+                [-0.4, 0.5, -0.6, 1.0, 0.2, 0.1, 0.0],
+            ],
             dtype=torch.float32,
         )
         effective = loaded.net.effective_log_std(observations)
