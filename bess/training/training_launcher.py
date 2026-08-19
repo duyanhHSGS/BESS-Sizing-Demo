@@ -514,15 +514,39 @@ def build_training_command(
                 str(_bounded_int(payload, "torch_threads", defaults["torch_threads"], minimum=1, maximum=128)),
             ]
         )
+        challenger_resets_enabled = _bool(
+            payload,
+            "challenger_resets_enabled",
+            defaults["challenger_resets_enabled"],
+        )
+        reset_optimizer_on_reanchor = _bool(
+            payload,
+            "reset_optimizer_on_reanchor",
+            defaults["reset_optimizer_on_reanchor"],
+        )
+        preserve_critic_on_reanchor = _bool(
+            payload,
+            "preserve_critic_on_reanchor",
+            defaults["preserve_critic_on_reanchor"],
+        )
+        if preserve_critic_on_reanchor and not reset_optimizer_on_reanchor:
+            raise TrainingLaunchError(
+                "preserve_critic_on_reanchor requires reset_optimizer_on_reanchor"
+            )
         cmd.append(
             "--challenger-resets-enabled"
-            if _bool(payload, "challenger_resets_enabled", defaults["challenger_resets_enabled"])
+            if challenger_resets_enabled
             else "--no-challenger-resets-enabled"
         )
         cmd.append(
             "--reset-optimizer-on-reanchor"
-            if _bool(payload, "reset_optimizer_on_reanchor", defaults["reset_optimizer_on_reanchor"])
+            if reset_optimizer_on_reanchor
             else "--no-reset-optimizer-on-reanchor"
+        )
+        cmd.append(
+            "--preserve-critic-on-reanchor"
+            if preserve_critic_on_reanchor
+            else "--no-preserve-critic-on-reanchor"
         )
         cmd.append(
             "--oracle-bc-enabled"

@@ -102,6 +102,7 @@ def test_generic_ppo_ui_exposes_and_sends_every_project_tunable() -> None:
         "challenger_reset_patience": "train-challenger-reset-patience",
         "challenger_resets_enabled": "train-challenger-resets-enabled",
         "reset_optimizer_on_reanchor": "train-reset-optimizer-on-reanchor",
+        "preserve_critic_on_reanchor": "train-preserve-critic-on-reanchor",
         "action_mismatch_shaping_scale": "train-action-mismatch-shaping-scale",
         "oracle_bc_enabled": "train-oracle-bc-enabled",
         "oracle_bc_max_epochs": "train-oracle-bc-max-epochs",

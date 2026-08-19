@@ -19,6 +19,7 @@ from bess.training.runners.train_ppo_dataset import (
     _oracle_dispatch_wear_cost_vnd,
     _oracle_teacher_action,
     _resolve_challenger,
+    _restore_reanchor_state,
     _save_accepted_champion,
 )
 
@@ -87,6 +88,35 @@ class PPOTrainingStateTests(unittest.TestCase):
         for key, value in agent.collector_net.state_dict().items():
             self.assertTrue(torch.equal(value, champion_state["network"][key].cpu()))
         self.assertEqual(agent.rng.bit_generator.state, rng_after_update)
+
+    def test_hybrid_reanchor_restores_policy_keeps_live_critic_and_clears_adam(self):
+        agent = PPOAgent(obs_dim=4, seed=17, device="cpu", epochs=1, minibatch=4)
+        agent.update(_make_buffer(agent, seed=10), 0.0)
+        champion_state = agent.snapshot_training_state()
+
+        agent.update(_make_buffer(agent, seed=11), 0.0)
+        live_critic = {
+            key: value.detach().clone()
+            for key, value in agent.net.critic.state_dict().items()
+        }
+        self.assertTrue(agent.opt.state)
+
+        _restore_reanchor_state(
+            agent,
+            champion_state,
+            preserve_critic=True,
+            reset_optimizer=True,
+        )
+
+        champion_network = champion_state["network"]
+        for key, value in agent.net.actor.state_dict().items():
+            self.assertTrue(torch.equal(value, champion_network[f"actor.{key}"]))
+        self.assertTrue(torch.equal(agent.net.log_std, champion_network["log_std"]))
+        for key, value in agent.net.critic.state_dict().items():
+            self.assertTrue(torch.equal(value, live_critic[key]))
+        self.assertFalse(agent.opt.state)
+        for key, value in agent.collector_net.state_dict().items():
+            self.assertTrue(torch.equal(value, agent.net.state_dict()[key].cpu()))
 
 
 class PPOOracleTeacherTests(unittest.TestCase):

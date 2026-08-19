@@ -150,6 +150,7 @@ class GenericPPOLauncherTests(unittest.TestCase):
                 "challenger_reset_patience": 8,
                 "challenger_resets_enabled": False,
                 "reset_optimizer_on_reanchor": False,
+                "preserve_critic_on_reanchor": False,
                 "action_mismatch_shaping_scale": 0.35,
                 "oracle_bc_enabled": False,
                 "oracle_bc_max_epochs": 77,
@@ -199,6 +200,7 @@ class GenericPPOLauncherTests(unittest.TestCase):
             self.assertEqual(command[command.index(flag) + 1], expected)
         self.assertIn("--no-challenger-resets-enabled", command)
         self.assertIn("--no-reset-optimizer-on-reanchor", command)
+        self.assertIn("--no-preserve-critic-on-reanchor", command)
         self.assertIn("--no-oracle-bc-enabled", command)
 
 

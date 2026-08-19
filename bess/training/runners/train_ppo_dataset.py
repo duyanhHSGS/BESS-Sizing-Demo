@@ -49,6 +49,7 @@ from bess.core.settings import (
     PPO_ORACLE_BC_MAX_EPOCHS,
     PPO_ORACLE_BC_MINIBATCH,
     PPO_ORACLE_BC_TARGET_MSE,
+    PPO_PRESERVE_CRITIC_ON_REANCHOR,
     PPO_RESET_OPTIMIZER_ON_REANCHOR,
     PPO_SEED,
     PPO_STEPS,
@@ -361,6 +362,28 @@ def _save_accepted_champion(agent: PPOAgent, checkpoint_path: Path, accepted: bo
     return True
 
 
+def _restore_reanchor_state(
+    agent: PPOAgent,
+    champion_state: dict,
+    *,
+    preserve_critic: bool,
+    reset_optimizer: bool,
+) -> None:
+    """Restore Champion policy while optionally carrying live critic homework forward."""
+    live_critic_state = None
+    if preserve_critic:
+        live_critic_state = {
+            key: value.detach().clone()
+            for key, value in agent.net.critic.state_dict().items()
+        }
+    agent.restore_training_state(champion_state)
+    if live_critic_state is not None:
+        agent.net.critic.load_state_dict(live_critic_state)
+        agent._sync_collector()
+    if reset_optimizer:
+        agent.opt.state.clear()
+
+
 def _champion_curve_point(
     *,
     steps: int,
@@ -423,6 +446,11 @@ def main() -> None:
         "--reset-optimizer-on-reanchor",
         action=argparse.BooleanOptionalAction,
         default=PPO_RESET_OPTIMIZER_ON_REANCHOR,
+    )
+    parser.add_argument(
+        "--preserve-critic-on-reanchor",
+        action=argparse.BooleanOptionalAction,
+        default=PPO_PRESERVE_CRITIC_ON_REANCHOR,
     )
     parser.add_argument(
         "--action-mismatch-shaping-scale",
@@ -505,6 +533,11 @@ def main() -> None:
         raise SystemExit("log-every-updates must be >= 1")
     if not 1 <= args.torch_threads <= 128:
         raise SystemExit("torch-threads must be in [1, 128]")
+    if args.preserve_critic_on_reanchor and not args.reset_optimizer_on_reanchor:
+        raise SystemExit(
+            "preserve-critic-on-reanchor requires reset-optimizer-on-reanchor so "
+            "live critic weights never inherit stale Champion Adam moments"
+        )
 
     require_float("gamma", args.gamma, minimum=0.0, maximum=1.0, minimum_inclusive=False)
     require_float("lambda", args.lambda_value, minimum=0.0, maximum=1.0)
@@ -622,6 +655,11 @@ def main() -> None:
         actor_grad_clip=args.actor_grad_clip,
         critic_grad_clip=args.critic_grad_clip,
     )
+    reanchor_scope = (
+        "champion_actor_log_std_keep_live_critic_fresh_adam"
+        if args.preserve_critic_on_reanchor
+        else REANCHOR_SCOPE
+    )
     agent.meta = {
         "p_ref_kw": p_ref,
         "e_cap_kwh": args.e_cap,
@@ -664,7 +702,8 @@ def main() -> None:
         "challenger_reset_patience": args.challenger_reset_patience,
         "challenger_resets_enabled": args.challenger_resets_enabled,
         "reset_optimizer_on_reanchor": args.reset_optimizer_on_reanchor,
-        "reanchor_scope": REANCHOR_SCOPE,
+        "preserve_critic_on_reanchor": args.preserve_critic_on_reanchor,
+        "reanchor_scope": reanchor_scope,
         "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,
         "oracle_behavior_cloning_max_epochs": args.oracle_bc_max_epochs,
         "oracle_behavior_cloning_learning_rate": args.oracle_bc_learning_rate,
@@ -743,7 +782,8 @@ def main() -> None:
             "challenger_reset_patience": args.challenger_reset_patience,
             "challenger_resets_enabled": args.challenger_resets_enabled,
             "reset_optimizer_on_reanchor": args.reset_optimizer_on_reanchor,
-            "reanchor_scope": REANCHOR_SCOPE,
+            "preserve_critic_on_reanchor": args.preserve_critic_on_reanchor,
+            "reanchor_scope": reanchor_scope,
             "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,
             "oracle_behavior_cloning_max_epochs": args.oracle_bc_max_epochs,
             "oracle_behavior_cloning_learning_rate": args.oracle_bc_learning_rate,
@@ -1002,12 +1042,16 @@ def main() -> None:
                 and allow_reset
                 and consecutive_rejections >= args.challenger_reset_patience
             ):
-                # IQ-21 policy-only re-anchoring improved critic diagnostics but hurt
-                # the Champion. Restore the complete trusted training state again,
-                # then clear Adam so the longer branch starts fresh from Champion.
-                agent.restore_training_state(champion_state)
-                if args.reset_optimizer_on_reanchor:
-                    agent.opt.state.clear()
+                # IQ-27 hybrid re-anchor: IQ-21 showed that preserving the live
+                # critic can improve value diagnostics, while IQ-20 showed stale
+                # Adam history hurts. Keep critic homework, restore only the trusted
+                # Champion policy/log_std, then start Adam fresh for both networks.
+                _restore_reanchor_state(
+                    agent,
+                    champion_state,
+                    preserve_critic=args.preserve_critic_on_reanchor,
+                    reset_optimizer=args.reset_optimizer_on_reanchor,
+                )
                 report["training"]["learner_resets"] += 1
                 consecutive_rejections = 0
                 reset_to_champion = True

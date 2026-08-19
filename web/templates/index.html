@@ -1493,6 +1493,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
               {% if ppo_tunables.challenger_resets_enabled %}checked{% endif %}> Champion re-anchor enabled</label>
           <label class="train-ppo-field"><input type="checkbox" id="train-reset-optimizer-on-reanchor"
               {% if ppo_tunables.reset_optimizer_on_reanchor %}checked{% endif %}> Fresh Adam on re-anchor</label>
+          <label class="train-ppo-field"><input type="checkbox" id="train-preserve-critic-on-reanchor"
+              {% if ppo_tunables.preserve_critic_on_reanchor %}checked{% endif %}> Keep live critic on re-anchor</label>
           <label class="train-ppo-field">Mismatch shaping scale <input type="number" id="train-action-mismatch-shaping-scale" min="0" max="100"
               step="0.05" value="{{ ppo_tunables.action_mismatch_shaping_scale }}"></label>
           <label class="train-ppo-field"><input type="checkbox" id="train-oracle-bc-enabled"
@@ -4959,6 +4961,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         challenger_reset_patience: Number(document.getElementById("train-challenger-reset-patience").value),
         challenger_resets_enabled: document.getElementById("train-challenger-resets-enabled").checked,
         reset_optimizer_on_reanchor: document.getElementById("train-reset-optimizer-on-reanchor").checked,
+        preserve_critic_on_reanchor: document.getElementById("train-preserve-critic-on-reanchor").checked,
         action_mismatch_shaping_scale: Number(document.getElementById("train-action-mismatch-shaping-scale").value),
         oracle_bc_enabled: document.getElementById("train-oracle-bc-enabled").checked,
         oracle_bc_max_epochs: Number(document.getElementById("train-oracle-bc-max-epochs").value),
