@@ -26,7 +26,37 @@ from bess.core.brain_runtime import (
 )
 from bess.core.common import RESULTS_DIR, score_month
 from bess.core.scenario_gen import MonthData
-from bess.core.settings import PPO_GAMMA, PPO_LAMBDA
+from bess.core.settings import (
+    PPO_ACTION_MISMATCH_SHAPING_SCALE,
+    PPO_ACTOR_GRAD_CLIP,
+    PPO_BC_FINE_TUNE_LOG_STD,
+    PPO_CHALLENGER_RESET_PATIENCE,
+    PPO_CHALLENGER_RESETS_ENABLED,
+    PPO_CLIP,
+    PPO_CRITIC_GRAD_CLIP,
+    PPO_ENTROPY_COEF,
+    PPO_FINE_TUNE_EPOCHS,
+    PPO_FIT_CONTROL_DT_MINUTES,
+    PPO_GAMMA,
+    PPO_HIDDEN_SIZE,
+    PPO_INITIAL_LOG_STD,
+    PPO_LAMBDA,
+    PPO_LEARNING_RATE,
+    PPO_LOG_EVERY_UPDATES,
+    PPO_MINIBATCH,
+    PPO_ORACLE_BC_ENABLED,
+    PPO_ORACLE_BC_LEARNING_RATE,
+    PPO_ORACLE_BC_MAX_EPOCHS,
+    PPO_ORACLE_BC_MINIBATCH,
+    PPO_ORACLE_BC_TARGET_MSE,
+    PPO_RESET_OPTIMIZER_ON_REANCHOR,
+    PPO_SEED,
+    PPO_STEPS,
+    PPO_TARGET_KL,
+    PPO_TORCH_THREADS,
+    PPO_VALIDATE_EVERY_UPDATES,
+    PPO_VALUE_COEF,
+)
 from bess.evaluation.baselines import run_drl_policy, run_no_bess
 from bess.evaluation.oracle.oracle_cache import (
     load_cached_training_dispatch,
@@ -42,20 +72,7 @@ from bess.training.training_reports import (
     write_report,
 )
 
-VALIDATE_EVERY_UPDATES = 1
-CHALLENGER_RESET_PATIENCE = 6
-CHALLENGER_RESETS_ENABLED = True
-RESET_OPTIMIZER_ON_REANCHOR = True
 REANCHOR_SCOPE = "full_state"
-ACTION_MISMATCH_SHAPING_SCALE = 0.1
-PPO_FIT_CONTROL_DT_MINUTES = 30.0
-PPO_FINE_TUNE_EPOCHS = 1
-ORACLE_BC_MAX_EPOCHS = 100
-ORACLE_BC_LEARNING_RATE = 1e-3
-ORACLE_BC_MINIBATCH = 256
-ORACLE_BC_TARGET_MSE = 1e-4
-PPO_BC_FINE_TUNE_LOG_STD = -1.6
-LOG_EVERY_UPDATES = 1
 
 
 def _action_mismatch_penalty_vnd(transition, *, timestep_hours: float, wear_vnd_per_kwh: float) -> float:
@@ -201,6 +218,10 @@ def _behavior_clone_actor(
     targets: np.ndarray,
     *,
     seed: int,
+    max_epochs: int = PPO_ORACLE_BC_MAX_EPOCHS,
+    learning_rate: float = PPO_ORACLE_BC_LEARNING_RATE,
+    minibatch: int = PPO_ORACLE_BC_MINIBATCH,
+    target_mse: float = PPO_ORACLE_BC_TARGET_MSE,
 ) -> dict[str, float | int]:
     """Supervised-fit the existing generic PPO actor to Oracle teacher actions."""
     if observations.ndim != 2 or observations.shape[1] != OBSERVATION_DIM:
@@ -210,7 +231,7 @@ def _behavior_clone_actor(
 
     obs_t = torch.as_tensor(observations, dtype=torch.float32, device=agent.device)
     target_t = torch.as_tensor(targets, dtype=torch.float32, device=agent.device)
-    optimizer = torch.optim.Adam(agent.net.actor.parameters(), lr=ORACLE_BC_LEARNING_RATE)
+    optimizer = torch.optim.Adam(agent.net.actor.parameters(), lr=learning_rate)
     rng = np.random.default_rng(seed)
 
     @torch.inference_mode()
@@ -220,11 +241,11 @@ def _behavior_clone_actor(
 
     initial_mse = full_mse()
     epochs_completed = 0
-    for epoch in range(ORACLE_BC_MAX_EPOCHS):
+    for epoch in range(max_epochs):
         indexes = rng.permutation(len(observations))
-        for start in range(0, len(indexes), ORACLE_BC_MINIBATCH):
+        for start in range(0, len(indexes), minibatch):
             mb = torch.as_tensor(
-                indexes[start:start + ORACLE_BC_MINIBATCH],
+                indexes[start:start + minibatch],
                 dtype=torch.long,
                 device=agent.device,
             )
@@ -234,7 +255,7 @@ def _behavior_clone_actor(
             loss.backward()
             optimizer.step()
         epochs_completed = epoch + 1
-        if full_mse() <= ORACLE_BC_TARGET_MSE:
+        if full_mse() <= target_mse:
             break
 
     final_mse = full_mse()
@@ -257,6 +278,10 @@ def _behavior_clone_critic(
     *,
     gamma: float,
     seed: int,
+    max_epochs: int = PPO_ORACLE_BC_MAX_EPOCHS,
+    learning_rate: float = PPO_ORACLE_BC_LEARNING_RATE,
+    minibatch: int = PPO_ORACLE_BC_MINIBATCH,
+    target_mse: float = PPO_ORACLE_BC_TARGET_MSE,
 ) -> dict[str, float | int]:
     """Warm-start the existing critic on Oracle-path discounted reward-to-go."""
     if observations.ndim != 2 or observations.shape[1] != OBSERVATION_DIM:
@@ -274,7 +299,7 @@ def _behavior_clone_critic(
 
     obs_t = torch.as_tensor(observations, dtype=torch.float32, device=agent.device)
     return_t = torch.as_tensor(returns, dtype=torch.float32, device=agent.device)
-    optimizer = torch.optim.Adam(agent.net.critic.parameters(), lr=ORACLE_BC_LEARNING_RATE)
+    optimizer = torch.optim.Adam(agent.net.critic.parameters(), lr=learning_rate)
     rng = np.random.default_rng(seed)
 
     @torch.inference_mode()
@@ -284,11 +309,11 @@ def _behavior_clone_critic(
 
     initial_mse = full_mse()
     epochs_completed = 0
-    for epoch in range(ORACLE_BC_MAX_EPOCHS):
+    for epoch in range(max_epochs):
         indexes = rng.permutation(len(observations))
-        for start in range(0, len(indexes), ORACLE_BC_MINIBATCH):
+        for start in range(0, len(indexes), minibatch):
             mb = torch.as_tensor(
-                indexes[start:start + ORACLE_BC_MINIBATCH],
+                indexes[start:start + minibatch],
                 dtype=torch.long,
                 device=agent.device,
             )
@@ -298,7 +323,7 @@ def _behavior_clone_critic(
             loss.backward()
             optimizer.step()
         epochs_completed = epoch + 1
-        if full_mse() <= ORACLE_BC_TARGET_MSE:
+        if full_mse() <= target_mse:
             break
 
     agent._sync_collector()
@@ -363,11 +388,75 @@ def main() -> None:
     parser.add_argument("--csv", required=True)
     parser.add_argument("--e-cap", type=float, required=True)
     parser.add_argument("--p-rated", type=float, required=True)
-    parser.add_argument("--steps", type=int, default=500_000)
+    parser.add_argument("--steps", type=int, default=PPO_STEPS)
+    parser.add_argument("--seed", type=int, default=PPO_SEED)
     parser.add_argument("--gamma", type=float, default=PPO_GAMMA)
     parser.add_argument("--lambda", dest="lambda_value", type=float, default=PPO_LAMBDA)
+    parser.add_argument("--learning-rate", type=float, default=PPO_LEARNING_RATE)
+    parser.add_argument("--ppo-clip", type=float, default=PPO_CLIP)
+    parser.add_argument("--ppo-epochs", type=int, default=PPO_FINE_TUNE_EPOCHS)
+    parser.add_argument("--minibatch", type=int, default=PPO_MINIBATCH)
+    parser.add_argument("--entropy-coef", type=float, default=PPO_ENTROPY_COEF)
+    parser.add_argument("--value-coef", type=float, default=PPO_VALUE_COEF)
+    parser.add_argument("--target-kl", type=float, default=PPO_TARGET_KL)
+    parser.add_argument("--actor-grad-clip", type=float, default=PPO_ACTOR_GRAD_CLIP)
+    parser.add_argument("--critic-grad-clip", type=float, default=PPO_CRITIC_GRAD_CLIP)
+    parser.add_argument("--hidden-size", type=int, default=PPO_HIDDEN_SIZE)
+    parser.add_argument("--initial-log-std", type=float, default=PPO_INITIAL_LOG_STD)
+    parser.add_argument("--ppo-start-log-std", type=float, default=PPO_BC_FINE_TUNE_LOG_STD)
+    parser.add_argument(
+        "--validate-every-updates",
+        type=int,
+        default=PPO_VALIDATE_EVERY_UPDATES,
+    )
+    parser.add_argument(
+        "--challenger-reset-patience",
+        type=int,
+        default=PPO_CHALLENGER_RESET_PATIENCE,
+    )
+    parser.add_argument(
+        "--challenger-resets-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=PPO_CHALLENGER_RESETS_ENABLED,
+    )
+    parser.add_argument(
+        "--reset-optimizer-on-reanchor",
+        action=argparse.BooleanOptionalAction,
+        default=PPO_RESET_OPTIMIZER_ON_REANCHOR,
+    )
+    parser.add_argument(
+        "--action-mismatch-shaping-scale",
+        type=float,
+        default=PPO_ACTION_MISMATCH_SHAPING_SCALE,
+    )
+    parser.add_argument(
+        "--oracle-bc-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=PPO_ORACLE_BC_ENABLED,
+    )
+    parser.add_argument(
+        "--oracle-bc-max-epochs",
+        type=int,
+        default=PPO_ORACLE_BC_MAX_EPOCHS,
+    )
+    parser.add_argument(
+        "--oracle-bc-learning-rate",
+        type=float,
+        default=PPO_ORACLE_BC_LEARNING_RATE,
+    )
+    parser.add_argument(
+        "--oracle-bc-minibatch",
+        type=int,
+        default=PPO_ORACLE_BC_MINIBATCH,
+    )
+    parser.add_argument(
+        "--oracle-bc-target-mse",
+        type=float,
+        default=PPO_ORACLE_BC_TARGET_MSE,
+    )
+    parser.add_argument("--log-every-updates", type=int, default=PPO_LOG_EVERY_UPDATES)
+    parser.add_argument("--torch-threads", type=int, default=PPO_TORCH_THREADS)
     parser.add_argument("--control-dt-minutes", type=float, required=True)
-    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--tag", type=str, default="")
     parser.add_argument("--billing", choices=("2tc", "tou"), default="2tc")
     parser.add_argument("--training-config", type=str, required=True)
@@ -377,10 +466,94 @@ def main() -> None:
     parser.add_argument("--obs-variant", choices=("brain7",), default="brain7")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     args = parser.parse_args()
-    if not math.isfinite(args.gamma) or not 0.0 < args.gamma <= 1.0:
-        raise SystemExit("gamma must be finite and in (0, 1]")
-    if not math.isfinite(args.lambda_value) or not 0.0 <= args.lambda_value <= 1.0:
-        raise SystemExit("lambda must be finite and in [0, 1]")
+
+    def require_float(
+        name: str,
+        value: float,
+        *,
+        minimum: float | None = None,
+        maximum: float | None = None,
+        minimum_inclusive: bool = True,
+    ) -> None:
+        if not math.isfinite(value):
+            raise SystemExit(f"{name} must be finite")
+        if minimum is not None:
+            below = value < minimum if minimum_inclusive else value <= minimum
+            if below:
+                bracket = "[" if minimum_inclusive else "("
+                raise SystemExit(f"{name} must be in {bracket}{minimum}, ...")
+        if maximum is not None and value > maximum:
+            raise SystemExit(f"{name} must be <= {maximum}")
+
+    if args.steps < 1:
+        raise SystemExit("steps must be >= 1")
+    if args.ppo_epochs < 1:
+        raise SystemExit("ppo-epochs must be >= 1")
+    if args.minibatch < 1:
+        raise SystemExit("minibatch must be >= 1")
+    if args.hidden_size < 1:
+        raise SystemExit("hidden-size must be >= 1")
+    if args.validate_every_updates < 1:
+        raise SystemExit("validate-every-updates must be >= 1")
+    if args.challenger_reset_patience < 1:
+        raise SystemExit("challenger-reset-patience must be >= 1")
+    if args.oracle_bc_max_epochs < 0:
+        raise SystemExit("oracle-bc-max-epochs must be >= 0")
+    if args.oracle_bc_minibatch < 1:
+        raise SystemExit("oracle-bc-minibatch must be >= 1")
+    if args.log_every_updates < 1:
+        raise SystemExit("log-every-updates must be >= 1")
+    if not 1 <= args.torch_threads <= 128:
+        raise SystemExit("torch-threads must be in [1, 128]")
+
+    require_float("gamma", args.gamma, minimum=0.0, maximum=1.0, minimum_inclusive=False)
+    require_float("lambda", args.lambda_value, minimum=0.0, maximum=1.0)
+    require_float(
+        "learning-rate",
+        args.learning_rate,
+        minimum=0.0,
+        maximum=1.0,
+        minimum_inclusive=False,
+    )
+    require_float("ppo-clip", args.ppo_clip, minimum=0.0, maximum=1.0, minimum_inclusive=False)
+    require_float("entropy-coef", args.entropy_coef, minimum=0.0, maximum=100.0)
+    require_float("value-coef", args.value_coef, minimum=0.0, maximum=100.0)
+    require_float("target-kl", args.target_kl, minimum=0.0, maximum=100.0, minimum_inclusive=False)
+    require_float(
+        "actor-grad-clip",
+        args.actor_grad_clip,
+        minimum=0.0,
+        maximum=1e6,
+        minimum_inclusive=False,
+    )
+    require_float(
+        "critic-grad-clip",
+        args.critic_grad_clip,
+        minimum=0.0,
+        maximum=1e6,
+        minimum_inclusive=False,
+    )
+    require_float("initial-log-std", args.initial_log_std, minimum=-20.0, maximum=5.0)
+    require_float("ppo-start-log-std", args.ppo_start_log_std, minimum=-20.0, maximum=5.0)
+    require_float(
+        "action-mismatch-shaping-scale",
+        args.action_mismatch_shaping_scale,
+        minimum=0.0,
+        maximum=100.0,
+    )
+    require_float(
+        "oracle-bc-learning-rate",
+        args.oracle_bc_learning_rate,
+        minimum=0.0,
+        maximum=1.0,
+        minimum_inclusive=False,
+    )
+    require_float(
+        "oracle-bc-target-mse",
+        args.oracle_bc_target_mse,
+        minimum=0.0,
+        maximum=1e9,
+    )
     if not math.isclose(
         args.control_dt_minutes,
         PPO_FIT_CONTROL_DT_MINUTES,
@@ -391,6 +564,7 @@ def main() -> None:
             "Generic PPO fit mode requires 30-minute control aligned to demand-meter blocks"
         )
 
+    torch.set_num_threads(args.torch_threads)
     configure_ppo_determinism(args.seed)
 
     days = load_training_days(args.csv, weather="csv")
@@ -432,11 +606,21 @@ def main() -> None:
     learner_device = resolve_ppo_device(args.device)
     agent = PPOAgent(
         OBSERVATION_DIM,
+        lr=args.learning_rate,
         gamma=gamma,
         lam=args.lambda_value,
-        epochs=PPO_FINE_TUNE_EPOCHS,
+        clip=args.ppo_clip,
+        epochs=args.ppo_epochs,
+        minibatch=args.minibatch,
+        ent_coef=args.entropy_coef,
+        vf_coef=args.value_coef,
+        target_kl=args.target_kl,
         seed=args.seed,
         device=learner_device,
+        hidden_size=args.hidden_size,
+        initial_log_std=args.initial_log_std,
+        actor_grad_clip=args.actor_grad_clip,
+        critic_grad_clip=args.critic_grad_clip,
     )
     agent.meta = {
         "p_ref_kw": p_ref,
@@ -447,14 +631,21 @@ def main() -> None:
         "battery_wear_cost": battery_wear_cost,
         "reward_mode": "brain_savings_vnd_v1",
         "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2",
-        "training_reward_shaping_scale": ACTION_MISMATCH_SHAPING_SCALE,
+        "training_reward_shaping_scale": args.action_mismatch_shaping_scale,
         "initial_soc": float(cfg.SOC_min),
         "gamma": gamma,
         "lambda": args.lambda_value,
         "learning_rate": float(agent.opt.param_groups[0]["lr"]),
+        "ppo_clip": agent.clip,
         "ppo_epochs": agent.epochs,
+        "ppo_minibatch": agent.minibatch,
         "entropy_coef": agent.ent_coef,
+        "value_coef": agent.vf_coef,
         "target_kl": agent.target_kl,
+        "actor_grad_clip": agent.actor_grad_clip,
+        "critic_grad_clip": agent.critic_grad_clip,
+        "hidden_size": agent.hidden_size,
+        "initial_log_std": agent.initial_log_std,
         "native_dt_minutes": csv_dt * 60.0,
         "control_dt_minutes": args.control_dt_minutes,
         "native_steps_per_action": native_steps,
@@ -469,14 +660,19 @@ def main() -> None:
         "data_overlap_note": "TEMP DEBUG: train/validation/test all use the full dataset",
         "training_augmentation_enabled": False,
         "rollout_decisions": decisions_per_episode,
-        "validation_every_updates": VALIDATE_EVERY_UPDATES,
-        "challenger_reset_patience": CHALLENGER_RESET_PATIENCE,
-        "challenger_resets_enabled": CHALLENGER_RESETS_ENABLED,
-        "reset_optimizer_on_reanchor": RESET_OPTIMIZER_ON_REANCHOR,
+        "validation_every_updates": args.validate_every_updates,
+        "challenger_reset_patience": args.challenger_reset_patience,
+        "challenger_resets_enabled": args.challenger_resets_enabled,
+        "reset_optimizer_on_reanchor": args.reset_optimizer_on_reanchor,
         "reanchor_scope": REANCHOR_SCOPE,
-        "oracle_behavior_cloning_enabled": True,
-        "oracle_behavior_cloning_max_epochs": ORACLE_BC_MAX_EPOCHS,
-        "oracle_behavior_cloning_learning_rate": ORACLE_BC_LEARNING_RATE,
+        "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,
+        "oracle_behavior_cloning_max_epochs": args.oracle_bc_max_epochs,
+        "oracle_behavior_cloning_learning_rate": args.oracle_bc_learning_rate,
+        "oracle_behavior_cloning_minibatch": args.oracle_bc_minibatch,
+        "oracle_behavior_cloning_target_mse": args.oracle_bc_target_mse,
+        "ppo_start_log_std_configured": args.ppo_start_log_std,
+        "log_every_updates": args.log_every_updates,
+        "torch_threads": args.torch_threads,
     }
     buffer = RolloutBuffer(decisions_per_episode, OBSERVATION_DIM)
 
@@ -520,7 +716,7 @@ def main() -> None:
             "battery_wear_cost": battery_wear_cost,
             "reward_mode": "brain_savings_vnd_v1",
             "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2",
-            "training_reward_shaping_scale": ACTION_MISMATCH_SHAPING_SCALE,
+            "training_reward_shaping_scale": args.action_mismatch_shaping_scale,
             "champion_scoring_uses_shaping": False,
         },
         "training": {
@@ -529,21 +725,33 @@ def main() -> None:
             "gamma": gamma,
             "lambda": args.lambda_value,
             "learning_rate": float(agent.opt.param_groups[0]["lr"]),
+            "ppo_clip": agent.clip,
             "ppo_epochs": agent.epochs,
+            "ppo_minibatch": agent.minibatch,
             "entropy_coef": agent.ent_coef,
+            "value_coef": agent.vf_coef,
             "target_kl": agent.target_kl,
+            "actor_grad_clip": agent.actor_grad_clip,
+            "critic_grad_clip": agent.critic_grad_clip,
+            "hidden_size": agent.hidden_size,
+            "initial_log_std": agent.initial_log_std,
             "initial_soc": float(cfg.SOC_min),
             "rollout_days": len(train_days),
             "rollout_decisions": decisions_per_episode,
             "augmentation_enabled": False,
-            "validation_every_updates": VALIDATE_EVERY_UPDATES,
-            "challenger_reset_patience": CHALLENGER_RESET_PATIENCE,
-            "challenger_resets_enabled": CHALLENGER_RESETS_ENABLED,
-            "reset_optimizer_on_reanchor": RESET_OPTIMIZER_ON_REANCHOR,
+            "validation_every_updates": args.validate_every_updates,
+            "challenger_reset_patience": args.challenger_reset_patience,
+            "challenger_resets_enabled": args.challenger_resets_enabled,
+            "reset_optimizer_on_reanchor": args.reset_optimizer_on_reanchor,
             "reanchor_scope": REANCHOR_SCOPE,
-            "oracle_behavior_cloning_enabled": True,
-            "oracle_behavior_cloning_max_epochs": ORACLE_BC_MAX_EPOCHS,
-            "oracle_behavior_cloning_learning_rate": ORACLE_BC_LEARNING_RATE,
+            "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,
+            "oracle_behavior_cloning_max_epochs": args.oracle_bc_max_epochs,
+            "oracle_behavior_cloning_learning_rate": args.oracle_bc_learning_rate,
+            "oracle_behavior_cloning_minibatch": args.oracle_bc_minibatch,
+            "oracle_behavior_cloning_target_mse": args.oracle_bc_target_mse,
+            "ppo_start_log_std_configured": args.ppo_start_log_std,
+            "log_every_updates": args.log_every_updates,
+            "torch_threads": args.torch_threads,
             "native_dt_minutes": csv_dt * 60.0,
             "control_dt_minutes": args.control_dt_minutes,
             "native_steps_per_action": native_steps,
@@ -643,46 +851,65 @@ def main() -> None:
 
     raw_initial_cost = validate_policy_cost()
     raw_initial_state = agent.snapshot_training_state()
-    teacher_observations, teacher_targets, teacher_rewards = _collect_oracle_teacher_samples(
-        train_months[0],
-        oracle_dispatch,
-        cfg,
-        power_scale_kw=p_ref,
-        battery_wear_cost=battery_wear_cost,
-        native_steps=native_steps,
-    )
-    bc_started = time.perf_counter()
-    bc_stats = _behavior_clone_actor(
-        agent,
-        teacher_observations,
-        teacher_targets,
-        seed=args.seed,
-    )
-    bc_stats.update(
-        _behavior_clone_critic(
-            agent,
-            teacher_observations,
-            teacher_rewards,
-            gamma=args.gamma,
-            seed=args.seed,
+    bc_stats: dict[str, float | int | bool] = {
+        "enabled": bool(args.oracle_bc_enabled),
+    }
+    post_bc_cost = raw_initial_cost
+    use_bc = False
+
+    if args.oracle_bc_enabled:
+        teacher_observations, teacher_targets, teacher_rewards = _collect_oracle_teacher_samples(
+            train_months[0],
+            oracle_dispatch,
+            cfg,
+            power_scale_kw=p_ref,
+            battery_wear_cost=battery_wear_cost,
+            native_steps=native_steps,
         )
-    )
-    bc_stats["seconds"] = time.perf_counter() - bc_started
-    bc_stats["teacher_mean_abs_action"] = float(np.mean(np.abs(teacher_targets)))
-    bc_stats["teacher_nonzero_action_pct"] = float(
-        np.mean(np.abs(teacher_targets) > 1e-6) * 100.0
-    )
-    post_bc_cost = validate_policy_cost()
-    use_bc = post_bc_cost < raw_initial_cost
-    if use_bc:
-        # The deterministic BC actor is already strong. Start PPO with a narrower
-        # stochastic cloud so exploration stays local instead of repeatedly asking
-        # physics to project huge infeasible actions. PPO may still learn log_std.
-        with torch.no_grad():
-            agent.net.log_std.fill_(PPO_BC_FINE_TUNE_LOG_STD)
-        agent._sync_collector()
+        bc_started = time.perf_counter()
+        bc_stats.update(
+            _behavior_clone_actor(
+                agent,
+                teacher_observations,
+                teacher_targets,
+                seed=args.seed,
+                max_epochs=args.oracle_bc_max_epochs,
+                learning_rate=args.oracle_bc_learning_rate,
+                minibatch=args.oracle_bc_minibatch,
+                target_mse=args.oracle_bc_target_mse,
+            )
+        )
+        bc_stats.update(
+            _behavior_clone_critic(
+                agent,
+                teacher_observations,
+                teacher_rewards,
+                gamma=args.gamma,
+                seed=args.seed,
+                max_epochs=args.oracle_bc_max_epochs,
+                learning_rate=args.oracle_bc_learning_rate,
+                minibatch=args.oracle_bc_minibatch,
+                target_mse=args.oracle_bc_target_mse,
+            )
+        )
+        bc_stats["seconds"] = time.perf_counter() - bc_started
+        bc_stats["teacher_mean_abs_action"] = float(np.mean(np.abs(teacher_targets)))
+        bc_stats["teacher_nonzero_action_pct"] = float(
+            np.mean(np.abs(teacher_targets) > 1e-6) * 100.0
+        )
+        post_bc_cost = validate_policy_cost()
+        use_bc = post_bc_cost < raw_initial_cost
+        if use_bc:
+            # Keep the strong deterministic teacher actor, but let the UI own the
+            # stochastic fine-tuning radius instead of hiding it in source code.
+            with torch.no_grad():
+                agent.net.log_std.fill_(args.ppo_start_log_std)
+            agent._sync_collector()
+        else:
+            agent.restore_training_state(raw_initial_state)
     else:
         agent.restore_training_state(raw_initial_state)
+
     bc_stats["ppo_start_log_std"] = float(agent.net.log_std.detach().cpu().item())
     bc_stats["ppo_start_action_std"] = float(agent.net.log_std.detach().exp().cpu().item())
 
@@ -696,14 +923,20 @@ def main() -> None:
         agent.meta["oracle_behavior_cloning"]
     )
     write_report(report_path, report)
-    print(
-        f"[train-ds] ORACLE TEACHER | {bc_stats['samples']} lessons | "
-        f"actor MSE {bc_stats['initial_mse']:.5f}->{bc_stats['final_mse']:.5f} | "
-        f"critic MSE {bc_stats['critic_initial_mse']:.3f}->{bc_stats['critic_final_mse']:.3f} | "
-        f"raw {raw_initial_cost/1e6:.1f}M -> BC {post_bc_cost/1e6:.1f}M | "
-        f"{'USE BC' if use_bc else 'KEEP RAW'}",
-        flush=True,
-    )
+    if args.oracle_bc_enabled:
+        print(
+            f"[train-ds] ORACLE TEACHER | {bc_stats['samples']} lessons | "
+            f"actor MSE {bc_stats['initial_mse']:.5f}->{bc_stats['final_mse']:.5f} | "
+            f"critic MSE {bc_stats['critic_initial_mse']:.3f}->{bc_stats['critic_final_mse']:.3f} | "
+            f"raw {raw_initial_cost/1e6:.1f}M -> BC {post_bc_cost/1e6:.1f}M | "
+            f"{'USE BC' if use_bc else 'KEEP RAW'}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[train-ds] ORACLE TEACHER DISABLED | raw {raw_initial_cost/1e6:.1f}M | KEEP RAW",
+            flush=True,
+        )
 
     champion_cost = _initialize_champion(agent, validate_policy_cost, checkpoint_path)
     champion_state = agent.snapshot_training_state()
@@ -765,15 +998,15 @@ def main() -> None:
             report["training"]["rejected_updates"] += 1
             consecutive_rejections += 1
             if (
-                CHALLENGER_RESETS_ENABLED
+                args.challenger_resets_enabled
                 and allow_reset
-                and consecutive_rejections >= CHALLENGER_RESET_PATIENCE
+                and consecutive_rejections >= args.challenger_reset_patience
             ):
                 # IQ-21 policy-only re-anchoring improved critic diagnostics but hurt
                 # the Champion. Restore the complete trusted training state again,
                 # then clear Adam so the longer branch starts fresh from Champion.
                 agent.restore_training_state(champion_state)
-                if RESET_OPTIMIZER_ON_REANCHOR:
+                if args.reset_optimizer_on_reanchor:
                     agent.opt.state.clear()
                 report["training"]["learner_resets"] += 1
                 consecutive_rejections = 0
@@ -820,7 +1053,7 @@ def main() -> None:
         # no longer free. Champion/test evaluation never includes this penalty.
         reward = (
             transition.reward_million_vnd
-            - ACTION_MISMATCH_SHAPING_SCALE * mismatch_penalty_vnd / REWARD_SCALE_VND
+            - args.action_mismatch_shaping_scale * mismatch_penalty_vnd / REWARD_SCALE_VND
         )
         buffer.add(obs, action, logp, reward, value, float(done), latent=latent)
         steps += 1
@@ -859,15 +1092,15 @@ def main() -> None:
             "action_mismatch_kwh": rollout_mismatch_kwh,
             "action_mismatch_penalty_vnd": rollout_mismatch_penalty_vnd,
             "action_mismatch_shaping_penalty_vnd": (
-                ACTION_MISMATCH_SHAPING_SCALE * rollout_mismatch_penalty_vnd
+                args.action_mismatch_shaping_scale * rollout_mismatch_penalty_vnd
             ),
             "mean_action_mismatch_penalty_vnd": rollout_mismatch_penalty_vnd / rollout_count,
         }
         report["training"]["updates"] = updates
         report["training"]["last_update"] = {**update_stats, **rollout_stats}
 
-        should_validate = updates % VALIDATE_EVERY_UPDATES == 0
-        should_log = updates == 1 or updates % LOG_EVERY_UPDATES == 0
+        should_validate = updates % args.validate_every_updates == 0
+        should_log = updates == 1 or updates % args.log_every_updates == 0
         if should_validate:
             point, candidate_cost, accepted, reset_to_champion = evaluate_live_candidate(
                 allow_reset=True

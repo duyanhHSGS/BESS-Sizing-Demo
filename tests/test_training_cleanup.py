@@ -111,6 +111,96 @@ class GenericPPOLauncherTests(unittest.TestCase):
                 15,
             )
 
+    def test_fit_command_forwards_all_generic_ppo_ui_tunables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            csv_path = base / "site.csv"
+            config_path = base / "training_config.json"
+            oracle_path = base / "oracle.json"
+            rows = ["date_iso,day_index,step,day_type,P_load_kW,P_pv_kW"]
+            rows.extend(
+                f"2026-01-01,1,{step},working,100,0" for step in range(96)
+            )
+            csv_path.write_text("\n".join(rows), encoding="utf-8")
+            config_path.write_text("{}", encoding="utf-8")
+            payload = {
+                "algo": "ppo",
+                "dataset_id": "test",
+                "e_cap_kwh": 1000.0,
+                "p_rated_kw": 500.0,
+                "obs_variant": "brain7",
+                "device": "cpu",
+                "steps": 12345,
+                "seed": 7,
+                "gamma": 0.98,
+                "lambda": 0.97,
+                "learning_rate": 2e-4,
+                "ppo_clip": 0.15,
+                "ppo_epochs": 3,
+                "minibatch": 64,
+                "entropy_coef": 0.02,
+                "value_coef": 0.7,
+                "target_kl": 0.03,
+                "actor_grad_clip": 0.4,
+                "critic_grad_clip": 0.8,
+                "hidden_size": 96,
+                "initial_log_std": -0.7,
+                "ppo_start_log_std": -1.25,
+                "validate_every_updates": 2,
+                "challenger_reset_patience": 8,
+                "challenger_resets_enabled": False,
+                "reset_optimizer_on_reanchor": False,
+                "action_mismatch_shaping_scale": 0.35,
+                "oracle_bc_enabled": False,
+                "oracle_bc_max_epochs": 77,
+                "oracle_bc_learning_rate": 0.002,
+                "oracle_bc_minibatch": 128,
+                "oracle_bc_target_mse": 0.0002,
+                "log_every_updates": 5,
+                "torch_threads": 4,
+            }
+            command = build_training_command(
+                payload,
+                csv_path,
+                config_path,
+                oracle_path,
+                python_executable="python",
+                base_dir=base,
+            )["cmd"]
+
+        expected_values = {
+            "--steps": "12345",
+            "--seed": "7",
+            "--gamma": "0.98",
+            "--lambda": "0.97",
+            "--learning-rate": "0.0002",
+            "--ppo-clip": "0.15",
+            "--ppo-epochs": "3",
+            "--minibatch": "64",
+            "--entropy-coef": "0.02",
+            "--value-coef": "0.7",
+            "--target-kl": "0.03",
+            "--actor-grad-clip": "0.4",
+            "--critic-grad-clip": "0.8",
+            "--hidden-size": "96",
+            "--initial-log-std": "-0.7",
+            "--ppo-start-log-std": "-1.25",
+            "--validate-every-updates": "2",
+            "--challenger-reset-patience": "8",
+            "--action-mismatch-shaping-scale": "0.35",
+            "--oracle-bc-max-epochs": "77",
+            "--oracle-bc-learning-rate": "0.002",
+            "--oracle-bc-minibatch": "128",
+            "--oracle-bc-target-mse": "0.0002",
+            "--log-every-updates": "5",
+            "--torch-threads": "4",
+        }
+        for flag, expected in expected_values.items():
+            self.assertEqual(command[command.index(flag) + 1], expected)
+        self.assertIn("--no-challenger-resets-enabled", command)
+        self.assertIn("--no-reset-optimizer-on-reanchor", command)
+        self.assertIn("--no-oracle-bc-enabled", command)
+
 
 class PPO2LauncherTests(unittest.TestCase):
     def test_reference_command_uses_internal_oracle_and_senior_step_budget(self):

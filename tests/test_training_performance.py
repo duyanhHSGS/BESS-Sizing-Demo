@@ -145,7 +145,16 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         self.assertGreater(result["blocked_action_pct"], 0.0)
 
     def test_seeded_update_stays_finite_and_checkpoint_is_compatible(self):
-        agent = PPOAgent(obs_dim=OBSERVATION_DIM, seed=11, epochs=1, minibatch=8)
+        agent = PPOAgent(
+            obs_dim=OBSERVATION_DIM,
+            seed=11,
+            epochs=1,
+            minibatch=8,
+            hidden_size=96,
+            initial_log_std=-0.8,
+            actor_grad_clip=0.4,
+            critic_grad_clip=0.8,
+        )
         buffer = RolloutBuffer(16, OBSERVATION_DIM)
         rng = np.random.default_rng(11)
         obs = rng.normal(size=OBSERVATION_DIM).astype(np.float32)
@@ -177,6 +186,7 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
             agent.save(path)
             loaded = PPOAgent(obs_dim=OBSERVATION_DIM)
             loaded.load(path)
+            self.assertEqual(loaded.hidden_size, 96)
             self.assertEqual(loaded.meta, agent.meta)
             probe = np.zeros(OBSERVATION_DIM, dtype=np.float32)
             self.assertEqual(loaded.predict_action(probe), agent.predict_action(probe))

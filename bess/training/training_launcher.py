@@ -13,8 +13,10 @@ from bess.core.settings import (
     PPO2_GAMMA,
     PPO2_LAM_ENERGY,
     PPO2_LAM_PEAK,
+    PPO_FIT_CONTROL_DT_MINUTES,
     PPO_GAMMA,
     PPO_LAMBDA,
+    PPO_TUNABLE_DEFAULTS,
 )
 from bess.evaluation.benchmark import detect_dt_hours
 from bess.evaluation.oracle import oracle_cache
@@ -38,7 +40,6 @@ TRAINING_MODULES = {
     "ppo2": "bess.training.runners.train_ppo2_dataset",
 }
 ALGORITHMS = SUPPORTED_POLICY_ALGORITHMS
-PPO_FIT_CONTROL_DT_MINUTES = 30.0
 
 
 class TrainingLaunchError(ValueError):
@@ -73,6 +74,20 @@ def _int(payload: dict, key: str, default: int) -> int:
     if value is None or value == "":
         return default
     return int(value)
+
+
+def _bool(payload: dict, key: str, default: bool) -> bool:
+    value = payload.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if value in (None, ""):
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise TrainingLaunchError(f"{key} must be true or false")
 
 
 def _bounded_int(
@@ -339,6 +354,7 @@ def build_training_command(
     if algo != "ppo2":
         cmd.extend(["--oracle-cache", str(oracle_cache_path)])
     if algo == "ppo":
+        defaults = PPO_TUNABLE_DEFAULTS
         gamma = _bounded_float(
             payload,
             "gamma",
@@ -354,17 +370,164 @@ def build_training_command(
             minimum=0.0,
             maximum=1.0,
         )
+        learning_rate = _bounded_float(
+            payload,
+            "learning_rate",
+            defaults["learning_rate"],
+            minimum=0.0,
+            minimum_inclusive=False,
+            maximum=1.0,
+        )
+        ppo_clip = _bounded_float(
+            payload,
+            "ppo_clip",
+            defaults["ppo_clip"],
+            minimum=0.0,
+            minimum_inclusive=False,
+            maximum=1.0,
+        )
+        entropy_coef = _bounded_float(
+            payload,
+            "entropy_coef",
+            defaults["entropy_coef"],
+            minimum=0.0,
+            maximum=100.0,
+        )
+        value_coef = _bounded_float(
+            payload,
+            "value_coef",
+            defaults["value_coef"],
+            minimum=0.0,
+            maximum=100.0,
+        )
+        target_kl = _bounded_float(
+            payload,
+            "target_kl",
+            defaults["target_kl"],
+            minimum=0.0,
+            minimum_inclusive=False,
+            maximum=100.0,
+        )
+        actor_grad_clip = _bounded_float(
+            payload,
+            "actor_grad_clip",
+            defaults["actor_grad_clip"],
+            minimum=0.0,
+            minimum_inclusive=False,
+            maximum=1e6,
+        )
+        critic_grad_clip = _bounded_float(
+            payload,
+            "critic_grad_clip",
+            defaults["critic_grad_clip"],
+            minimum=0.0,
+            minimum_inclusive=False,
+            maximum=1e6,
+        )
+        initial_log_std = _bounded_float(
+            payload,
+            "initial_log_std",
+            defaults["initial_log_std"],
+            minimum=-20.0,
+            maximum=5.0,
+        )
+        ppo_start_log_std = _bounded_float(
+            payload,
+            "ppo_start_log_std",
+            defaults["ppo_start_log_std"],
+            minimum=-20.0,
+            maximum=5.0,
+        )
+        mismatch_scale = _bounded_float(
+            payload,
+            "action_mismatch_shaping_scale",
+            defaults["action_mismatch_shaping_scale"],
+            minimum=0.0,
+            maximum=100.0,
+        )
+        oracle_bc_lr = _bounded_float(
+            payload,
+            "oracle_bc_learning_rate",
+            defaults["oracle_bc_learning_rate"],
+            minimum=0.0,
+            minimum_inclusive=False,
+            maximum=1.0,
+        )
+        oracle_bc_target_mse = _bounded_float(
+            payload,
+            "oracle_bc_target_mse",
+            defaults["oracle_bc_target_mse"],
+            minimum=0.0,
+            maximum=1e9,
+        )
         cmd.extend(
             [
                 "--steps",
-                str(_int(payload, "steps", 400_000)),
+                str(_bounded_int(payload, "steps", defaults["steps"], minimum=1)),
                 "--seed",
-                str(_int(payload, "seed", 0)),
+                str(_int(payload, "seed", defaults["seed"])),
                 "--gamma",
                 str(gamma),
                 "--lambda",
                 str(lambda_value),
+                "--learning-rate",
+                str(learning_rate),
+                "--ppo-clip",
+                str(ppo_clip),
+                "--ppo-epochs",
+                str(_bounded_int(payload, "ppo_epochs", defaults["ppo_epochs"], minimum=1, maximum=1000)),
+                "--minibatch",
+                str(_bounded_int(payload, "minibatch", defaults["minibatch"], minimum=1, maximum=1_000_000)),
+                "--entropy-coef",
+                str(entropy_coef),
+                "--value-coef",
+                str(value_coef),
+                "--target-kl",
+                str(target_kl),
+                "--actor-grad-clip",
+                str(actor_grad_clip),
+                "--critic-grad-clip",
+                str(critic_grad_clip),
+                "--hidden-size",
+                str(_bounded_int(payload, "hidden_size", defaults["hidden_size"], minimum=1, maximum=4096)),
+                "--initial-log-std",
+                str(initial_log_std),
+                "--ppo-start-log-std",
+                str(ppo_start_log_std),
+                "--validate-every-updates",
+                str(_bounded_int(payload, "validate_every_updates", defaults["validate_every_updates"], minimum=1, maximum=1_000_000)),
+                "--challenger-reset-patience",
+                str(_bounded_int(payload, "challenger_reset_patience", defaults["challenger_reset_patience"], minimum=1, maximum=1_000_000)),
+                "--action-mismatch-shaping-scale",
+                str(mismatch_scale),
+                "--oracle-bc-max-epochs",
+                str(_bounded_int(payload, "oracle_bc_max_epochs", defaults["oracle_bc_max_epochs"], minimum=0, maximum=1_000_000)),
+                "--oracle-bc-learning-rate",
+                str(oracle_bc_lr),
+                "--oracle-bc-minibatch",
+                str(_bounded_int(payload, "oracle_bc_minibatch", defaults["oracle_bc_minibatch"], minimum=1, maximum=1_000_000)),
+                "--oracle-bc-target-mse",
+                str(oracle_bc_target_mse),
+                "--log-every-updates",
+                str(_bounded_int(payload, "log_every_updates", defaults["log_every_updates"], minimum=1, maximum=1_000_000)),
+                "--torch-threads",
+                str(_bounded_int(payload, "torch_threads", defaults["torch_threads"], minimum=1, maximum=128)),
             ]
+        )
+        cmd.append(
+            "--challenger-resets-enabled"
+            if _bool(payload, "challenger_resets_enabled", defaults["challenger_resets_enabled"])
+            else "--no-challenger-resets-enabled"
+        )
+        cmd.append(
+            "--reset-optimizer-on-reanchor"
+            if _bool(payload, "reset_optimizer_on_reanchor", defaults["reset_optimizer_on_reanchor"])
+            else "--no-reset-optimizer-on-reanchor"
+        )
+        cmd.append(
+            "--oracle-bc-enabled"
+            if _bool(payload, "oracle_bc_enabled", defaults["oracle_bc_enabled"])
+            else "--no-oracle-bc-enabled"
         )
     elif algo == "ppo2":
         gamma = _bounded_float(

@@ -12,8 +12,7 @@ from bess.core.settings import (
     PPO2_GAMMA,
     PPO2_LAM_ENERGY,
     PPO2_LAM_PEAK,
-    PPO_GAMMA,
-    PPO_LAMBDA,
+    PPO_TUNABLE_DEFAULTS,
     SAMPLE_BATTERY_CANDIDATES,
 )
 from bess.dispatch import dispatch_runner, dispatch_store
@@ -585,8 +584,7 @@ def view_context():
         "benchmark": benchmark,
         "oracle": candidate_oracles[0]["oracle"] if candidate_oracles else _pending_oracle(),
         "sample_battery_candidates": SAMPLE_BATTERY_CANDIDATES,
-        "ppo_gamma": PPO_GAMMA,
-        "ppo_lambda": PPO_LAMBDA,
+        "ppo_tunables": PPO_TUNABLE_DEFAULTS,
         "ppo2_gamma": PPO2_GAMMA,
         "ppo2_lam_energy": PPO2_LAM_ENERGY,
         "ppo2_lam_peak": PPO2_LAM_PEAK,

@@ -70,10 +70,72 @@ SYSTEM_CONFIG = {
     },
 }
 
-# PPO training defaults. Generic PPO deliberately uses an undiscounted monthly
-# operating-cost objective; PPO2 remains separately configured below.
+# Generic PPO training defaults. These are the single source of truth for every
+# user-tunable numeric PPO control surfaced by the Training UI and forwarded to
+# train_ppo_dataset.py. Fixed environment/observation contracts are documented
+# separately and are not disguised as tunables.
 PPO_GAMMA = 1.0
 PPO_LAMBDA = 0.999
+PPO_STEPS = 400_000
+PPO_SEED = 0
+PPO_LEARNING_RATE = 1e-4
+PPO_CLIP = 0.2
+PPO_FINE_TUNE_EPOCHS = 1
+PPO_MINIBATCH = 256
+PPO_ENTROPY_COEF = 0.0
+PPO_VALUE_COEF = 0.5
+PPO_TARGET_KL = 0.02
+PPO_ACTOR_GRAD_CLIP = 0.5
+PPO_CRITIC_GRAD_CLIP = 0.5
+PPO_HIDDEN_SIZE = 64
+PPO_INITIAL_LOG_STD = -0.5
+PPO_BC_FINE_TUNE_LOG_STD = -1.5
+PPO_VALIDATE_EVERY_UPDATES = 1
+PPO_CHALLENGER_RESET_PATIENCE = 6
+PPO_CHALLENGER_RESETS_ENABLED = True
+PPO_RESET_OPTIMIZER_ON_REANCHOR = True
+PPO_ACTION_MISMATCH_SHAPING_SCALE = 0.25
+PPO_ORACLE_BC_ENABLED = True
+PPO_ORACLE_BC_MAX_EPOCHS = 100
+PPO_ORACLE_BC_LEARNING_RATE = 1e-3
+PPO_ORACLE_BC_MINIBATCH = 256
+PPO_ORACLE_BC_TARGET_MSE = 1e-4
+PPO_LOG_EVERY_UPDATES = 1
+PPO_TORCH_THREADS = 6
+PPO_FIT_CONTROL_DT_MINUTES = 30.0
+
+PPO_TUNABLE_DEFAULTS = {
+    "steps": PPO_STEPS,
+    "seed": PPO_SEED,
+    "gamma": PPO_GAMMA,
+    "lambda": PPO_LAMBDA,
+    "learning_rate": PPO_LEARNING_RATE,
+    "ppo_clip": PPO_CLIP,
+    "ppo_epochs": PPO_FINE_TUNE_EPOCHS,
+    "minibatch": PPO_MINIBATCH,
+    "entropy_coef": PPO_ENTROPY_COEF,
+    "value_coef": PPO_VALUE_COEF,
+    "target_kl": PPO_TARGET_KL,
+    "actor_grad_clip": PPO_ACTOR_GRAD_CLIP,
+    "critic_grad_clip": PPO_CRITIC_GRAD_CLIP,
+    "hidden_size": PPO_HIDDEN_SIZE,
+    "initial_log_std": PPO_INITIAL_LOG_STD,
+    "ppo_start_log_std": PPO_BC_FINE_TUNE_LOG_STD,
+    "validate_every_updates": PPO_VALIDATE_EVERY_UPDATES,
+    "challenger_reset_patience": PPO_CHALLENGER_RESET_PATIENCE,
+    "challenger_resets_enabled": PPO_CHALLENGER_RESETS_ENABLED,
+    "reset_optimizer_on_reanchor": PPO_RESET_OPTIMIZER_ON_REANCHOR,
+    "action_mismatch_shaping_scale": PPO_ACTION_MISMATCH_SHAPING_SCALE,
+    "oracle_bc_enabled": PPO_ORACLE_BC_ENABLED,
+    "oracle_bc_max_epochs": PPO_ORACLE_BC_MAX_EPOCHS,
+    "oracle_bc_learning_rate": PPO_ORACLE_BC_LEARNING_RATE,
+    "oracle_bc_minibatch": PPO_ORACLE_BC_MINIBATCH,
+    "oracle_bc_target_mse": PPO_ORACLE_BC_TARGET_MSE,
+    "log_every_updates": PPO_LOG_EVERY_UPDATES,
+    "torch_threads": PPO_TORCH_THREADS,
+}
+
+# PPO2 remains separately configured below.
 PPO2_GAMMA = 1.0
 PPO2_LAM_ENERGY = 0.97
 PPO2_LAM_PEAK = 0.97

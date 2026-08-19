@@ -18,9 +18,17 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 import torch
 from torch import nn
 
-from bess.core.settings import PPO_GAMMA, PPO_LAMBDA
+from bess.core.settings import (
+    PPO_ACTOR_GRAD_CLIP,
+    PPO_CRITIC_GRAD_CLIP,
+    PPO_GAMMA,
+    PPO_HIDDEN_SIZE,
+    PPO_INITIAL_LOG_STD,
+    PPO_LAMBDA,
+    PPO_TORCH_THREADS,
+)
 
-torch.set_num_threads(6)
+torch.set_num_threads(PPO_TORCH_THREADS)
 
 
 def configure_ppo_determinism(seed: int) -> None:
@@ -78,7 +86,7 @@ def resolve_ppo_device(device: str = "auto") -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def _mlp(inp, out, hidden=64):
+def _mlp(inp, out, hidden=PPO_HIDDEN_SIZE):
     return nn.Sequential(
         nn.Linear(inp, hidden), nn.Tanh(),
         nn.Linear(hidden, hidden), nn.Tanh(),
@@ -87,11 +95,17 @@ def _mlp(inp, out, hidden=64):
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim: int):
+    def __init__(
+        self,
+        obs_dim: int,
+        *,
+        hidden_size: int = PPO_HIDDEN_SIZE,
+        initial_log_std: float = PPO_INITIAL_LOG_STD,
+    ):
         super().__init__()
-        self.actor = _mlp(obs_dim, 1)
-        self.critic = _mlp(obs_dim, 1)
-        self.log_std = nn.Parameter(torch.full((1,), -0.5))
+        self.actor = _mlp(obs_dim, 1, hidden=hidden_size)
+        self.critic = _mlp(obs_dim, 1, hidden=hidden_size)
+        self.log_std = nn.Parameter(torch.full((1,), float(initial_log_std)))
 
     def dist(self, obs):
         mean = self.actor(obs)
@@ -149,18 +163,48 @@ def _gae_advantages(
 
 
 class PPOAgent:
-    def __init__(self, obs_dim: int, lr=1e-4, gamma=PPO_GAMMA, lam=PPO_LAMBDA,
-                 clip=0.2, epochs=4, minibatch=256, ent_coef=0.0,
-                 vf_coef=0.5, target_kl=0.02, seed=0, device="auto"):
+    def __init__(
+        self,
+        obs_dim: int,
+        lr=1e-4,
+        gamma=PPO_GAMMA,
+        lam=PPO_LAMBDA,
+        clip=0.2,
+        epochs=4,
+        minibatch=256,
+        ent_coef=0.0,
+        vf_coef=0.5,
+        target_kl=0.02,
+        seed=0,
+        device="auto",
+        hidden_size=PPO_HIDDEN_SIZE,
+        initial_log_std=PPO_INITIAL_LOG_STD,
+        actor_grad_clip=PPO_ACTOR_GRAD_CLIP,
+        critic_grad_clip=PPO_CRITIC_GRAD_CLIP,
+    ):
         torch.manual_seed(seed)
         self.rng = np.random.default_rng(seed)
         self.device = torch.device(resolve_ppo_device(device))
-        self.net = ActorCritic(obs_dim).to(self.device)
-        self.opt = torch.optim.Adam(self.net.parameters(), lr=lr)
+        self.obs_dim = int(obs_dim)
+        self.hidden_size = int(hidden_size)
+        self.initial_log_std = float(initial_log_std)
+        self.learning_rate = float(lr)
+        self.actor_grad_clip = float(actor_grad_clip)
+        self.critic_grad_clip = float(critic_grad_clip)
+        self.net = ActorCritic(
+            self.obs_dim,
+            hidden_size=self.hidden_size,
+            initial_log_std=self.initial_log_std,
+        ).to(self.device)
+        self.opt = torch.optim.Adam(self.net.parameters(), lr=self.learning_rate)
         # Keep tiny step-by-step environment inference on CPU. Only large PPO
         # minibatches cross to CUDA, avoiding thousands of tiny PCIe transfers.
         with torch.random.fork_rng(devices=[]):
-            self.collector_net = ActorCritic(obs_dim).cpu()
+            self.collector_net = ActorCritic(
+                self.obs_dim,
+                hidden_size=self.hidden_size,
+                initial_log_std=self.initial_log_std,
+            ).cpu()
         self._sync_collector()
         self.gamma, self.lam, self.clip = gamma, lam, clip
         self.epochs, self.minibatch = epochs, minibatch
@@ -302,8 +346,14 @@ class PPOAgent:
                 loss = pi_loss + self.vf_coef * v_loss - self.ent_coef * ent
                 self.opt.zero_grad()
                 loss.backward()
-                actor_grad_norm = nn.utils.clip_grad_norm_(actor_params, 0.5)
-                critic_grad_norm = nn.utils.clip_grad_norm_(critic_params, 0.5)
+                actor_grad_norm = nn.utils.clip_grad_norm_(
+                    actor_params,
+                    self.actor_grad_clip,
+                )
+                critic_grad_norm = nn.utils.clip_grad_norm_(
+                    critic_params,
+                    self.critic_grad_clip,
+                )
                 self.opt.step()
 
                 pi_losses.append(float(pi_loss.detach().cpu()))
@@ -359,9 +409,30 @@ class PPOAgent:
             key: value.detach().cpu()
             for key, value in self.net.state_dict().items()
         }
-        payload = {"algo": "ppo", "state_dict": state,
-                   "meta": dict(self.meta)}
+        meta = {
+            **dict(self.meta),
+            "hidden_size": self.hidden_size,
+            "initial_log_std": self.initial_log_std,
+        }
+        self.meta = meta
+        payload = {"algo": "ppo", "state_dict": state, "meta": meta}
         torch.save(payload, path)
+
+    def _rebuild_network_for_hidden_size(self, hidden_size: int) -> None:
+        """Recreate actor/critic shells before loading a non-default-width checkpoint."""
+        self.hidden_size = int(hidden_size)
+        self.net = ActorCritic(
+            self.obs_dim,
+            hidden_size=self.hidden_size,
+            initial_log_std=self.initial_log_std,
+        ).to(self.device)
+        self.opt = torch.optim.Adam(self.net.parameters(), lr=self.learning_rate)
+        with torch.random.fork_rng(devices=[]):
+            self.collector_net = ActorCritic(
+                self.obs_dim,
+                hidden_size=self.hidden_size,
+                initial_log_std=self.initial_log_std,
+            ).cpu()
 
     def load(self, path):
         ck = torch.load(path, map_location=self.device)
@@ -369,10 +440,26 @@ class PPOAgent:
             algo = str(ck.get("algo") or "ppo").lower()
             if algo != "ppo":
                 raise ValueError(f"checkpoint algorithm {algo!r} is not PPO")
-            self.net.load_state_dict(ck["state_dict"])
+            state_dict = ck["state_dict"]
             self.meta = ck.get("meta", {}) or {}
         else:                                   # legacy raw PPO state_dict
-            self.net.load_state_dict(ck)
+            state_dict = ck
             self.meta = {}
+
+        actor_input = state_dict.get("actor.0.weight")
+        inferred_hidden_size = (
+            int(actor_input.shape[0])
+            if actor_input is not None
+            else self.hidden_size
+        )
+        checkpoint_hidden_size = int(
+            self.meta.get("hidden_size", inferred_hidden_size)
+        )
+        self.initial_log_std = float(
+            self.meta.get("initial_log_std", self.initial_log_std)
+        )
+        if checkpoint_hidden_size != self.hidden_size:
+            self._rebuild_network_for_hidden_size(checkpoint_hidden_size)
+        self.net.load_state_dict(state_dict)
         self._sync_collector()
         self.net.eval()

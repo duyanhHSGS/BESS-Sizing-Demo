@@ -1453,12 +1453,62 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             Custom Δt (minutes)
             <input type="number" id="train-control-dt-custom" min="1" max="30" step="1">
           </label>
-          <label class="train-ppo-field">Steps <input type="number" id="train-steps" value="400000"
-              step="50000"></label>
+          <label class="train-ppo-field">Steps <input type="number" id="train-steps" min="1"
+              step="50000" value="{{ ppo_tunables.steps }}"></label>
+          <label class="train-ppo-field">Seed <input type="number" id="train-seed" step="1"
+              value="{{ ppo_tunables.seed }}"></label>
           <label class="train-ppo-field">Gamma <input type="number" id="train-gamma" min="0.0001" max="1"
-              step="0.0001" value="{{ ppo_gamma }}"></label>
+              step="0.0001" value="{{ ppo_tunables.gamma }}"></label>
           <label class="train-ppo-field">Lambda <input type="number" id="train-lambda" min="0" max="1"
-              step="0.001" value="{{ ppo_lambda }}"></label>
+              step="0.001" value="{{ ppo_tunables['lambda'] }}"></label>
+          <label class="train-ppo-field">Learning rate <input type="number" id="train-learning-rate" min="0.000000001" max="1"
+              step="0.00001" value="{{ ppo_tunables.learning_rate }}"></label>
+          <label class="train-ppo-field">PPO clip <input type="number" id="train-ppo-clip" min="0.000001" max="1"
+              step="0.01" value="{{ ppo_tunables.ppo_clip }}"></label>
+          <label class="train-ppo-field">PPO epochs / rollout <input type="number" id="train-ppo-epochs" min="1" max="1000"
+              step="1" value="{{ ppo_tunables.ppo_epochs }}"></label>
+          <label class="train-ppo-field">PPO minibatch <input type="number" id="train-minibatch" min="1" max="1000000"
+              step="1" value="{{ ppo_tunables.minibatch }}"></label>
+          <label class="train-ppo-field">Entropy coef <input type="number" id="train-entropy-coef" min="0" max="100"
+              step="0.001" value="{{ ppo_tunables.entropy_coef }}"></label>
+          <label class="train-ppo-field">Value coef <input type="number" id="train-value-coef" min="0" max="100"
+              step="0.05" value="{{ ppo_tunables.value_coef }}"></label>
+          <label class="train-ppo-field">Target KL <input type="number" id="train-target-kl" min="0.000001" max="100"
+              step="0.001" value="{{ ppo_tunables.target_kl }}"></label>
+          <label class="train-ppo-field">Actor grad clip <input type="number" id="train-actor-grad-clip" min="0.000001" max="1000000"
+              step="0.05" value="{{ ppo_tunables.actor_grad_clip }}"></label>
+          <label class="train-ppo-field">Critic grad clip <input type="number" id="train-critic-grad-clip" min="0.000001" max="1000000"
+              step="0.05" value="{{ ppo_tunables.critic_grad_clip }}"></label>
+          <label class="train-ppo-field">Hidden units / layer <input type="number" id="train-hidden-size" min="1" max="4096"
+              step="1" value="{{ ppo_tunables.hidden_size }}"></label>
+          <label class="train-ppo-field">Raw initial log std <input type="number" id="train-initial-log-std" min="-20" max="5"
+              step="0.1" value="{{ ppo_tunables.initial_log_std }}"></label>
+          <label class="train-ppo-field">BC PPO start log std <input type="number" id="train-ppo-start-log-std" min="-20" max="5"
+              step="0.1" value="{{ ppo_tunables.ppo_start_log_std }}"></label>
+          <label class="train-ppo-field">Validate every N updates <input type="number" id="train-validate-every-updates" min="1" max="1000000"
+              step="1" value="{{ ppo_tunables.validate_every_updates }}"></label>
+          <label class="train-ppo-field">Reject runway / reset patience <input type="number" id="train-challenger-reset-patience" min="1" max="1000000"
+              step="1" value="{{ ppo_tunables.challenger_reset_patience }}"></label>
+          <label class="train-ppo-field"><input type="checkbox" id="train-challenger-resets-enabled"
+              {% if ppo_tunables.challenger_resets_enabled %}checked{% endif %}> Champion re-anchor enabled</label>
+          <label class="train-ppo-field"><input type="checkbox" id="train-reset-optimizer-on-reanchor"
+              {% if ppo_tunables.reset_optimizer_on_reanchor %}checked{% endif %}> Fresh Adam on re-anchor</label>
+          <label class="train-ppo-field">Mismatch shaping scale <input type="number" id="train-action-mismatch-shaping-scale" min="0" max="100"
+              step="0.05" value="{{ ppo_tunables.action_mismatch_shaping_scale }}"></label>
+          <label class="train-ppo-field"><input type="checkbox" id="train-oracle-bc-enabled"
+              {% if ppo_tunables.oracle_bc_enabled %}checked{% endif %}> Oracle BC warm start enabled</label>
+          <label class="train-ppo-field">Oracle BC max epochs <input type="number" id="train-oracle-bc-max-epochs" min="0" max="1000000"
+              step="1" value="{{ ppo_tunables.oracle_bc_max_epochs }}"></label>
+          <label class="train-ppo-field">Oracle BC learning rate <input type="number" id="train-oracle-bc-learning-rate" min="0.000000001" max="1"
+              step="0.0001" value="{{ ppo_tunables.oracle_bc_learning_rate }}"></label>
+          <label class="train-ppo-field">Oracle BC minibatch <input type="number" id="train-oracle-bc-minibatch" min="1" max="1000000"
+              step="1" value="{{ ppo_tunables.oracle_bc_minibatch }}"></label>
+          <label class="train-ppo-field">Oracle BC target MSE <input type="number" id="train-oracle-bc-target-mse" min="0" max="1000000000"
+              step="0.0001" value="{{ ppo_tunables.oracle_bc_target_mse }}"></label>
+          <label class="train-ppo-field">Log every N updates <input type="number" id="train-log-every-updates" min="1" max="1000000"
+              step="1" value="{{ ppo_tunables.log_every_updates }}"></label>
+          <label class="train-ppo-field">Torch CPU threads <input type="number" id="train-torch-threads" min="1" max="128"
+              step="1" value="{{ ppo_tunables.torch_threads }}"></label>
 
           <label class="train-ppo2-field" style="display:none">Steps <input type="number" id="train-ppo2-steps" value="1500000" min="1" step="50000"></label>
           <label class="train-ppo2-field" style="display:none">Seed <input type="number" id="train-ppo2-seed" value="0" step="1"></label>
@@ -4595,7 +4645,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       const datasetRange = dataset.validation_range ? dataset.validation_range.join(" → ") : meta.test_range?.join(" → ");
       const hyperparameters = checkpoint.algo === "ppo2"
         ? `gamma ${training.gamma ?? meta.gamma ?? "?"}, λE ${training.lambda_energy ?? meta.lambda_energy ?? "?"}, λP ${training.lambda_peak_selected ?? meta.lambda_peak_selected ?? meta.lambda_peak ?? "?"}, actor/critic LR ${training.actor_lr ?? meta.actor_learning_rate ?? "?"}/${training.critic_lr ?? meta.critic_learning_rate ?? "?"}, PPO clip ${training.ppo_clip ?? meta.ppo_clip ?? "?"}`
-        : `gamma ${training.gamma ?? meta.gamma ?? "?"}, lambda ${training.lambda ?? meta.lambda ?? "?"}`;
+        : `gamma ${training.gamma ?? meta.gamma ?? "?"}, lambda ${training.lambda ?? meta.lambda ?? "?"}, LR ${training.learning_rate ?? meta.learning_rate ?? "?"}, clip ${training.ppo_clip ?? meta.ppo_clip ?? "?"}, epochs ${training.ppo_epochs ?? meta.ppo_epochs ?? "?"}, minibatch ${training.ppo_minibatch ?? meta.ppo_minibatch ?? "?"}, entropy ${training.entropy_coef ?? meta.entropy_coef ?? "?"}, value ${training.value_coef ?? meta.value_coef ?? "?"}, target KL ${training.target_kl ?? meta.target_kl ?? "?"}, grad clip A/C ${training.actor_grad_clip ?? meta.actor_grad_clip ?? "?"}/${training.critic_grad_clip ?? meta.critic_grad_clip ?? "?"}, hidden ${training.hidden_size ?? meta.hidden_size ?? "?"}, raw logσ ${training.initial_log_std ?? meta.initial_log_std ?? "?"}, PPO-start logσ ${training.ppo_start_log_std_configured ?? meta.ppo_start_log_std_configured ?? "?"}, validate/${training.validation_every_updates ?? meta.validation_every_updates ?? "?"}, reset patience ${training.challenger_reset_patience ?? meta.challenger_reset_patience ?? "?"}, mismatch ×${saved.economics?.training_reward_shaping_scale ?? meta.training_reward_shaping_scale ?? "?"}, BC ${training.oracle_behavior_cloning_enabled ?? meta.oracle_behavior_cloning_enabled ?? "?"}, BC epochs/LR/MB/MSE ${training.oracle_behavior_cloning_max_epochs ?? meta.oracle_behavior_cloning_max_epochs ?? "?"}/${training.oracle_behavior_cloning_learning_rate ?? meta.oracle_behavior_cloning_learning_rate ?? "?"}/${training.oracle_behavior_cloning_minibatch ?? meta.oracle_behavior_cloning_minibatch ?? "?"}/${training.oracle_behavior_cloning_target_mse ?? meta.oracle_behavior_cloning_target_mse ?? "?"}, torch threads ${training.torch_threads ?? meta.torch_threads ?? "?"}`;
       const details = [
         ["Algorithm", checkpoint.algo || saved.algorithm],
         ["Brain contract", meta.obs_variant === "brain7"
@@ -4733,7 +4783,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       } else if (!validControlDt) {
         trainPlan.textContent = `Invalid control Δt ${controlDt}m. It must be a native-or-coarser multiple that divides both 30 minutes and 24 hours.`;
       } else {
-        const budget = `${trainSteps.value} PPO steps; gamma ${trainGamma.value}; lambda ${trainLambda.value}`;
+        const budget = `${trainSteps.value} PPO steps; seed ${document.getElementById("train-seed").value}; gamma ${trainGamma.value}; lambda ${trainLambda.value}; LR ${document.getElementById("train-learning-rate").value}; epochs ${document.getElementById("train-ppo-epochs").value}; clip ${document.getElementById("train-ppo-clip").value}; start logσ ${document.getElementById("train-ppo-start-log-std").value}; mismatch ×${document.getElementById("train-action-mismatch-shaping-scale").value}; reset patience ${document.getElementById("train-challenger-reset-patience").value}`;
         const brainLabel = "BrainEnv (7 eyes)";
         trainPlan.textContent = `Checking required data... PPO FIT TEST: ${brainLabel}; ALL ${days} supplied day(s) are reused for training, validation, and test; device ${trainDevice.value}; ${budget}; sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action); E/P ${trainEcap.value}/${trainPrated.value}. This measures fit/memorization ONLY, not unseen-data generalization.`;
         trainOracleStatusTimer = setTimeout(refreshTrainingOracleStatus, 250);
@@ -4890,8 +4940,33 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         val_days: Number(trainValDays.value),
         test_days: Number(trainTestDays.value),
         steps: Number(trainSteps.value),
+        seed: Number(document.getElementById("train-seed").value),
         gamma: Number(trainGamma.value),
         lambda: Number(trainLambda.value),
+        learning_rate: Number(document.getElementById("train-learning-rate").value),
+        ppo_clip: Number(document.getElementById("train-ppo-clip").value),
+        ppo_epochs: Number(document.getElementById("train-ppo-epochs").value),
+        minibatch: Number(document.getElementById("train-minibatch").value),
+        entropy_coef: Number(document.getElementById("train-entropy-coef").value),
+        value_coef: Number(document.getElementById("train-value-coef").value),
+        target_kl: Number(document.getElementById("train-target-kl").value),
+        actor_grad_clip: Number(document.getElementById("train-actor-grad-clip").value),
+        critic_grad_clip: Number(document.getElementById("train-critic-grad-clip").value),
+        hidden_size: Number(document.getElementById("train-hidden-size").value),
+        initial_log_std: Number(document.getElementById("train-initial-log-std").value),
+        ppo_start_log_std: Number(document.getElementById("train-ppo-start-log-std").value),
+        validate_every_updates: Number(document.getElementById("train-validate-every-updates").value),
+        challenger_reset_patience: Number(document.getElementById("train-challenger-reset-patience").value),
+        challenger_resets_enabled: document.getElementById("train-challenger-resets-enabled").checked,
+        reset_optimizer_on_reanchor: document.getElementById("train-reset-optimizer-on-reanchor").checked,
+        action_mismatch_shaping_scale: Number(document.getElementById("train-action-mismatch-shaping-scale").value),
+        oracle_bc_enabled: document.getElementById("train-oracle-bc-enabled").checked,
+        oracle_bc_max_epochs: Number(document.getElementById("train-oracle-bc-max-epochs").value),
+        oracle_bc_learning_rate: Number(document.getElementById("train-oracle-bc-learning-rate").value),
+        oracle_bc_minibatch: Number(document.getElementById("train-oracle-bc-minibatch").value),
+        oracle_bc_target_mse: Number(document.getElementById("train-oracle-bc-target-mse").value),
+        log_every_updates: Number(document.getElementById("train-log-every-updates").value),
+        torch_threads: Number(document.getElementById("train-torch-threads").value),
         ppo2_steps: Number(document.getElementById("train-ppo2-steps").value),
         ppo2_seed: Number(document.getElementById("train-ppo2-seed").value),
         ppo2_seeds: document.getElementById("train-ppo2-seeds").value.trim(),
@@ -5167,7 +5242,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       if (trainControlDt.value === "custom") trainControlDtCustom.focus();
       updateTrainPlan();
     });
-    [trainEcap, trainPrated, trainValDays, trainTestDays, trainSteps, trainGamma, trainLambda, trainControlDtCustom].forEach((input) => input.addEventListener("input", updateTrainPlan));
+    [trainEcap, trainPrated, trainValDays, trainTestDays, trainControlDtCustom].forEach((input) => input.addEventListener("input", updateTrainPlan));
+    document.querySelectorAll(".train-ppo-field input").forEach((input) => input.addEventListener("input", updateTrainPlan));
     document.querySelectorAll(".train-ppo2-field input").forEach((input) => input.addEventListener("input", updateTrainPlan));
     trainButton.addEventListener("click", startTraining);
     trainStopButton.addEventListener("click", stopTraining);

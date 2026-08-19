@@ -4,6 +4,7 @@ import importlib
 from pathlib import Path
 
 from bess.agents import SUPPORTED_POLICY_ALGORITHMS
+from bess.core.settings import PPO_TUNABLE_DEFAULTS
 from bess.paths import PROJECT_ROOT
 from bess.training.training_launcher import TRAINING_MODULES
 
@@ -73,3 +74,49 @@ def test_training_ui_allows_ppo_full_dataset_fit_test() -> None:
     assert "PPO FIT TEST:" in template
     assert "ALL ${days} supplied day(s) are reused for training, validation, and test" in template
     assert "trainButton.disabled = valDays < 1 || testDays < 1 || trainDays < 1" not in template
+
+
+def test_generic_ppo_ui_exposes_and_sends_every_project_tunable() -> None:
+    main = importlib.import_module("main")
+    # Jinja parses the whole template here, catching broken {% ... %}/{{ ... }} syntax.
+    main.app.jinja_env.get_template("index.html")
+    template = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+    field_by_setting = {
+        "steps": "train-steps",
+        "seed": "train-seed",
+        "gamma": "train-gamma",
+        "lambda": "train-lambda",
+        "learning_rate": "train-learning-rate",
+        "ppo_clip": "train-ppo-clip",
+        "ppo_epochs": "train-ppo-epochs",
+        "minibatch": "train-minibatch",
+        "entropy_coef": "train-entropy-coef",
+        "value_coef": "train-value-coef",
+        "target_kl": "train-target-kl",
+        "actor_grad_clip": "train-actor-grad-clip",
+        "critic_grad_clip": "train-critic-grad-clip",
+        "hidden_size": "train-hidden-size",
+        "initial_log_std": "train-initial-log-std",
+        "ppo_start_log_std": "train-ppo-start-log-std",
+        "validate_every_updates": "train-validate-every-updates",
+        "challenger_reset_patience": "train-challenger-reset-patience",
+        "challenger_resets_enabled": "train-challenger-resets-enabled",
+        "reset_optimizer_on_reanchor": "train-reset-optimizer-on-reanchor",
+        "action_mismatch_shaping_scale": "train-action-mismatch-shaping-scale",
+        "oracle_bc_enabled": "train-oracle-bc-enabled",
+        "oracle_bc_max_epochs": "train-oracle-bc-max-epochs",
+        "oracle_bc_learning_rate": "train-oracle-bc-learning-rate",
+        "oracle_bc_minibatch": "train-oracle-bc-minibatch",
+        "oracle_bc_target_mse": "train-oracle-bc-target-mse",
+        "log_every_updates": "train-log-every-updates",
+        "torch_threads": "train-torch-threads",
+    }
+    assert set(field_by_setting) == set(PPO_TUNABLE_DEFAULTS)
+    field_ids = set(field_by_setting.values())
+    for field_id in field_ids:
+        assert f'id="{field_id}"' in template
+        assert f'getElementById("{field_id}")' in template or field_id in {
+            "train-steps",
+            "train-gamma",
+            "train-lambda",
+        }
