@@ -107,9 +107,27 @@ class ActorCritic(nn.Module):
         self.critic = _mlp(obs_dim, 1, hidden=hidden_size)
         self.log_std = nn.Parameter(torch.full((1,), float(initial_log_std)))
 
+        # IQ-29 adaptive exploration: keep the proven scalar log_std as the
+        # baseline and learn only a small observation-conditioned delta.  The
+        # final layer starts at exact zero, so the initial policy distribution is
+        # bit-for-bit the old scalar-std policy.  Fork RNG so constructing this
+        # helper cannot perturb the deterministic PPO sampling stream.
+        self.exploration_hidden_size = max(8, int(hidden_size) // 4)
+        with torch.random.fork_rng(devices=[]):
+            self.log_std_delta = nn.Sequential(
+                nn.Linear(obs_dim, self.exploration_hidden_size),
+                nn.Tanh(),
+                nn.Linear(self.exploration_hidden_size, 1, bias=False),
+            )
+            nn.init.zeros_(self.log_std_delta[0].bias)
+            nn.init.zeros_(self.log_std_delta[-1].weight)
+
+    def effective_log_std(self, obs):
+        return self.log_std + self.log_std_delta(obs)
+
     def dist(self, obs):
         mean = self.actor(obs)
-        return torch.distributions.Normal(mean, self.log_std.exp())
+        return torch.distributions.Normal(mean, self.effective_log_std(obs).exp())
 
     def value(self, obs):
         return self.critic(obs).squeeze(-1)
@@ -315,7 +333,11 @@ class PPOAgent:
         grad_norms = []
         actor_grad_norms = []
         critic_grad_norms = []
-        actor_params = [*self.net.actor.parameters(), self.net.log_std]
+        actor_params = [
+            *self.net.actor.parameters(),
+            self.net.log_std,
+            *self.net.log_std_delta.parameters(),
+        ]
         critic_params = list(self.net.critic.parameters())
         epochs_completed = 0
         early_stopped = False
@@ -377,6 +399,32 @@ class PPOAgent:
         def _mean(values):
             return float(np.mean(values)) if values else 0.0
 
+        with torch.no_grad():
+            effective_log_std = self.net.effective_log_std(obs).squeeze(-1)
+            effective_std = effective_log_std.exp()
+            exploration_stats = {
+                "effective_log_std_mean": float(effective_log_std.mean().cpu()),
+                "effective_log_std_min": float(effective_log_std.min().cpu()),
+                "effective_log_std_max": float(effective_log_std.max().cpu()),
+                "effective_action_std_mean": float(effective_std.mean().cpu()),
+            }
+            if self.obs_dim > 3:
+                soc = obs[:, 3]
+                low = soc < (1.0 / 3.0)
+                middle = (soc >= (1.0 / 3.0)) & (soc <= (2.0 / 3.0))
+                high = soc > (2.0 / 3.0)
+
+                def _masked_log_std(mask):
+                    if not bool(mask.any().item()):
+                        return 0.0
+                    return float(effective_log_std[mask].mean().cpu())
+
+                exploration_stats.update({
+                    "effective_log_std_soc_low": _masked_log_std(low),
+                    "effective_log_std_soc_middle": _masked_log_std(middle),
+                    "effective_log_std_soc_high": _masked_log_std(high),
+                })
+
         self.last_update_stats = {
             "policy_loss": _mean(pi_losses),
             "value_loss": _mean(value_losses),
@@ -394,6 +442,7 @@ class PPOAgent:
             "reward_std": reward_std,
             "explained_variance": explained_variance,
             "log_std": float(self.net.log_std.detach().cpu().item()),
+            **exploration_stats,
             "epochs_completed": epochs_completed,
             "kl_early_stop": early_stopped,
         }
@@ -413,6 +462,8 @@ class PPOAgent:
             **dict(self.meta),
             "hidden_size": self.hidden_size,
             "initial_log_std": self.initial_log_std,
+            "exploration_mode": "state_dependent_log_std_delta_v1",
+            "exploration_hidden_size": self.net.exploration_hidden_size,
         }
         self.meta = meta
         payload = {"algo": "ppo", "state_dict": state, "meta": meta}
@@ -460,6 +511,20 @@ class PPOAgent:
         )
         if checkpoint_hidden_size != self.hidden_size:
             self._rebuild_network_for_hidden_size(checkpoint_hidden_size)
+
+        # Pre-IQ-29 checkpoints have no adaptive-exploration head.  Seed those
+        # missing tensors from this model's zero-output initialization so old PPO
+        # checkpoints retain exactly their original scalar-log_std behavior.
+        current_state = self.net.state_dict()
+        missing_exploration = [
+            key
+            for key in current_state
+            if key.startswith("log_std_delta.") and key not in state_dict
+        ]
+        if missing_exploration:
+            state_dict = dict(state_dict)
+            for key in missing_exploration:
+                state_dict[key] = current_state[key]
         self.net.load_state_dict(state_dict)
         self._sync_collector()
         self.net.eval()

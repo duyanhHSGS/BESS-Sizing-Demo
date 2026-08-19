@@ -684,6 +684,8 @@ def main() -> None:
         "critic_grad_clip": agent.critic_grad_clip,
         "hidden_size": agent.hidden_size,
         "initial_log_std": agent.initial_log_std,
+        "exploration_mode": "state_dependent_log_std_delta_v1",
+        "exploration_hidden_size": agent.net.exploration_hidden_size,
         "native_dt_minutes": csv_dt * 60.0,
         "control_dt_minutes": args.control_dt_minutes,
         "native_steps_per_action": native_steps,
@@ -774,6 +776,8 @@ def main() -> None:
             "critic_grad_clip": agent.critic_grad_clip,
             "hidden_size": agent.hidden_size,
             "initial_log_std": agent.initial_log_std,
+            "exploration_mode": "state_dependent_log_std_delta_v1",
+            "exploration_hidden_size": agent.net.exploration_hidden_size,
             "initial_soc": float(cfg.SOC_min),
             "rollout_days": len(train_days),
             "rollout_decisions": decisions_per_episode,
@@ -1010,6 +1014,8 @@ def main() -> None:
     rollout_action_abs_sum = 0.0
     rollout_action_saturation = 0
     rollout_projected = 0
+    rollout_soc_counts = [0, 0, 0]
+    rollout_soc_projected = [0, 0, 0]
     rollout_mismatch_penalty_vnd = 0.0
     rollout_mismatch_kwh = 0.0
     rollout_count = 0
@@ -1106,7 +1112,11 @@ def main() -> None:
         rollout_action_sum += action
         rollout_action_abs_sum += abs(action)
         rollout_action_saturation += int(abs(action) >= 0.98)
-        rollout_projected += int(transition.adjusted_action)
+        projected = int(transition.adjusted_action)
+        rollout_projected += projected
+        soc_bin = 0 if obs[3] < (1.0 / 3.0) else (2 if obs[3] > (2.0 / 3.0) else 1)
+        rollout_soc_counts[soc_bin] += 1
+        rollout_soc_projected[soc_bin] += projected
         rollout_mismatch_penalty_vnd += mismatch_penalty_vnd
         rollout_mismatch_kwh += mismatch_kwh
         rollout_count += 1
@@ -1128,11 +1138,18 @@ def main() -> None:
         update_started = time.perf_counter()
         update_stats = agent.update(buffer, 0.0 if done else last_value)
         perf["update"] += time.perf_counter() - update_started
+        soc_projection_pct = [
+            rollout_soc_projected[index] / count * 100.0 if count else 0.0
+            for index, count in enumerate(rollout_soc_counts)
+        ]
         rollout_stats = {
             "mean_action": rollout_action_sum / rollout_count,
             "mean_abs_action": rollout_action_abs_sum / rollout_count,
             "action_saturation_pct": rollout_action_saturation / rollout_count * 100.0,
             "projected_action_pct": rollout_projected / rollout_count * 100.0,
+            "projected_action_pct_soc_low": soc_projection_pct[0],
+            "projected_action_pct_soc_middle": soc_projection_pct[1],
+            "projected_action_pct_soc_high": soc_projection_pct[2],
             "action_mismatch_kwh": rollout_mismatch_kwh,
             "action_mismatch_penalty_vnd": rollout_mismatch_penalty_vnd,
             "action_mismatch_shaping_penalty_vnd": (
@@ -1182,6 +1199,8 @@ def main() -> None:
         rollout_action_abs_sum = 0.0
         rollout_action_saturation = 0
         rollout_projected = 0
+        rollout_soc_counts = [0, 0, 0]
+        rollout_soc_projected = [0, 0, 0]
         rollout_mismatch_penalty_vnd = 0.0
         rollout_mismatch_kwh = 0.0
         rollout_count = 0
