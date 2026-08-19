@@ -45,6 +45,7 @@ from bess.training.training_reports import (
 VALIDATE_EVERY_UPDATES = 1
 CHALLENGER_RESET_PATIENCE = 3
 CHALLENGER_RESETS_ENABLED = True
+RESET_OPTIMIZER_ON_REANCHOR = True
 ACTION_MISMATCH_SHAPING_SCALE = 0.1
 PPO_FIT_CONTROL_DT_MINUTES = 30.0
 PPO_FINE_TUNE_EPOCHS = 1
@@ -470,6 +471,7 @@ def main() -> None:
         "validation_every_updates": VALIDATE_EVERY_UPDATES,
         "challenger_reset_patience": CHALLENGER_RESET_PATIENCE,
         "challenger_resets_enabled": CHALLENGER_RESETS_ENABLED,
+        "reset_optimizer_on_reanchor": RESET_OPTIMIZER_ON_REANCHOR,
         "oracle_behavior_cloning_enabled": True,
         "oracle_behavior_cloning_max_epochs": ORACLE_BC_MAX_EPOCHS,
         "oracle_behavior_cloning_learning_rate": ORACLE_BC_LEARNING_RATE,
@@ -535,6 +537,7 @@ def main() -> None:
             "validation_every_updates": VALIDATE_EVERY_UPDATES,
             "challenger_reset_patience": CHALLENGER_RESET_PATIENCE,
             "challenger_resets_enabled": CHALLENGER_RESETS_ENABLED,
+            "reset_optimizer_on_reanchor": RESET_OPTIMIZER_ON_REANCHOR,
             "oracle_behavior_cloning_enabled": True,
             "oracle_behavior_cloning_max_epochs": ORACLE_BC_MAX_EPOCHS,
             "oracle_behavior_cloning_learning_rate": ORACLE_BC_LEARNING_RATE,
@@ -764,6 +767,10 @@ def main() -> None:
                 and consecutive_rejections >= CHALLENGER_RESET_PATIENCE
             ):
                 agent.restore_training_state(champion_state)
+                if RESET_OPTIMIZER_ON_REANCHOR:
+                    # Keep the trusted Champion weights, but discard Adam's old
+                    # momentum so each re-anchor is a genuinely fresh local search.
+                    agent.opt.state.clear()
                 report["training"]["learner_resets"] += 1
                 consecutive_rejections = 0
                 reset_to_champion = True
