@@ -170,14 +170,14 @@ def _bounded_float(
     return value
 
 
-def _split_days(payload: dict) -> tuple[int, int]:
-    val_days = _int(payload, "val_days", 30)
-    test_days = _int(payload, "test_days", 30)
-    if val_days < 1:
-        raise TrainingLaunchError("validation days must be at least 1")
-    if test_days < 1:
-        raise TrainingLaunchError("test days must be at least 1")
-    return val_days, test_days
+def _split_months(payload: dict) -> tuple[int, int]:
+    val_months = _int(payload, "val_months", 1)
+    test_months = _int(payload, "test_months", 1)
+    if val_months < 1:
+        raise TrainingLaunchError("validation months must be at least 1")
+    if test_months < 1:
+        raise TrainingLaunchError("test months must be at least 1")
+    return val_months, test_months
 
 
 def _control_dt_minutes(payload: dict, csv_path: Path) -> int:
@@ -285,11 +285,9 @@ def build_training_command(
     e_cap = _float(payload, "e_cap_kwh")
     p_rated = _float(payload, "p_rated_kw")
     if algo == "ppo2":
-        val_days, test_days = 0, 0  # PPO2 splits by calendar months, not day counts.
+        val_months, test_months = 0, 0  # PPO2 owns its separate calendar split.
     else:
-        # TEMP PPO DEBUG MODE: the runner ignores holdout counts and uses the
-        # entire exported dataset for train/validation/test.
-        val_days, test_days = 0, 0
+        val_months, test_months = _split_months(payload)
     dataset_id = str(payload.get("dataset_id", "dataset"))
     default_obs_variant = "base" if algo == "ppo2" else "brain7"
     obs_variant = str(payload.get("obs_variant", default_obs_variant)).strip().lower()
@@ -338,10 +336,10 @@ def build_training_command(
         str(p_rated),
         "--tag",
         tag,
-        "--val-days",
-        str(val_days),
-        "--test-days",
-        str(test_days),
+        "--val-months",
+        str(val_months),
+        "--test-months",
+        str(test_months),
         "--training-config",
         str(config_path),
         "--control-dt-minutes",
@@ -692,17 +690,16 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
     algo = str(payload.get("algo", "ppo")).lower()
     source, oracle_parameters = training_oracle_parameters(payload, parameters)
     if algo == "ppo2":
-        val_days, test_days = 0, 0
+        val_months, test_months = 0, 0
         required_train_days = 1
         n_days = require_min_days(source, required_train_days)
         oracle_path = Path("")  # PPO2 builds the senior fixed-block month LP internally.
     else:
-        # TEMP PPO DEBUG MODE: train/validation/test all use the same exported
-        # dataset, so no holdout days are reserved by the launcher.
-        required_train_days = 1
+        val_months, test_months = _split_months(payload)
+        # Cheap launcher guard only. The runner validates actual date_iso calendar
+        # coverage because day count alone cannot prove distinct billing months.
+        required_train_days = val_months + test_months + 1
         n_days = require_min_days(source, required_train_days)
-        val_days = n_days
-        test_days = n_days
         oracle_path, _ = oracle_cache.require_cached_oracle(oracle_parameters)
 
     USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -710,8 +707,8 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
     csv_path = export_training_csv(
         dataset_id,
         USER_DATA_DIR,
-        # TEMP PPO overlap needs no reserved holdout rows; PPO2 also owns its
-        # month split internally. Export only needs one usable training day.
+        # Generic PPO validates whole calendar-month holdouts in the runner;
+        # this export guard is only the cheapest impossible-input rejection.
         min_days=required_train_days,
     )
     config_path = write_training_config(oracle_parameters, USER_DATA_DIR)
@@ -726,8 +723,8 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
     return job, {
         "job_id": job.id,
         "n_days": n_days,
-        "val_days": val_days,
-        "test_days": test_days,
+        "val_months": val_months,
+        "test_months": test_months,
         "settings": str(settings_path),
         **spec,
     }

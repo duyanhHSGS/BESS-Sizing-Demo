@@ -20,6 +20,7 @@ from bess.training.runners.train_ppo_dataset import (
     _behavior_clone_actor,
     _behavior_clone_critic,
     _champion_curve_point,
+    _chronological_month_holdout_split,
     _initialize_champion,
     _midpoint_challenger_state,
     _oracle_dispatch_wear_cost_vnd,
@@ -28,6 +29,7 @@ from bess.training.runners.train_ppo_dataset import (
     _restore_reanchor_state,
     _save_accepted_champion,
     _should_reanchor_rejected_candidate,
+    _training_reference_power_kw,
 )
 
 
@@ -158,6 +160,42 @@ class PPOTrainingStateTests(unittest.TestCase):
         self.assertEqual(midpoint_state["optimizer"], candidate_state["optimizer"])
 
 
+class PPORealDataSplitTests(unittest.TestCase):
+    def test_chronological_holdout_is_disjoint_and_keeps_whole_months(self):
+        days = [
+            SimpleNamespace(date_iso=f"2026-{month:02d}-{day:02d}")
+            for month in range(1, 7)
+            for day in (1, 2)
+        ]
+
+        train, validation, test = _chronological_month_holdout_split(days, 2, 1)
+
+        self.assertEqual(
+            [day.date_iso[:7] for day in train],
+            ["2026-01", "2026-01", "2026-02", "2026-02", "2026-03", "2026-03"],
+        )
+        self.assertEqual(
+            [day.date_iso[:7] for day in validation],
+            ["2026-04", "2026-04", "2026-05", "2026-05"],
+        )
+        self.assertEqual([day.date_iso[:7] for day in test], ["2026-06", "2026-06"])
+        self.assertTrue(set(map(id, train)).isdisjoint(map(id, validation)))
+        self.assertTrue(set(map(id, train)).isdisjoint(map(id, test)))
+        self.assertTrue(set(map(id, validation)).isdisjoint(map(id, test)))
+
+    def test_reference_power_uses_training_days_only(self):
+        training_days = [
+            SimpleNamespace(load=np.asarray([120.0, 740.0], dtype=np.float32)),
+            SimpleNamespace(load=np.asarray([250.0, 910.0], dtype=np.float32)),
+        ]
+        future_holdout = SimpleNamespace(
+            load=np.asarray([9999.0], dtype=np.float32)
+        )
+
+        self.assertEqual(_training_reference_power_kw(training_days), 1000.0)
+        self.assertGreater(float(future_holdout.load.max()), 1000.0)
+
+
 class PPOOracleTeacherTests(unittest.TestCase):
     def test_oracle_teacher_action_converts_outside_power_to_battery_side(self):
         cfg = SimpleNamespace(eta_dis=0.9, eta_ch=0.9, P_rated_nominal=450.0)
@@ -213,6 +251,24 @@ class PPOOracleTeacherTests(unittest.TestCase):
         )
         self.assertLess(stats["critic_final_mse"], stats["critic_initial_mse"])
         self.assertEqual(stats["critic_epochs_completed"], 100)
+
+    def test_behavior_clone_critic_resets_returns_between_real_months(self):
+        agent = PPOAgent(7, seed=0, device="cpu")
+        observations = np.zeros((4, 7), dtype=np.float32)
+        rewards = np.asarray([1.0, 1.0, 10.0, 10.0], dtype=np.float32)
+
+        stats = _behavior_clone_critic(
+            agent,
+            observations,
+            rewards,
+            gamma=1.0,
+            seed=0,
+            max_epochs=0,
+            episode_lengths=[2, 2],
+        )
+
+        # Month-local returns are [2, 1] and [20, 10]; no future-month reward leaks backward.
+        self.assertAlmostEqual(stats["critic_target_mean"], 8.25)
 
 
 class PPOActionMismatchPenaltyTests(unittest.TestCase):

@@ -1444,8 +1444,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label>E_cap (kWh) <input type="number" id="train-ecap" step="50" value="{{ battery_capacity_kWh }}"></label>
           <label>P_rated (kW) <input type="number" id="train-prated" step="25"
               value="{{ battery_power_limit_kW }}"></label>
-          <label class="train-day-split-field">Validation days <input type="number" id="train-val-days" min="1" step="1" value="30"></label>
-          <label class="train-day-split-field">Test days <input type="number" id="train-test-days" min="1" step="1" value="30"></label>
+          <label class="train-day-split-field">Validation months <input type="number" id="train-val-months" min="1" step="1" value="1"></label>
+          <label class="train-day-split-field">Test months <input type="number" id="train-test-months" min="1" step="1" value="1"></label>
           <label class="train-learning-field">Custom sampling Δt
             <select id="train-control-dt"></select>
           </label>
@@ -4481,8 +4481,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const trainDevice = document.getElementById("train-device");
     const trainEcap = document.getElementById("train-ecap");
     const trainPrated = document.getElementById("train-prated");
-    const trainValDays = document.getElementById("train-val-days");
-    const trainTestDays = document.getElementById("train-test-days");
+    const trainValMonths = document.getElementById("train-val-months");
+    const trainTestMonths = document.getElementById("train-test-months");
     const trainControlDt = document.getElementById("train-control-dt");
     const trainControlDtCustom = document.getElementById("train-control-dt-custom");
     const trainControlDtCustomWrap = document.getElementById("train-control-dt-custom-wrap");
@@ -4732,7 +4732,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         item.style.display = algo === "ppo2" ? "inline-flex" : "none";
       });
       document.querySelectorAll(".train-day-split-field").forEach((item) => {
-        item.style.display = "none";
+        item.style.display = algo === "ppo" ? "inline-flex" : "none";
       });
       const ppo2Mode = algo === "ppo2";
       const ppoMode = algo === "ppo";
@@ -4789,15 +4789,17 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           : `PPO2 reference plan: ${document.getElementById("train-ppo2-steps").value} steps; fixed 15m/17D reference environment; calendar-month split with ${valMonths} validation + ${testMonths} newest test month(s), ≥${formatNumber(coverage, 0)}% coverage; λ_energy ${document.getElementById("train-ppo2-lam-energy").value}; λ_peak sweep ${document.getElementById("train-ppo2-lam-peak").value}; internal fixed-block month Oracle; CPU threads ${document.getElementById("train-ppo2-torch-threads").value}. No shared rolling-Oracle cache is required.`;
         return;
       }
+      const valMonths = Number(trainValMonths.value);
+      const testMonths = Number(trainTestMonths.value);
       trainButton.disabled = days < 1 || !validControlDt;
       if (days < 1) {
-        trainPlan.textContent = "PPO fit test requires at least 1 usable supplied day.";
+        trainPlan.textContent = "PPO real-data training requires usable dated data.";
       } else if (!validControlDt) {
         trainPlan.textContent = `Invalid control Δt ${controlDt}m. It must be a native-or-coarser multiple that divides both 30 minutes and 24 hours.`;
       } else {
         const budget = `${trainSteps.value} PPO steps; seed ${document.getElementById("train-seed").value}; gamma ${trainGamma.value}; lambda ${trainLambda.value}; LR ${document.getElementById("train-learning-rate").value}; epochs ${document.getElementById("train-ppo-epochs").value}; clip ${document.getElementById("train-ppo-clip").value}; start logσ ${document.getElementById("train-ppo-start-log-std").value}; mismatch ×${document.getElementById("train-action-mismatch-shaping-scale").value}; reset patience ${document.getElementById("train-challenger-reset-patience").value}`;
         const brainLabel = "BrainEnv (7 eyes)";
-        trainPlan.textContent = `Checking required data... PPO FIT TEST: ${brainLabel}; ALL ${days} supplied day(s) are reused for training, validation, and test; device ${trainDevice.value}; ${budget}; sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action); E/P ${trainEcap.value}/${trainPrated.value}. This measures fit/memorization ONLY, not unseen-data generalization.`;
+        trainPlan.textContent = `Checking required data... PPO REAL HOLDOUT: ${brainLabel}; oldest calendar months train, next ${valMonths} full month(s) validate, newest ${testMonths} full month(s) test; NO overlap and no billing-month slicing; source has ${days} day(s); device ${trainDevice.value}; ${budget}; sampling ${nativeDt}m native → ${controlDt}m control (${controlDt / nativeDt} rows/action); E/P ${trainEcap.value}/${trainPrated.value}.`;
         trainOracleStatusTimer = setTimeout(refreshTrainingOracleStatus, 250);
       }
     }
@@ -4949,8 +4951,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         device: trainDevice.value,
         e_cap_kwh: Number(trainEcap.value),
         p_rated_kw: Number(trainPrated.value),
-        val_days: Number(trainValDays.value),
-        test_days: Number(trainTestDays.value),
+        val_months: Number(trainValMonths.value),
+        test_months: Number(trainTestMonths.value),
         steps: Number(trainSteps.value),
         seed: Number(document.getElementById("train-seed").value),
         gamma: Number(trainGamma.value),
@@ -5260,7 +5262,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       if (trainControlDt.value === "custom") trainControlDtCustom.focus();
       updateTrainPlan();
     });
-    [trainEcap, trainPrated, trainValDays, trainTestDays, trainControlDtCustom].forEach((input) => input.addEventListener("input", updateTrainPlan));
+    [trainEcap, trainPrated, trainValMonths, trainTestMonths, trainControlDtCustom].forEach((input) => input.addEventListener("input", updateTrainPlan));
     document.querySelectorAll(".train-ppo-field input").forEach((input) => input.addEventListener("input", updateTrainPlan));
     document.querySelectorAll(".train-ppo2-field input").forEach((input) => input.addEventListener("input", updateTrainPlan));
     trainButton.addEventListener("click", startTraining);

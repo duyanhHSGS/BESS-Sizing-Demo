@@ -71,6 +71,7 @@ from bess.evaluation.oracle.oracle_cache import (
 from bess.training.training_common import (
     build_training_bess_config,
     load_training_days,
+    month_blocks,
 )
 from bess.training.training_reports import (
     PPO_CHAMPION_CURVE_FIELDS,
@@ -125,6 +126,29 @@ def _score_ppo_operating_month(
         "wear_cost_vnd": wear_cost_vnd,
         "total_operating_cost_vnd": utility["total_cost_vnd"] + wear_cost_vnd,
     }
+
+
+def _score_grid_calendar_months(
+    p_grid_days: list[np.ndarray],
+    months: list[MonthData],
+    cfg,
+) -> float:
+    """Sum utility bills without merging demand peaks across calendar months."""
+    cursor = 0
+    total_cost = 0.0
+    for month in months:
+        stop = cursor + len(month.days)
+        total_cost += float(
+            score_month(
+                p_grid_days[cursor:stop],
+                cfg,
+                days=month.days,
+            )["total_cost_vnd"]
+        )
+        cursor = stop
+    if cursor != len(p_grid_days):
+        raise ValueError("Grid traces do not exactly match calendar-month holdouts")
+    return total_cost
 
 
 def _oracle_dispatch_wear_cost_vnd(
@@ -229,12 +253,23 @@ def _behavior_clone_actor(
     minibatch: int = PPO_ORACLE_BC_MINIBATCH,
     target_mse: float = PPO_ORACLE_BC_TARGET_MSE,
     score_policy_cost=None,
+    episode_lengths: list[int] | None = None,
 ) -> dict[str, float | int]:
     """Supervised-fit the existing generic PPO actor to Oracle teacher actions."""
     if observations.ndim != 2 or observations.shape[1] != OBSERVATION_DIM:
         raise ValueError("Oracle BC observations must have shape (N, OBSERVATION_DIM)")
     if targets.ndim != 1 or len(targets) != len(observations) or len(targets) == 0:
         raise ValueError("Oracle BC targets must be one non-empty action per observation")
+    if episode_lengths is None:
+        episode_lengths = [len(observations)]
+    if any(length <= 0 for length in episode_lengths) or sum(episode_lengths) != len(observations):
+        raise ValueError("Oracle BC episode lengths must exactly partition observations")
+    episode_ranges = []
+    episode_start = 0
+    for episode_length in episode_lengths:
+        episode_stop = episode_start + episode_length
+        episode_ranges.append((episode_start, episode_stop))
+        episode_start = episode_stop
 
     obs_t = torch.as_tensor(observations, dtype=torch.float32, device=agent.device)
     target_t = torch.as_tensor(targets, dtype=torch.float32, device=agent.device)
@@ -252,8 +287,12 @@ def _behavior_clone_actor(
     @torch.inference_mode()
     def full_mse() -> float:
         if agent.recurrent_enabled:
-            mean, _, _ = agent.net.actor_sequence(obs_t.unsqueeze(0), None)
-            prediction = torch.tanh(mean.squeeze(0)).squeeze(-1)
+            prediction = torch.cat([
+                torch.tanh(
+                    agent.net.actor_sequence(obs_t[start:stop].unsqueeze(0), None)[0].squeeze(0)
+                ).squeeze(-1)
+                for start, stop in episode_ranges
+            ])
         else:
             prediction = torch.tanh(agent.net.actor(obs_t)).squeeze(-1)
         return float(torch.mean((prediction - target_t) ** 2).cpu())
@@ -266,21 +305,26 @@ def _behavior_clone_actor(
     best_actor_state = None
     for epoch in range(max_epochs):
         if agent.recurrent_enabled:
-            # IQ-34's proven truncated recurrent teacher loop: preserve time order
-            # and carry memory across chunks while taking one Adam step per chunk.
-            hidden = None
-            for start in range(0, len(observations), agent.recurrent_sequence_length):
-                stop = min(start + agent.recurrent_sequence_length, len(observations))
-                mean, _, hidden = agent.net.actor_sequence(
-                    obs_t[start:stop].unsqueeze(0),
-                    hidden,
-                )
-                prediction = torch.tanh(mean.squeeze(0)).squeeze(-1)
-                loss = torch.mean((prediction - target_t[start:stop]) ** 2)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                hidden = hidden.detach()
+            # Preserve chronology inside each real billing month, but never carry
+            # recurrent memory across month boundaries.
+            for episode_start, episode_stop in episode_ranges:
+                hidden = None
+                for start in range(
+                    episode_start,
+                    episode_stop,
+                    agent.recurrent_sequence_length,
+                ):
+                    stop = min(start + agent.recurrent_sequence_length, episode_stop)
+                    mean, _, hidden = agent.net.actor_sequence(
+                        obs_t[start:stop].unsqueeze(0),
+                        hidden,
+                    )
+                    prediction = torch.tanh(mean.squeeze(0)).squeeze(-1)
+                    loss = torch.mean((prediction - target_t[start:stop]) ** 2)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    hidden = hidden.detach()
         else:
             indexes = rng.permutation(len(observations))
             for start in range(0, len(indexes), minibatch):
@@ -349,6 +393,7 @@ def _behavior_clone_critic(
     learning_rate: float = PPO_ORACLE_BC_LEARNING_RATE,
     minibatch: int = PPO_ORACLE_BC_MINIBATCH,
     target_mse: float = PPO_ORACLE_BC_TARGET_MSE,
+    episode_lengths: list[int] | None = None,
 ) -> dict[str, float | int]:
     """Warm-start the existing critic on Oracle-path discounted reward-to-go."""
     if observations.ndim != 2 or observations.shape[1] != OBSERVATION_DIM:
@@ -357,12 +402,23 @@ def _behavior_clone_critic(
         raise ValueError("Oracle critic rewards must be one non-empty reward per observation")
     if not 0.0 <= gamma <= 1.0:
         raise ValueError("Oracle critic gamma must be in [0, 1]")
+    if episode_lengths is None:
+        episode_lengths = [len(observations)]
+    if any(length <= 0 for length in episode_lengths) or sum(episode_lengths) != len(observations):
+        raise ValueError("Oracle critic episode lengths must exactly partition observations")
+    episode_ranges = []
+    episode_start = 0
+    for episode_length in episode_lengths:
+        episode_stop = episode_start + episode_length
+        episode_ranges.append((episode_start, episode_stop))
+        episode_start = episode_stop
 
     returns = np.empty_like(rewards, dtype=np.float32)
-    running_return = 0.0
-    for index in range(len(rewards) - 1, -1, -1):
-        running_return = float(rewards[index]) + gamma * running_return
-        returns[index] = running_return
+    for episode_start, episode_stop in episode_ranges:
+        running_return = 0.0
+        for index in range(episode_stop - 1, episode_start - 1, -1):
+            running_return = float(rewards[index]) + gamma * running_return
+            returns[index] = running_return
 
     obs_t = torch.as_tensor(observations, dtype=torch.float32, device=agent.device)
     return_t = torch.as_tensor(returns, dtype=torch.float32, device=agent.device)
@@ -380,8 +436,10 @@ def _behavior_clone_critic(
     @torch.inference_mode()
     def full_mse() -> float:
         if agent.recurrent_enabled:
-            prediction, _ = agent.net.value_sequence(obs_t.unsqueeze(0), None)
-            prediction = prediction.squeeze(0)
+            prediction = torch.cat([
+                agent.net.value_sequence(obs_t[start:stop].unsqueeze(0), None)[0].squeeze(0)
+                for start, stop in episode_ranges
+            ])
         else:
             prediction = agent.net.value(obs_t)
         return float(torch.mean((prediction - return_t) ** 2).cpu())
@@ -390,19 +448,24 @@ def _behavior_clone_critic(
     epochs_completed = 0
     for epoch in range(max_epochs):
         if agent.recurrent_enabled:
-            hidden = None
-            for start in range(0, len(observations), agent.recurrent_sequence_length):
-                stop = min(start + agent.recurrent_sequence_length, len(observations))
-                prediction, hidden = agent.net.value_sequence(
-                    obs_t[start:stop].unsqueeze(0),
-                    hidden,
-                )
-                prediction = prediction.squeeze(0)
-                loss = torch.mean((prediction - return_t[start:stop]) ** 2)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                hidden = hidden.detach()
+            for episode_start, episode_stop in episode_ranges:
+                hidden = None
+                for start in range(
+                    episode_start,
+                    episode_stop,
+                    agent.recurrent_sequence_length,
+                ):
+                    stop = min(start + agent.recurrent_sequence_length, episode_stop)
+                    prediction, hidden = agent.net.value_sequence(
+                        obs_t[start:stop].unsqueeze(0),
+                        hidden,
+                    )
+                    prediction = prediction.squeeze(0)
+                    loss = torch.mean((prediction - return_t[start:stop]) ** 2)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    hidden = hidden.detach()
         else:
             indexes = rng.permutation(len(observations))
             for start in range(0, len(indexes), minibatch):
@@ -445,6 +508,39 @@ def _resolve_challenger(
     if candidate_cost < champion_cost:
         return candidate_cost, True
     return champion_cost, False
+
+
+def _chronological_month_holdout_split(days, val_months: int, test_months: int):
+    """Split whole calendar months: oldest train / newer validation / newest test."""
+    if val_months < 1 or test_months < 1:
+        raise ValueError("Validation and test holdouts must each contain at least 1 month")
+    calendar_months = month_blocks(list(days), minimum_days=1)
+    required_months = val_months + test_months + 1
+    if len(calendar_months) < required_months:
+        raise ValueError(
+            "Training CSV must span at least "
+            f"{required_months} calendar months for {val_months} validation + "
+            f"{test_months} test + at least 1 training month; got {len(calendar_months)}"
+        )
+    train_stop = len(calendar_months) - val_months - test_months
+    val_stop = len(calendar_months) - test_months
+
+    def _flatten(blocks):
+        return [day for month in blocks for day in month.days]
+
+    return (
+        _flatten(calendar_months[:train_stop]),
+        _flatten(calendar_months[train_stop:val_stop]),
+        _flatten(calendar_months[val_stop:]),
+    )
+
+
+def _training_reference_power_kw(train_days) -> float:
+    """Derive the observation/reference scale from training data only."""
+    if not train_days:
+        raise ValueError("Training split must contain at least one day")
+    peak = max(float(day.load.max()) for day in train_days)
+    return math.ceil(peak / 500.0) * 500.0
 
 
 def _midpoint_challenger_state(champion_state: dict, candidate_state: dict) -> dict:
@@ -669,8 +765,8 @@ def main() -> None:
     parser.add_argument("--billing", choices=("2tc", "tou"), default="2tc")
     parser.add_argument("--training-config", type=str, required=True)
     parser.add_argument("--oracle-cache", required=True)
-    parser.add_argument("--val-days", type=int, default=30)
-    parser.add_argument("--test-days", type=int, default=30)
+    parser.add_argument("--val-months", type=int, default=1)
+    parser.add_argument("--test-months", type=int, default=1)
     parser.add_argument("--obs-variant", choices=("brain7",), default="brain7")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     args = parser.parse_args()
@@ -802,14 +898,17 @@ def main() -> None:
         raise SystemExit("Training CSV contains no usable days")
     csv_dt = 24.0 / len(days[0].load)
 
-    # TEMP DEBUG MODE: intentionally leak the full dataset into all three roles.
-    # This measures whether PPO can fit the supplied month at all; it is NOT a
-    # valid generalization test and must be reverted before production evaluation.
-    train_days = list(days)
-    val_days = list(days)
-    test_days = list(days)
-    peak = max(float(day.load.max()) for day in days)
-    p_ref = math.ceil(peak / 500.0) * 500.0
+    try:
+        train_days, val_days, test_days = _chronological_month_holdout_split(
+            days,
+            args.val_months,
+            args.test_months,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    # Training-only scale: validation/test peaks must not leak into the policy's
+    # observation normalization or reference power.
+    p_ref = _training_reference_power_kw(train_days)
 
     cfg, billing = build_training_bess_config(
         args.e_cap,
@@ -824,15 +923,21 @@ def main() -> None:
     if billing == "tou" and not tag.endswith("_tou"):
         tag += "_tou"
 
-    # TEMP DEBUG MODE: keep all supplied days in one continuous training
-    # episode instead of calendar-month filtering, so every one of the 30 days
-    # participates in training as well as validation/test.
-    train_months = [MonthData(days=train_days, source="train:full-overlap")]
-    val_month = MonthData(days=val_days, source="val:full-overlap")
+    # IQ-46 real-data mode: training days stay chronological but reset BrainEnv at
+    # calendar-month boundaries. Validation/test are newer, disjoint holdouts.
+    train_months = month_blocks(train_days, minimum_days=1)
+    if not train_months:
+        raise SystemExit("Training split contains no usable calendar-month episode")
+    validation_months = month_blocks(val_days, minimum_days=1)
+    test_months = month_blocks(test_days, minimum_days=1)
+    if len(validation_months) != args.val_months or len(test_months) != args.test_months:
+        raise RuntimeError("Chronological month holdout split lost a calendar block")
     gamma = args.gamma
     native_steps = native_steps_per_action(cfg.dt, args.control_dt_minutes)
     decisions_per_day = len(days[0].load) // native_steps
-    decisions_per_episode = decisions_per_day * len(train_days)
+    rollout_decisions = decisions_per_day * max(
+        len(month.days) for month in train_months
+    )
     learner_device = resolve_ppo_device(args.device)
     agent = PPOAgent(
         OBSERVATION_DIM,
@@ -906,11 +1011,17 @@ def main() -> None:
         "seed": args.seed,
         "deterministic_training": True,
         "train_csv": str(args.csv),
+        "train_range": [train_days[0].date_iso, train_days[-1].date_iso],
+        "validation_range": [val_days[0].date_iso, val_days[-1].date_iso],
         "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
-        "temporary_full_dataset_overlap": True,
-        "data_overlap_note": "TEMP DEBUG: train/validation/test all use the full dataset",
+        "temporary_full_dataset_overlap": False,
+        "data_overlap_note": "disjoint chronological calendar-month holdouts",
+        "validation_month_count": len(validation_months),
+        "test_month_count": len(test_months),
         "training_augmentation_enabled": False,
-        "rollout_decisions": decisions_per_episode,
+        "rollout_decisions": rollout_decisions,
+        "rollout_mode": "one_calendar_month_per_update",
+        "training_month_count": len(train_months),
         "validation_every_updates": args.validate_every_updates,
         "challenger_reset_patience": args.challenger_reset_patience,
         "challenger_resets_enabled": args.challenger_resets_enabled,
@@ -929,12 +1040,19 @@ def main() -> None:
         "torch_threads": args.torch_threads,
     }
     buffer = RolloutBuffer(
-        decisions_per_episode,
+        rollout_decisions,
         OBSERVATION_DIM,
         recurrent_hidden_size=agent.hidden_size if agent.recurrent_enabled else 0,
     )
 
-    val_base = score_month(run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
+    val_base = sum(
+        score_month(
+            run_no_bess(month, cfg)["p_grid_days"],
+            cfg,
+            days=month.days,
+        )["total_cost_vnd"]
+        for month in validation_months
+    )
     val_day_indexes = [day.day_index for day in val_days]
     train_day_indexes = [day.day_index for day in train_days]
     oracle_grids = load_cached_training_grids(args.oracle_cache, val_day_indexes)
@@ -944,7 +1062,11 @@ def main() -> None:
         if train_day_indexes == val_day_indexes
         else load_cached_training_dispatch(args.oracle_cache, val_day_indexes)
     )
-    val_oracle_utility = score_month(oracle_grids, cfg, days=val_days)["total_cost_vnd"]
+    val_oracle_utility = _score_grid_calendar_months(
+        oracle_grids,
+        validation_months,
+        cfg,
+    )
     val_oracle_wear = _oracle_dispatch_wear_cost_vnd(
         val_oracle_dispatch,
         timestep_hours=cfg.dt,
@@ -965,9 +1087,13 @@ def main() -> None:
             "train_days": len(train_days),
             "validation_days": len(val_days),
             "test_days": len(test_days),
+            "train_range": [train_days[0].date_iso, train_days[-1].date_iso],
             "validation_range": [val_days[0].date_iso, val_days[-1].date_iso],
             "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
-            "temporary_full_dataset_overlap": True,
+            "temporary_full_dataset_overlap": False,
+            "split_mode": "chronological_calendar_months",
+            "validation_months": len(validation_months),
+            "test_months": len(test_months),
         },
         "battery": {"e_cap_kwh": args.e_cap, "p_rated_kw": args.p_rated},
         "economics": {
@@ -1006,8 +1132,10 @@ def main() -> None:
             "exploration_mode": "state_dependent_log_std_delta_soc_edge_v2",
             "exploration_hidden_size": agent.net.exploration_hidden_size,
             "initial_soc": float(cfg.SOC_min),
-            "rollout_days": len(train_days),
-            "rollout_decisions": decisions_per_episode,
+            "rollout_days": max(len(month.days) for month in train_months),
+            "rollout_decisions": rollout_decisions,
+            "rollout_mode": "one_calendar_month_per_update",
+            "training_month_count": len(train_months),
             "augmentation_enabled": False,
             "validation_every_updates": args.validate_every_updates,
             "challenger_reset_patience": args.challenger_reset_patience,
@@ -1051,8 +1179,10 @@ def main() -> None:
     write_curve(curve_path, [], fields=PPO_CHAMPION_CURVE_FIELDS)
     write_report(report_path, report)
     print(
-        f"[train-ds] TEMP FULL-DATASET OVERLAP | {len(days)} days | "
-        f"train {len(train_days)} / val {len(val_days)} / test {len(test_days)} | "
+        f"[train-ds] CALENDAR-MONTH HOLDOUT | {len(days)} days | "
+        f"train {len(train_months)}mo/{len(train_days)}d | "
+        f"val {len(validation_months)}mo/{len(val_days)}d | "
+        f"test {len(test_months)}mo/{len(test_days)}d | "
         f"gamma {gamma:g} | lambda {args.lambda_value:g} | "
         f"UI wear {battery_wear_cost:g} VND/kWh | "
         f"learner {learner_device} (requested {args.device}) | BrainEnv eyes={OBSERVATION_DIM} | "
@@ -1076,16 +1206,22 @@ def main() -> None:
 
     def validate_policy_cost() -> float:
         validation_started = time.perf_counter()
-        result = run_drl_policy(val_month, cfg, agent, p_ref_kw=p_ref)
+        results = [
+            (month, run_drl_policy(month, cfg, agent, p_ref_kw=p_ref))
+            for month in validation_months
+        ]
         perf["validation"] += time.perf_counter() - validation_started
         scoring_started = time.perf_counter()
-        val_cost = _score_ppo_operating_month(
-            result["p_grid_days"],
-            result["p_bess_days"],
-            cfg,
-            battery_wear_cost,
-            val_days,
-        )["total_operating_cost_vnd"]
+        val_cost = sum(
+            _score_ppo_operating_month(
+                result["p_grid_days"],
+                result["p_bess_days"],
+                cfg,
+                battery_wear_cost,
+                month.days,
+            )["total_operating_cost_vnd"]
+            for month, result in results
+        )
         perf["scoring"] += time.perf_counter() - scoring_started
         return val_cost
 
@@ -1133,14 +1269,34 @@ def main() -> None:
     use_bc = False
 
     if args.oracle_bc_enabled:
-        teacher_observations, teacher_targets, teacher_rewards = _collect_oracle_teacher_samples(
-            train_months[0],
-            oracle_dispatch,
-            cfg,
-            power_scale_kw=p_ref,
-            battery_wear_cost=battery_wear_cost,
-            native_steps=native_steps,
-        )
+        observation_parts = []
+        target_parts = []
+        reward_parts = []
+        teacher_episode_lengths = []
+        dispatch_cursor = 0
+        for train_month in train_months:
+            month_day_count = len(train_month.days)
+            month_dispatch = oracle_dispatch[
+                dispatch_cursor:dispatch_cursor + month_day_count
+            ]
+            dispatch_cursor += month_day_count
+            month_observations, month_targets, month_rewards = _collect_oracle_teacher_samples(
+                train_month,
+                month_dispatch,
+                cfg,
+                power_scale_kw=p_ref,
+                battery_wear_cost=battery_wear_cost,
+                native_steps=native_steps,
+            )
+            observation_parts.append(month_observations)
+            target_parts.append(month_targets)
+            reward_parts.append(month_rewards)
+            teacher_episode_lengths.append(len(month_observations))
+        if dispatch_cursor != len(oracle_dispatch):
+            raise RuntimeError("Oracle teacher dispatch was not consumed exactly once")
+        teacher_observations = np.concatenate(observation_parts, axis=0)
+        teacher_targets = np.concatenate(target_parts, axis=0)
+        teacher_rewards = np.concatenate(reward_parts, axis=0)
         bc_started = time.perf_counter()
         bc_stats.update(
             _behavior_clone_actor(
@@ -1153,6 +1309,7 @@ def main() -> None:
                 minibatch=args.oracle_bc_minibatch,
                 target_mse=args.oracle_bc_target_mse,
                 score_policy_cost=validate_policy_cost if agent.recurrent_enabled else None,
+                episode_lengths=teacher_episode_lengths,
             )
         )
         bc_stats.update(
@@ -1166,6 +1323,7 @@ def main() -> None:
                 learning_rate=args.oracle_bc_learning_rate,
                 minibatch=args.oracle_bc_minibatch,
                 target_mse=args.oracle_bc_target_mse,
+                episode_lengths=teacher_episode_lengths,
             )
         )
         bc_stats["seconds"] = time.perf_counter() - bc_started
@@ -1233,9 +1391,10 @@ def main() -> None:
         flush=True,
     )
 
-    # Fit-test means fit the exact supplied episode. Do not quietly mutate the
-    # load/PV data while asking whether PPO can memorize it.
-    env = make_training_env(train_months[0])
+    # One PPO rollout/update is one calendar billing month. Cycle training months
+    # chronologically and reset BrainEnv/recurrent memory at every month boundary.
+    train_month_cursor = 0
+    env = make_training_env(train_months[train_month_cursor])
     obs = observation_array(env.reset())
     agent.reset_recurrent_state()
     steps = 0
@@ -1397,14 +1556,15 @@ def main() -> None:
 
         if done:
             agent.reset_recurrent_state()
-            env = make_training_env(train_months[0])
+            train_month_cursor = (train_month_cursor + 1) % len(train_months)
+            env = make_training_env(train_months[train_month_cursor])
             next_obs = observation_array(env.reset())
         else:
             if transition.next_observation is None:
                 raise RuntimeError("BrainEnv omitted next observation before episode end")
             next_obs = observation_array(transition.next_observation)
         obs = next_obs
-        if not buffer.full():
+        if not done and not buffer.full():
             continue
 
         perf["rollout"] += time.perf_counter() - rollout_started
@@ -1498,17 +1658,44 @@ def main() -> None:
 
     persist_progress()
 
-    test_month = MonthData(days=test_days, source="test")
     best_agent = PPOAgent(OBSERVATION_DIM, device=learner_device)
     best_agent.load(RESULTS_DIR / f"policy_{tag}.pt")
-    result = run_drl_policy(test_month, cfg, best_agent, p_ref_kw=p_ref)
-    test_operating = _score_ppo_operating_month(
-        result["p_grid_days"], result["p_bess_days"], cfg,
-        battery_wear_cost, test_days,
+    test_results = [
+        (month, run_drl_policy(month, cfg, best_agent, p_ref_kw=p_ref))
+        for month in test_months
+    ]
+    test_operating_months = [
+        _score_ppo_operating_month(
+            result["p_grid_days"],
+            result["p_bess_days"],
+            cfg,
+            battery_wear_cost,
+            month.days,
+        )
+        for month, result in test_results
+    ]
+    test_cost = sum(
+        operating["total_operating_cost_vnd"]
+        for operating in test_operating_months
     )
-    test_cost = test_operating["total_operating_cost_vnd"]
-    no_bess_cost = score_month(run_no_bess(test_month, cfg)["p_grid_days"], cfg, days=test_days)["total_cost_vnd"]
+    test_wear_cost = sum(
+        operating["wear_cost_vnd"]
+        for operating in test_operating_months
+    )
+    test_throughput_kwh = sum(
+        operating["throughput_kwh"]
+        for operating in test_operating_months
+    )
+    no_bess_cost = sum(
+        score_month(
+            run_no_bess(month, cfg)["p_grid_days"],
+            cfg,
+            days=month.days,
+        )["total_cost_vnd"]
+        for month in test_months
+    )
     test_saving = (no_bess_cost - test_cost) / no_bess_cost * 100
+    final_test_result = test_results[-1][1]
     best_agent.meta = {
         **agent.meta,
         "test_saving_pct": round(test_saving, 2),
@@ -1521,10 +1708,11 @@ def main() -> None:
         "policy_cost_vnd": test_cost,
         "no_bess_vnd": no_bess_cost,
         "saving_pct": test_saving,
-        "wear_cost_vnd": test_operating["wear_cost_vnd"],
-        "throughput_kwh": test_operating["throughput_kwh"],
+        "wear_cost_vnd": test_wear_cost,
+        "throughput_kwh": test_throughput_kwh,
+        "month_count": len(test_months),
         "initial_soc": float(cfg.SOC_min),
-        "final_soc": float(result["soc_days"][-1][-1]),
+        "final_soc": float(final_test_result["soc_days"][-1][-1]),
     }
     write_report(report_path, report)
     print(

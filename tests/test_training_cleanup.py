@@ -130,6 +130,8 @@ class GenericPPOLauncherTests(unittest.TestCase):
                 "p_rated_kw": 500.0,
                 "obs_variant": "brain7",
                 "device": "cpu",
+                "val_months": 2,
+                "test_months": 3,
                 "steps": 12345,
                 "seed": 7,
                 "gamma": 0.98,
@@ -175,6 +177,8 @@ class GenericPPOLauncherTests(unittest.TestCase):
             )["cmd"]
 
         expected_values = {
+            "--val-months": "2",
+            "--test-months": "3",
             "--steps": "12345",
             "--seed": "7",
             "--gamma": "0.98",
