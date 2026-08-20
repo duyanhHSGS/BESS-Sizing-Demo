@@ -260,21 +260,15 @@ def _behavior_clone_actor(
     epochs_completed = 0
     for epoch in range(max_epochs):
         if agent.recurrent_enabled:
-            # Truncated BPTT: preserve time order, detach only at chunk borders.
-            # This teaches the GRU what came before instead of shuffling history away.
-            hidden = None
-            for start in range(0, len(observations), agent.recurrent_sequence_length):
-                stop = min(start + agent.recurrent_sequence_length, len(observations))
-                mean, _, hidden = agent.net.actor_sequence(
-                    obs_t[start:stop].unsqueeze(0),
-                    hidden,
-                )
-                prediction = torch.tanh(mean.squeeze(0)).squeeze(-1)
-                loss = torch.mean((prediction - target_t[start:stop]) ** 2)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                hidden = hidden.detach()
+            # Full-episode BPTT keeps every hidden state consistent with the same
+            # network weights. The old chunked loop stepped Adam between chunks,
+            # then fed later chunks hidden state produced by pre-update weights.
+            mean, _, _ = agent.net.actor_sequence(obs_t.unsqueeze(0), None)
+            prediction = torch.tanh(mean.squeeze(0)).squeeze(-1)
+            loss = torch.mean((prediction - target_t) ** 2)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
         else:
             indexes = rng.permutation(len(observations))
             for start in range(0, len(indexes), minibatch):
@@ -357,19 +351,14 @@ def _behavior_clone_critic(
     epochs_completed = 0
     for epoch in range(max_epochs):
         if agent.recurrent_enabled:
-            hidden = None
-            for start in range(0, len(observations), agent.recurrent_sequence_length):
-                stop = min(start + agent.recurrent_sequence_length, len(observations))
-                prediction, hidden = agent.net.value_sequence(
-                    obs_t[start:stop].unsqueeze(0),
-                    hidden,
-                )
-                prediction = prediction.squeeze(0)
-                loss = torch.mean((prediction - return_t[start:stop]) ** 2)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                hidden = hidden.detach()
+            # Match actor warm-start semantics: one chronological month graph,
+            # one optimizer step, no stale hidden state crossing an Adam update.
+            prediction, _ = agent.net.value_sequence(obs_t.unsqueeze(0), None)
+            prediction = prediction.squeeze(0)
+            loss = torch.mean((prediction - return_t) ** 2)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
         else:
             indexes = rng.permutation(len(observations))
             for start in range(0, len(indexes), minibatch):
