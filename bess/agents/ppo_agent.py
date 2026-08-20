@@ -286,8 +286,10 @@ def _gae_advantages(
 
 
 def _critic_value_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Robust critic loss so large return errors do not dominate the update direction."""
-    return nn.functional.smooth_l1_loss(prediction, target)
+    """Scale-robust critic loss using the rollout return spread as Huber's transition."""
+    with torch.no_grad():
+        beta = max(float(target.std(unbiased=False).item()), 1.0)
+    return nn.functional.smooth_l1_loss(prediction, target, beta=beta)
 
 
 class PPOAgent:

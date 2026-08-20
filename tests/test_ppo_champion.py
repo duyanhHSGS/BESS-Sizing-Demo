@@ -262,6 +262,7 @@ class PPOCriticLossTests(unittest.TestCase):
 
         self.assertAlmostEqual(float(loss.detach()), 9.5)
         self.assertAlmostEqual(float(prediction.grad.item()), 1.0)
+        self.assertAlmostEqual(float(prediction.grad.item()), 1.0)
 
 
 class PPORecurrentMemoryTests(unittest.TestCase):
