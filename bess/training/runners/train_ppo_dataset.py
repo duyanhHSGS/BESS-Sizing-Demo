@@ -453,24 +453,13 @@ def _should_reanchor_rejected_candidate(
     allow_reset: bool,
     consecutive_rejections: int,
     reset_patience: int,
-    candidate_cost: float,
-    previous_rejected_cost: float | None,
 ) -> bool:
-    """Re-anchor only after a rejected learner stops improving.
-
-    A rejected candidate can still be moving toward the Champion.  With a reset
-    patience of one, immediately restoring every rejection turns PPO into
-    independent one-update darts and destroys multi-update learning trajectories.
-    Give the live learner a runway while its deterministic validation cost keeps
-    falling; once the rejected trajectory is flat or worse, return to Champion.
-    """
-    if not resets_enabled or not allow_reset:
-        return False
-    if consecutive_rejections < reset_patience:
-        return False
-    if previous_rejected_cost is None:
-        return False
-    return candidate_cost >= previous_rejected_cost
+    """Apply the configured Champion re-anchor rule after rejected updates."""
+    return (
+        resets_enabled
+        and allow_reset
+        and consecutive_rejections >= reset_patience
+    )
 
 
 def _save_accepted_champion(agent: PPOAgent, checkpoint_path: Path, accepted: bool) -> bool:
@@ -1217,7 +1206,6 @@ def main() -> None:
     updates = 0
     candidate_evaluations = 0
     consecutive_rejections = 0
-    previous_rejected_cost: float | None = None
     last_validated_update = 0
     rollout_action_sum = 0.0
     rollout_action_abs_sum = 0.0
@@ -1236,7 +1224,6 @@ def main() -> None:
         nonlocal champion_state
         nonlocal candidate_evaluations
         nonlocal consecutive_rejections
-        nonlocal previous_rejected_cost
         nonlocal last_validated_update
 
         candidate_evaluations += 1
@@ -1246,7 +1233,6 @@ def main() -> None:
         if accepted:
             report["training"]["accepted_updates"] += 1
             consecutive_rejections = 0
-            previous_rejected_cost = None
             champion_state = agent.snapshot_training_state()
             checkpoint_started = time.perf_counter()
             if _save_accepted_champion(agent, checkpoint_path, accepted=True):
@@ -1259,13 +1245,8 @@ def main() -> None:
                 allow_reset=allow_reset,
                 consecutive_rejections=consecutive_rejections,
                 reset_patience=args.challenger_reset_patience,
-                candidate_cost=candidate_cost,
-                previous_rejected_cost=previous_rejected_cost,
             )
             if should_reanchor:
-                # IQ-42 trend-gated re-anchor: a rejected policy is not necessarily
-                # a bad learning direction. Keep studying while validation improves;
-                # RETURN BY DEATH only when that rejected trajectory stalls/regresses.
                 _restore_reanchor_state(
                     agent,
                     champion_state,
@@ -1274,10 +1255,7 @@ def main() -> None:
                 )
                 report["training"]["learner_resets"] += 1
                 consecutive_rejections = 0
-                previous_rejected_cost = None
                 reset_to_champion = True
-            else:
-                previous_rejected_cost = candidate_cost
 
         last_validated_update = updates
         report["training"]["candidate_evaluations"] = candidate_evaluations

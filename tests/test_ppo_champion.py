@@ -9,7 +9,12 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from bess.agents.ppo_agent import PPOAgent, RolloutBuffer, _gae_advantages
+from bess.agents.ppo_agent import (
+    PPOAgent,
+    RolloutBuffer,
+    _critic_value_loss,
+    _gae_advantages,
+)
 from bess.training.runners.train_ppo_dataset import (
     _action_mismatch_penalty_vnd,
     _behavior_clone_actor,
@@ -247,6 +252,18 @@ class PPOGAETests(unittest.TestCase):
         np.testing.assert_allclose(advantages, [3.0])
 
 
+class PPOCriticLossTests(unittest.TestCase):
+    def test_smooth_l1_critic_loss_bounds_large_residual_gradient(self):
+        prediction = torch.tensor([10.0], requires_grad=True)
+        target = torch.tensor([0.0])
+
+        loss = _critic_value_loss(prediction, target)
+        loss.backward()
+
+        self.assertAlmostEqual(float(loss.detach()), 9.5)
+        self.assertAlmostEqual(float(prediction.grad.item()), 1.0)
+
+
 class PPORecurrentMemoryTests(unittest.TestCase):
     def test_recurrent_rollout_update_and_checkpoint_roundtrip(self):
         agent = PPOAgent(
@@ -394,46 +411,31 @@ class PPOChampionSelectionTests(unittest.TestCase):
 
         self.assertEqual(accepted_sequence, [100.0, 80.0, 80.0, 70.0, 70.0])
 
-    def test_reanchor_waits_while_rejected_learner_is_improving(self):
+    def test_reanchor_gate_respects_enable_allow_and_patience_controls(self):
         common = {
-            "resets_enabled": True,
             "allow_reset": True,
             "reset_patience": 1,
         }
-        self.assertFalse(
-            _should_reanchor_rejected_candidate(
-                **common,
-                consecutive_rejections=1,
-                candidate_cost=120.0,
-                previous_rejected_cost=None,
-            )
-        )
-        self.assertFalse(
-            _should_reanchor_rejected_candidate(
-                **common,
-                consecutive_rejections=2,
-                candidate_cost=110.0,
-                previous_rejected_cost=120.0,
-            )
-        )
         self.assertTrue(
             _should_reanchor_rejected_candidate(
                 **common,
-                consecutive_rejections=3,
-                candidate_cost=111.0,
-                previous_rejected_cost=110.0,
+                resets_enabled=True,
+                consecutive_rejections=1,
             )
         )
-
-    def test_reanchor_gate_still_respects_disable_and_patience_controls(self):
         self.assertFalse(
             _should_reanchor_rejected_candidate(
+                **common,
                 resets_enabled=False,
-                allow_reset=True,
+                consecutive_rejections=99,
+            )
+        )
+        self.assertFalse(
+            _should_reanchor_rejected_candidate(
+                resets_enabled=True,
+                allow_reset=False,
                 consecutive_rejections=99,
                 reset_patience=1,
-                candidate_cost=120.0,
-                previous_rejected_cost=110.0,
             )
         )
         self.assertFalse(
@@ -442,8 +444,6 @@ class PPOChampionSelectionTests(unittest.TestCase):
                 allow_reset=True,
                 consecutive_rejections=2,
                 reset_patience=3,
-                candidate_cost=120.0,
-                previous_rejected_cost=110.0,
             )
         )
 

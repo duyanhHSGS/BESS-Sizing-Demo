@@ -285,6 +285,11 @@ def _gae_advantages(
     return adv
 
 
+def _critic_value_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Robust critic loss so large return errors do not dominate the update direction."""
+    return nn.functional.smooth_l1_loss(prediction, target)
+
+
 class PPOAgent:
     def __init__(
         self,
@@ -625,7 +630,7 @@ class PPOAgent:
                 surr1 = ratio * adv_t[mb]
                 surr2 = torch.clamp(ratio, 1 - self.clip, 1 + self.clip) * adv_t[mb]
                 pi_loss = -torch.min(surr1, surr2).mean()
-                v_loss = ((values - ret_t[mb]) ** 2).mean()
+                v_loss = _critic_value_loss(values, ret_t[mb])
                 _, entropy_log_probability, _ = _sample_squashed(
                     dist,
                     deterministic=False,
@@ -802,7 +807,7 @@ class PPOAgent:
                 surr1 = ratio * adv_t[mb]
                 surr2 = torch.clamp(ratio, 1 - self.clip, 1 + self.clip) * adv_t[mb]
                 pi_loss = -torch.min(surr1, surr2).mean()
-                v_loss = ((self.net.value(obs[mb]) - ret_t[mb]) ** 2).mean()
+                v_loss = _critic_value_loss(self.net.value(obs[mb]), ret_t[mb])
                 _, entropy_log_probability, _ = _sample_squashed(
                     dist,
                     deterministic=False,
