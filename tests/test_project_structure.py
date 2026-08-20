@@ -109,6 +109,7 @@ def test_generic_ppo_ui_exposes_and_sends_every_project_tunable() -> None:
         "preserve_critic_on_reanchor": "train-preserve-critic-on-reanchor",
         "action_mismatch_shaping_scale": "train-action-mismatch-shaping-scale",
         "oracle_bc_enabled": "train-oracle-bc-enabled",
+        "oracle_actor_bc_max_epochs": "train-oracle-actor-bc-max-epochs",
         "oracle_bc_max_epochs": "train-oracle-bc-max-epochs",
         "oracle_bc_learning_rate": "train-oracle-bc-learning-rate",
         "oracle_bc_minibatch": "train-oracle-bc-minibatch",

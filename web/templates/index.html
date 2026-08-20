@@ -1507,7 +1507,9 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
               step="0.05" value="{{ ppo_tunables.action_mismatch_shaping_scale }}"></label>
           <label class="train-ppo-field"><input type="checkbox" id="train-oracle-bc-enabled"
               {% if ppo_tunables.oracle_bc_enabled %}checked{% endif %}> Oracle BC warm start enabled</label>
-          <label class="train-ppo-field">Oracle BC max epochs <input type="number" id="train-oracle-bc-max-epochs" min="0" max="1000000"
+          <label class="train-ppo-field">Oracle actor BC max epochs <input type="number" id="train-oracle-actor-bc-max-epochs" min="0" max="1000000"
+              step="1" value="{{ ppo_tunables.oracle_actor_bc_max_epochs }}"></label>
+          <label class="train-ppo-field">Oracle critic BC max epochs <input type="number" id="train-oracle-bc-max-epochs" min="0" max="1000000"
               step="1" value="{{ ppo_tunables.oracle_bc_max_epochs }}"></label>
           <label class="train-ppo-field">Oracle BC learning rate <input type="number" id="train-oracle-bc-learning-rate" min="0.000000001" max="1"
               step="0.0001" value="{{ ppo_tunables.oracle_bc_learning_rate }}"></label>
@@ -4976,6 +4978,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         preserve_critic_on_reanchor: document.getElementById("train-preserve-critic-on-reanchor").checked,
         action_mismatch_shaping_scale: Number(document.getElementById("train-action-mismatch-shaping-scale").value),
         oracle_bc_enabled: document.getElementById("train-oracle-bc-enabled").checked,
+        oracle_actor_bc_max_epochs: Number(document.getElementById("train-oracle-actor-bc-max-epochs").value),
         oracle_bc_max_epochs: Number(document.getElementById("train-oracle-bc-max-epochs").value),
         oracle_bc_learning_rate: Number(document.getElementById("train-oracle-bc-learning-rate").value),
         oracle_bc_minibatch: Number(document.getElementById("train-oracle-bc-minibatch").value),

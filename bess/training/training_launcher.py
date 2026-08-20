@@ -521,6 +521,8 @@ def build_training_command(
                 str(_bounded_int(payload, "challenger_reset_patience", defaults["challenger_reset_patience"], minimum=1, maximum=1_000_000)),
                 "--action-mismatch-shaping-scale",
                 str(mismatch_scale),
+                "--oracle-actor-bc-max-epochs",
+                str(_bounded_int(payload, "oracle_actor_bc_max_epochs", defaults["oracle_actor_bc_max_epochs"], minimum=0, maximum=1_000_000)),
                 "--oracle-bc-max-epochs",
                 str(_bounded_int(payload, "oracle_bc_max_epochs", defaults["oracle_bc_max_epochs"], minimum=0, maximum=1_000_000)),
                 "--oracle-bc-learning-rate",

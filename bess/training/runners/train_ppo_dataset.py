@@ -45,6 +45,7 @@ from bess.core.settings import (
     PPO_LEARNING_RATE,
     PPO_LOG_EVERY_UPDATES,
     PPO_MINIBATCH,
+    PPO_ORACLE_ACTOR_BC_MAX_EPOCHS,
     PPO_ORACLE_BC_ENABLED,
     PPO_ORACLE_BC_LEARNING_RATE,
     PPO_ORACLE_BC_MAX_EPOCHS,
@@ -223,7 +224,7 @@ def _behavior_clone_actor(
     targets: np.ndarray,
     *,
     seed: int,
-    max_epochs: int = PPO_ORACLE_BC_MAX_EPOCHS,
+    max_epochs: int = PPO_ORACLE_ACTOR_BC_MAX_EPOCHS,
     learning_rate: float = PPO_ORACLE_BC_LEARNING_RATE,
     minibatch: int = PPO_ORACLE_BC_MINIBATCH,
     target_mse: float = PPO_ORACLE_BC_TARGET_MSE,
@@ -590,6 +591,11 @@ def main() -> None:
         default=PPO_ORACLE_BC_ENABLED,
     )
     parser.add_argument(
+        "--oracle-actor-bc-max-epochs",
+        type=int,
+        default=PPO_ORACLE_ACTOR_BC_MAX_EPOCHS,
+    )
+    parser.add_argument(
         "--oracle-bc-max-epochs",
         type=int,
         default=PPO_ORACLE_BC_MAX_EPOCHS,
@@ -654,6 +660,8 @@ def main() -> None:
         raise SystemExit("validate-every-updates must be >= 1")
     if args.challenger_reset_patience < 1:
         raise SystemExit("challenger-reset-patience must be >= 1")
+    if args.oracle_actor_bc_max_epochs < 0:
+        raise SystemExit("oracle-actor-bc-max-epochs must be >= 0")
     if args.oracle_bc_max_epochs < 0:
         raise SystemExit("oracle-bc-max-epochs must be >= 0")
     if args.oracle_bc_minibatch < 1:
@@ -863,6 +871,7 @@ def main() -> None:
         "preserve_critic_on_reanchor": args.preserve_critic_on_reanchor,
         "reanchor_scope": reanchor_scope,
         "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,
+        "oracle_actor_behavior_cloning_max_epochs": args.oracle_actor_bc_max_epochs,
         "oracle_behavior_cloning_max_epochs": args.oracle_bc_max_epochs,
         "oracle_behavior_cloning_learning_rate": args.oracle_bc_learning_rate,
         "oracle_behavior_cloning_minibatch": args.oracle_bc_minibatch,
@@ -959,6 +968,7 @@ def main() -> None:
             "preserve_critic_on_reanchor": args.preserve_critic_on_reanchor,
             "reanchor_scope": reanchor_scope,
             "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,
+            "oracle_actor_behavior_cloning_max_epochs": args.oracle_actor_bc_max_epochs,
             "oracle_behavior_cloning_max_epochs": args.oracle_bc_max_epochs,
             "oracle_behavior_cloning_learning_rate": args.oracle_bc_learning_rate,
             "oracle_behavior_cloning_minibatch": args.oracle_bc_minibatch,
@@ -1087,7 +1097,7 @@ def main() -> None:
                 teacher_observations,
                 teacher_targets,
                 seed=args.seed,
-                max_epochs=args.oracle_bc_max_epochs,
+                max_epochs=args.oracle_actor_bc_max_epochs,
                 learning_rate=args.oracle_bc_learning_rate,
                 minibatch=args.oracle_bc_minibatch,
                 target_mse=args.oracle_bc_target_mse,
