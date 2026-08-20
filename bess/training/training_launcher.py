@@ -509,6 +509,8 @@ def build_training_command(
                 str(critic_grad_clip),
                 "--hidden-size",
                 str(_bounded_int(payload, "hidden_size", defaults["hidden_size"], minimum=1, maximum=4096)),
+                "--recurrent-sequence-length",
+                str(_bounded_int(payload, "recurrent_sequence_length", defaults["recurrent_sequence_length"], minimum=1, maximum=1_000_000)),
                 "--initial-log-std",
                 str(initial_log_std),
                 "--ppo-start-log-std",
@@ -533,6 +535,11 @@ def build_training_command(
                 str(_bounded_int(payload, "torch_threads", defaults["torch_threads"], minimum=1, maximum=128)),
             ]
         )
+        recurrent_enabled = _bool(
+            payload,
+            "recurrent_enabled",
+            defaults["recurrent_enabled"],
+        )
         challenger_resets_enabled = _bool(
             payload,
             "challenger_resets_enabled",
@@ -552,6 +559,11 @@ def build_training_command(
             raise TrainingLaunchError(
                 "preserve_critic_on_reanchor requires reset_optimizer_on_reanchor"
             )
+        cmd.append(
+            "--recurrent-enabled"
+            if recurrent_enabled
+            else "--no-recurrent-enabled"
+        )
         cmd.append(
             "--challenger-resets-enabled"
             if challenger_resets_enabled

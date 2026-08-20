@@ -51,6 +51,8 @@ from bess.core.settings import (
     PPO_ORACLE_BC_MINIBATCH,
     PPO_ORACLE_BC_TARGET_MSE,
     PPO_PRESERVE_CRITIC_ON_REANCHOR,
+    PPO_RECURRENT_ENABLED,
+    PPO_RECURRENT_SEQUENCE_LENGTH,
     PPO_RESET_OPTIMIZER_ON_REANCHOR,
     PPO_SEED,
     PPO_SOC_EDGE_LOG_STD_PENALTY,
@@ -234,29 +236,58 @@ def _behavior_clone_actor(
 
     obs_t = torch.as_tensor(observations, dtype=torch.float32, device=agent.device)
     target_t = torch.as_tensor(targets, dtype=torch.float32, device=agent.device)
-    optimizer = torch.optim.Adam(agent.net.actor.parameters(), lr=learning_rate)
+    if agent.recurrent_enabled:
+        actor_parameters = [
+            *agent.net.actor_encoder.parameters(),
+            *agent.net.actor_gru.parameters(),
+            *agent.net.actor.parameters(),
+        ]
+    else:
+        actor_parameters = list(agent.net.actor.parameters())
+    optimizer = torch.optim.Adam(actor_parameters, lr=learning_rate)
     rng = np.random.default_rng(seed)
 
     @torch.inference_mode()
     def full_mse() -> float:
-        prediction = torch.tanh(agent.net.actor(obs_t)).squeeze(-1)
+        if agent.recurrent_enabled:
+            mean, _, _ = agent.net.actor_sequence(obs_t.unsqueeze(0), None)
+            prediction = torch.tanh(mean.squeeze(0)).squeeze(-1)
+        else:
+            prediction = torch.tanh(agent.net.actor(obs_t)).squeeze(-1)
         return float(torch.mean((prediction - target_t) ** 2).cpu())
 
     initial_mse = full_mse()
     epochs_completed = 0
     for epoch in range(max_epochs):
-        indexes = rng.permutation(len(observations))
-        for start in range(0, len(indexes), minibatch):
-            mb = torch.as_tensor(
-                indexes[start:start + minibatch],
-                dtype=torch.long,
-                device=agent.device,
-            )
-            prediction = torch.tanh(agent.net.actor(obs_t[mb])).squeeze(-1)
-            loss = torch.mean((prediction - target_t[mb]) ** 2)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        if agent.recurrent_enabled:
+            # Truncated BPTT: preserve time order, detach only at chunk borders.
+            # This teaches the GRU what came before instead of shuffling history away.
+            hidden = None
+            for start in range(0, len(observations), agent.recurrent_sequence_length):
+                stop = min(start + agent.recurrent_sequence_length, len(observations))
+                mean, _, hidden = agent.net.actor_sequence(
+                    obs_t[start:stop].unsqueeze(0),
+                    hidden,
+                )
+                prediction = torch.tanh(mean.squeeze(0)).squeeze(-1)
+                loss = torch.mean((prediction - target_t[start:stop]) ** 2)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                hidden = hidden.detach()
+        else:
+            indexes = rng.permutation(len(observations))
+            for start in range(0, len(indexes), minibatch):
+                mb = torch.as_tensor(
+                    indexes[start:start + minibatch],
+                    dtype=torch.long,
+                    device=agent.device,
+                )
+                prediction = torch.tanh(agent.net.actor(obs_t[mb])).squeeze(-1)
+                loss = torch.mean((prediction - target_t[mb]) ** 2)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
         epochs_completed = epoch + 1
         if full_mse() <= target_mse:
             break
@@ -302,29 +333,56 @@ def _behavior_clone_critic(
 
     obs_t = torch.as_tensor(observations, dtype=torch.float32, device=agent.device)
     return_t = torch.as_tensor(returns, dtype=torch.float32, device=agent.device)
-    optimizer = torch.optim.Adam(agent.net.critic.parameters(), lr=learning_rate)
+    if agent.recurrent_enabled:
+        critic_parameters = [
+            *agent.net.critic_encoder.parameters(),
+            *agent.net.critic_gru.parameters(),
+            *agent.net.critic.parameters(),
+        ]
+    else:
+        critic_parameters = list(agent.net.critic.parameters())
+    optimizer = torch.optim.Adam(critic_parameters, lr=learning_rate)
     rng = np.random.default_rng(seed)
 
     @torch.inference_mode()
     def full_mse() -> float:
-        prediction = agent.net.value(obs_t)
+        if agent.recurrent_enabled:
+            prediction, _ = agent.net.value_sequence(obs_t.unsqueeze(0), None)
+            prediction = prediction.squeeze(0)
+        else:
+            prediction = agent.net.value(obs_t)
         return float(torch.mean((prediction - return_t) ** 2).cpu())
 
     initial_mse = full_mse()
     epochs_completed = 0
     for epoch in range(max_epochs):
-        indexes = rng.permutation(len(observations))
-        for start in range(0, len(indexes), minibatch):
-            mb = torch.as_tensor(
-                indexes[start:start + minibatch],
-                dtype=torch.long,
-                device=agent.device,
-            )
-            prediction = agent.net.value(obs_t[mb])
-            loss = torch.mean((prediction - return_t[mb]) ** 2)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        if agent.recurrent_enabled:
+            hidden = None
+            for start in range(0, len(observations), agent.recurrent_sequence_length):
+                stop = min(start + agent.recurrent_sequence_length, len(observations))
+                prediction, hidden = agent.net.value_sequence(
+                    obs_t[start:stop].unsqueeze(0),
+                    hidden,
+                )
+                prediction = prediction.squeeze(0)
+                loss = torch.mean((prediction - return_t[start:stop]) ** 2)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                hidden = hidden.detach()
+        else:
+            indexes = rng.permutation(len(observations))
+            for start in range(0, len(indexes), minibatch):
+                mb = torch.as_tensor(
+                    indexes[start:start + minibatch],
+                    dtype=torch.long,
+                    device=agent.device,
+                )
+                prediction = agent.net.value(obs_t[mb])
+                loss = torch.mean((prediction - return_t[mb]) ** 2)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
         epochs_completed = epoch + 1
         if full_mse() <= target_mse:
             break
@@ -373,14 +431,29 @@ def _restore_reanchor_state(
 ) -> None:
     """Restore Champion policy while optionally carrying live critic homework forward."""
     live_critic_state = None
+    live_critic_encoder_state = None
+    live_critic_gru_state = None
     if preserve_critic:
         live_critic_state = {
             key: value.detach().clone()
             for key, value in agent.net.critic.state_dict().items()
         }
+        if agent.recurrent_enabled:
+            live_critic_encoder_state = {
+                key: value.detach().clone()
+                for key, value in agent.net.critic_encoder.state_dict().items()
+            }
+            live_critic_gru_state = {
+                key: value.detach().clone()
+                for key, value in agent.net.critic_gru.state_dict().items()
+            }
     agent.restore_training_state(champion_state)
     if live_critic_state is not None:
         agent.net.critic.load_state_dict(live_critic_state)
+        if live_critic_encoder_state is not None:
+            agent.net.critic_encoder.load_state_dict(live_critic_encoder_state)
+        if live_critic_gru_state is not None:
+            agent.net.critic_gru.load_state_dict(live_critic_gru_state)
         agent._sync_collector()
     if reset_optimizer:
         agent.opt.state.clear()
@@ -437,6 +510,16 @@ def main() -> None:
     parser.add_argument("--actor-grad-clip", type=float, default=PPO_ACTOR_GRAD_CLIP)
     parser.add_argument("--critic-grad-clip", type=float, default=PPO_CRITIC_GRAD_CLIP)
     parser.add_argument("--hidden-size", type=int, default=PPO_HIDDEN_SIZE)
+    parser.add_argument(
+        "--recurrent-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=PPO_RECURRENT_ENABLED,
+    )
+    parser.add_argument(
+        "--recurrent-sequence-length",
+        type=int,
+        default=PPO_RECURRENT_SEQUENCE_LENGTH,
+    )
     parser.add_argument("--initial-log-std", type=float, default=PPO_INITIAL_LOG_STD)
     parser.add_argument("--ppo-start-log-std", type=float, default=PPO_BC_FINE_TUNE_LOG_STD)
     parser.add_argument(
@@ -533,6 +616,8 @@ def main() -> None:
         raise SystemExit("minibatch must be >= 1")
     if args.hidden_size < 1:
         raise SystemExit("hidden-size must be >= 1")
+    if args.recurrent_sequence_length < 1:
+        raise SystemExit("recurrent-sequence-length must be >= 1")
     if args.validate_every_updates < 1:
         raise SystemExit("validate-every-updates must be >= 1")
     if args.challenger_reset_patience < 1:
@@ -678,6 +763,8 @@ def main() -> None:
         hidden_size=args.hidden_size,
         initial_log_std=args.initial_log_std,
         exploration_lr_multiplier=args.exploration_lr_multiplier,
+        recurrent_enabled=args.recurrent_enabled,
+        recurrent_sequence_length=args.recurrent_sequence_length,
         soc_edge_log_std_penalty=args.soc_edge_log_std_penalty,
         actor_grad_clip=args.actor_grad_clip,
         critic_grad_clip=args.critic_grad_clip,
@@ -713,6 +800,13 @@ def main() -> None:
         "actor_grad_clip": agent.actor_grad_clip,
         "critic_grad_clip": agent.critic_grad_clip,
         "hidden_size": agent.hidden_size,
+        "recurrent_enabled": agent.recurrent_enabled,
+        "recurrent_sequence_length": agent.recurrent_sequence_length,
+        "policy_architecture": (
+            "brain7_separate_actor_critic_gru_v1"
+            if agent.recurrent_enabled
+            else "brain7_feedforward_mlp_v1"
+        ),
         "initial_log_std": agent.initial_log_std,
         "exploration_mode": "state_dependent_log_std_delta_soc_edge_v2",
         "exploration_hidden_size": agent.net.exploration_hidden_size,
@@ -745,7 +839,11 @@ def main() -> None:
         "log_every_updates": args.log_every_updates,
         "torch_threads": args.torch_threads,
     }
-    buffer = RolloutBuffer(decisions_per_episode, OBSERVATION_DIM)
+    buffer = RolloutBuffer(
+        decisions_per_episode,
+        OBSERVATION_DIM,
+        recurrent_hidden_size=agent.hidden_size if agent.recurrent_enabled else 0,
+    )
 
     val_base = score_month(run_no_bess(val_month, cfg)["p_grid_days"], cfg, days=val_days)["total_cost_vnd"]
     val_day_indexes = [day.day_index for day in val_days]
@@ -808,6 +906,13 @@ def main() -> None:
             "actor_grad_clip": agent.actor_grad_clip,
             "critic_grad_clip": agent.critic_grad_clip,
             "hidden_size": agent.hidden_size,
+            "recurrent_enabled": agent.recurrent_enabled,
+            "recurrent_sequence_length": agent.recurrent_sequence_length,
+            "policy_architecture": (
+                "brain7_separate_actor_critic_gru_v1"
+                if agent.recurrent_enabled
+                else "brain7_feedforward_mlp_v1"
+            ),
             "initial_log_std": agent.initial_log_std,
             "exploration_mode": "state_dependent_log_std_delta_soc_edge_v2",
             "exploration_hidden_size": agent.net.exploration_hidden_size,
@@ -1038,6 +1143,7 @@ def main() -> None:
     # load/PV data while asking whether PPO can memorize it.
     env = make_training_env(train_months[0])
     obs = observation_array(env.reset())
+    agent.reset_recurrent_state()
     steps = 0
     updates = 0
     candidate_evaluations = 0
@@ -1138,7 +1244,18 @@ def main() -> None:
             transition.reward_million_vnd
             - args.action_mismatch_shaping_scale * mismatch_penalty_vnd / REWARD_SCALE_VND
         )
-        buffer.add(obs, action, logp, reward, value, float(done), latent=latent)
+        actor_hidden, critic_hidden = agent.recurrent_rollout_inputs()
+        buffer.add(
+            obs,
+            action,
+            logp,
+            reward,
+            value,
+            float(done),
+            latent=latent,
+            actor_hidden=actor_hidden,
+            critic_hidden=critic_hidden,
+        )
         steps += 1
         perf["decisions"] += 1
         perf["native_rows"] += len(transition.native_results)
@@ -1155,6 +1272,7 @@ def main() -> None:
         rollout_count += 1
 
         if done:
+            agent.reset_recurrent_state()
             env = make_training_env(train_months[0])
             next_obs = observation_array(env.reset())
         else:
@@ -1167,7 +1285,7 @@ def main() -> None:
 
         perf["rollout"] += time.perf_counter() - rollout_started
         updates += 1
-        _, _, last_value = agent.act(obs)
+        last_value = agent.estimate_value(obs)
         update_started = time.perf_counter()
         update_stats = agent.update(buffer, 0.0 if done else last_value)
         perf["update"] += time.perf_counter() - update_started

@@ -98,6 +98,8 @@ def test_generic_ppo_ui_exposes_and_sends_every_project_tunable() -> None:
         "actor_grad_clip": "train-actor-grad-clip",
         "critic_grad_clip": "train-critic-grad-clip",
         "hidden_size": "train-hidden-size",
+        "recurrent_enabled": "train-recurrent-enabled",
+        "recurrent_sequence_length": "train-recurrent-sequence-length",
         "initial_log_std": "train-initial-log-std",
         "ppo_start_log_std": "train-ppo-start-log-std",
         "validate_every_updates": "train-validate-every-updates",

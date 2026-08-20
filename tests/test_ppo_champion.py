@@ -246,6 +246,61 @@ class PPOGAETests(unittest.TestCase):
         np.testing.assert_allclose(advantages, [3.0])
 
 
+class PPORecurrentMemoryTests(unittest.TestCase):
+    def test_recurrent_rollout_update_and_checkpoint_roundtrip(self):
+        agent = PPOAgent(
+            obs_dim=4,
+            seed=7,
+            device="cpu",
+            hidden_size=8,
+            recurrent_enabled=True,
+            recurrent_sequence_length=4,
+            epochs=1,
+            minibatch=8,
+        )
+        buffer = RolloutBuffer(8, 4, recurrent_hidden_size=8)
+        rng = np.random.default_rng(99)
+        for index in range(8):
+            obs = rng.normal(size=4).astype(np.float32)
+            action, logp, latent, value = agent.act_with_latent(obs)
+            actor_hidden, critic_hidden = agent.recurrent_rollout_inputs()
+            buffer.add(
+                obs,
+                action,
+                logp,
+                float(index % 3) * 0.1,
+                value,
+                float(index == 7),
+                latent=latent,
+                actor_hidden=actor_hidden,
+                critic_hidden=critic_hidden,
+            )
+
+        stats = agent.update(buffer, 0.0)
+        self.assertEqual(stats["recurrent_sequence_length"], 4)
+        self.assertEqual(stats["recurrent_chunk_count"], 2)
+        self.assertTrue(np.isfinite(stats["value_loss"]))
+
+        probe = np.array([0.1, -0.2, 0.3, 0.4], dtype=np.float32)
+        agent.reset_recurrent_state()
+        first_action = agent.predict_action(probe)
+        first_hidden = agent._actor_hidden.detach().clone()
+        second_action = agent.predict_action(probe)
+        second_hidden = agent._actor_hidden.detach().clone()
+        self.assertFalse(torch.equal(first_hidden, second_hidden))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "recurrent.pt"
+            agent.save(path)
+            loaded = PPOAgent(obs_dim=4, device="cpu", hidden_size=8)
+            loaded.load(path)
+            self.assertTrue(loaded.recurrent_enabled)
+            self.assertEqual(loaded.recurrent_sequence_length, 4)
+            loaded.reset_recurrent_state()
+            self.assertAlmostEqual(first_action, loaded.predict_action(probe), places=6)
+            self.assertAlmostEqual(second_action, loaded.predict_action(probe), places=6)
+
+
 class PPODeterminismTests(unittest.TestCase):
     def test_same_seed_replays_the_same_collection_and_update(self):
         def run_once(seed: int):

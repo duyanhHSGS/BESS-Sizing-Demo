@@ -146,6 +146,8 @@ class GenericPPOLauncherTests(unittest.TestCase):
                 "actor_grad_clip": 0.4,
                 "critic_grad_clip": 0.8,
                 "hidden_size": 96,
+                "recurrent_enabled": False,
+                "recurrent_sequence_length": 24,
                 "initial_log_std": -0.7,
                 "ppo_start_log_std": -1.25,
                 "validate_every_updates": 2,
@@ -188,6 +190,7 @@ class GenericPPOLauncherTests(unittest.TestCase):
             "--actor-grad-clip": "0.4",
             "--critic-grad-clip": "0.8",
             "--hidden-size": "96",
+            "--recurrent-sequence-length": "24",
             "--initial-log-std": "-0.7",
             "--ppo-start-log-std": "-1.25",
             "--validate-every-updates": "2",
@@ -202,6 +205,7 @@ class GenericPPOLauncherTests(unittest.TestCase):
         }
         for flag, expected in expected_values.items():
             self.assertEqual(command[command.index(flag) + 1], expected)
+        self.assertIn("--no-recurrent-enabled", command)
         self.assertIn("--no-challenger-resets-enabled", command)
         self.assertIn("--no-reset-optimizer-on-reanchor", command)
         self.assertIn("--no-preserve-critic-on-reanchor", command)

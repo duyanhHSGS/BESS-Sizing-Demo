@@ -80,7 +80,12 @@ PPO_STEPS = 400_000
 PPO_SEED = 0
 PPO_LEARNING_RATE = 1e-4
 PPO_EXPLORATION_LR_MULTIPLIER = 1.0
-PPO_SOC_EDGE_LOG_STD_PENALTY = 0.2
+# IQ-32's fixed SOC-edge prior underperformed IQ-29, so IQ-34 starts from the
+# proven IQ-29 exploration baseline before adding recurrent memory.
+PPO_SOC_EDGE_LOG_STD_PENALTY = 0.0
+PPO_RECURRENT_ENABLED = True
+# One recurrent training chunk = one day at the locked 30-minute control clock.
+PPO_RECURRENT_SEQUENCE_LENGTH = 48
 PPO_CLIP = 0.2
 PPO_FINE_TUNE_EPOCHS = 1
 PPO_MINIBATCH = 256
@@ -115,6 +120,8 @@ PPO_TUNABLE_DEFAULTS = {
     "learning_rate": PPO_LEARNING_RATE,
     "exploration_lr_multiplier": PPO_EXPLORATION_LR_MULTIPLIER,
     "soc_edge_log_std_penalty": PPO_SOC_EDGE_LOG_STD_PENALTY,
+    "recurrent_enabled": PPO_RECURRENT_ENABLED,
+    "recurrent_sequence_length": PPO_RECURRENT_SEQUENCE_LENGTH,
     "ppo_clip": PPO_CLIP,
     "ppo_epochs": PPO_FINE_TUNE_EPOCHS,
     "minibatch": PPO_MINIBATCH,

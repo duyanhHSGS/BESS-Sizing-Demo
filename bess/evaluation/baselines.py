@@ -98,6 +98,8 @@ def run_drl_policy(
             f"current BrainEnv requires {OBSERVATION_DIM}. Retrain this policy."
         )
 
+    if hasattr(agent, "reset_recurrent_state"):
+        agent.reset_recurrent_state()
     wear_cost = float(meta.get("battery_wear_cost", 0.0))
     env = make_brain_env(
         month,
@@ -149,6 +151,8 @@ def run_drl_policy(
     if measure_latency:
         out["latency_ms_mean"] = float(np.mean(latencies))
         out["latency_ms_max"] = float(np.max(latencies))
+    if hasattr(agent, "reset_recurrent_state"):
+        agent.reset_recurrent_state()
     return out
 
 
