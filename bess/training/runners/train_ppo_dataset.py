@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import math
 import time
@@ -510,16 +511,58 @@ def _resolve_challenger(
     return champion_cost, False
 
 
+def _calendar_month_is_complete(month: MonthData) -> bool:
+    """Return True only when a month contains every calendar day exactly once."""
+    if not month.days:
+        return False
+    dates = [datetime.fromisoformat(str(day.date_iso)).date() for day in month.days]
+    year = dates[0].year
+    month_number = dates[0].month
+    if any(date.year != year or date.month != month_number for date in dates):
+        return False
+    expected_days = calendar.monthrange(year, month_number)[1]
+    return (
+        len(dates) == expected_days
+        and {date.day for date in dates} == set(range(1, expected_days + 1))
+    )
+
+
+def _complete_calendar_month_blocks(days):
+    """Keep complete calendar months, allowing only incomplete edge fragments."""
+    calendar_months = month_blocks(list(days), minimum_days=1)
+    complete = [_calendar_month_is_complete(month) for month in calendar_months]
+    if not any(complete):
+        raise ValueError("Training CSV contains no complete calendar month")
+
+    first_complete = complete.index(True)
+    last_complete = len(complete) - 1 - complete[::-1].index(True)
+    incomplete_internal = [
+        calendar_months[index].source
+        for index in range(first_complete, last_complete + 1)
+        if not complete[index]
+    ]
+    if incomplete_internal:
+        raise ValueError(
+            "Training CSV has incomplete internal calendar month(s): "
+            + ", ".join(incomplete_internal)
+        )
+
+    ignored_edge_months = (
+        calendar_months[:first_complete] + calendar_months[last_complete + 1:]
+    )
+    return calendar_months[first_complete:last_complete + 1], ignored_edge_months
+
+
 def _chronological_month_holdout_split(days, val_months: int, test_months: int):
-    """Split whole calendar months: oldest train / newer validation / newest test."""
+    """Split complete months: oldest train / newer validation / newest test."""
     if val_months < 1 or test_months < 1:
         raise ValueError("Validation and test holdouts must each contain at least 1 month")
-    calendar_months = month_blocks(list(days), minimum_days=1)
+    calendar_months, ignored_edge_months = _complete_calendar_month_blocks(days)
     required_months = val_months + test_months + 1
     if len(calendar_months) < required_months:
         raise ValueError(
-            "Training CSV must span at least "
-            f"{required_months} calendar months for {val_months} validation + "
+            "Training CSV must contain at least "
+            f"{required_months} complete calendar months for {val_months} validation + "
             f"{test_months} test + at least 1 training month; got {len(calendar_months)}"
         )
     train_stop = len(calendar_months) - val_months - test_months
@@ -532,6 +575,7 @@ def _chronological_month_holdout_split(days, val_months: int, test_months: int):
         _flatten(calendar_months[:train_stop]),
         _flatten(calendar_months[train_stop:val_stop]),
         _flatten(calendar_months[val_stop:]),
+        _flatten(ignored_edge_months),
     )
 
 
@@ -899,13 +943,16 @@ def main() -> None:
     csv_dt = 24.0 / len(days[0].load)
 
     try:
-        train_days, val_days, test_days = _chronological_month_holdout_split(
-            days,
-            args.val_months,
-            args.test_months,
+        train_days, val_days, test_days, ignored_edge_days = (
+            _chronological_month_holdout_split(
+                days,
+                args.val_months,
+                args.test_months,
+            )
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+    ignored_edge_months = sorted({str(day.date_iso)[:7] for day in ignored_edge_days})
     # Training-only scale: validation/test peaks must not leak into the policy's
     # observation normalization or reference power.
     p_ref = _training_reference_power_kw(train_days)
@@ -1015,7 +1062,9 @@ def main() -> None:
         "validation_range": [val_days[0].date_iso, val_days[-1].date_iso],
         "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
         "temporary_full_dataset_overlap": False,
-        "data_overlap_note": "disjoint chronological calendar-month holdouts",
+        "data_overlap_note": "disjoint complete chronological calendar-month holdouts",
+        "ignored_incomplete_edge_days": len(ignored_edge_days),
+        "ignored_incomplete_edge_months": ignored_edge_months,
         "validation_month_count": len(validation_months),
         "test_month_count": len(test_months),
         "training_augmentation_enabled": False,
@@ -1091,7 +1140,9 @@ def main() -> None:
             "validation_range": [val_days[0].date_iso, val_days[-1].date_iso],
             "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
             "temporary_full_dataset_overlap": False,
-            "split_mode": "chronological_calendar_months",
+            "split_mode": "complete_chronological_calendar_months",
+            "ignored_incomplete_edge_days": len(ignored_edge_days),
+            "ignored_incomplete_edge_months": ignored_edge_months,
             "validation_months": len(validation_months),
             "test_months": len(test_months),
         },
@@ -1179,10 +1230,11 @@ def main() -> None:
     write_curve(curve_path, [], fields=PPO_CHAMPION_CURVE_FIELDS)
     write_report(report_path, report)
     print(
-        f"[train-ds] CALENDAR-MONTH HOLDOUT | {len(days)} days | "
+        f"[train-ds] COMPLETE CALENDAR-MONTH HOLDOUT | {len(days)} source days | "
         f"train {len(train_months)}mo/{len(train_days)}d | "
         f"val {len(validation_months)}mo/{len(val_days)}d | "
         f"test {len(test_months)}mo/{len(test_days)}d | "
+        f"ignored edge {len(ignored_edge_days)}d | "
         f"gamma {gamma:g} | lambda {args.lambda_value:g} | "
         f"UI wear {battery_wear_cost:g} VND/kWh | "
         f"learner {learner_device} (requested {args.device}) | BrainEnv eyes={OBSERVATION_DIM} | "
