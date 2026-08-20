@@ -447,6 +447,38 @@ def _resolve_challenger(
     return champion_cost, False
 
 
+def _midpoint_challenger_state(champion_state: dict, candidate_state: dict) -> dict:
+    """Build the exact half-step network between Champion and challenger."""
+    champion_network = champion_state["network"]
+    candidate_network = candidate_state["network"]
+    if champion_network.keys() != candidate_network.keys():
+        raise ValueError("Champion/challenger network states do not match")
+
+    midpoint_network = {}
+    for key, champion_value in champion_network.items():
+        candidate_value = candidate_network[key]
+        if torch.is_tensor(champion_value) and torch.is_tensor(candidate_value):
+            if champion_value.shape != candidate_value.shape:
+                raise ValueError(f"Champion/challenger tensor shape mismatch for {key}")
+            if torch.is_floating_point(champion_value):
+                midpoint_network[key] = torch.lerp(
+                    champion_value,
+                    candidate_value,
+                    0.5,
+                )
+            else:
+                midpoint_network[key] = candidate_value.detach().clone()
+        else:
+            midpoint_network[key] = candidate_value
+
+    return {
+        "network": midpoint_network,
+        # Adam moments came from the gradient that created this direction, so keep
+        # them even though validation tests only half of the resulting weight move.
+        "optimizer": candidate_state["optimizer"],
+    }
+
+
 def _should_reanchor_rejected_candidate(
     *,
     resets_enabled: bool,
@@ -885,6 +917,7 @@ def main() -> None:
         "reset_optimizer_on_reanchor": args.reset_optimizer_on_reanchor,
         "preserve_critic_on_reanchor": args.preserve_critic_on_reanchor,
         "reanchor_scope": reanchor_scope,
+        "rejected_midpoint_rescue": "fixed_half_step_on_reanchor_v1",
         "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,
         "oracle_actor_behavior_cloning_max_epochs": args.oracle_actor_bc_max_epochs,
         "oracle_behavior_cloning_max_epochs": args.oracle_bc_max_epochs,
@@ -982,6 +1015,9 @@ def main() -> None:
             "reset_optimizer_on_reanchor": args.reset_optimizer_on_reanchor,
             "preserve_critic_on_reanchor": args.preserve_critic_on_reanchor,
             "reanchor_scope": reanchor_scope,
+            "rejected_midpoint_rescue": "fixed_half_step_on_reanchor_v1",
+            "midpoint_rescue_evaluations": 0,
+            "midpoint_rescues": 0,
             "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,
             "oracle_actor_behavior_cloning_max_epochs": args.oracle_actor_bc_max_epochs,
             "oracle_behavior_cloning_max_epochs": args.oracle_bc_max_epochs,
@@ -1227,9 +1263,47 @@ def main() -> None:
         nonlocal last_validated_update
 
         candidate_evaluations += 1
-        candidate_cost = validate_policy_cost()
-        champion_cost, accepted = _resolve_challenger(champion_cost, candidate_cost)
+        full_candidate_cost = validate_policy_cost()
+        report["training"]["last_full_candidate_cost_vnd"] = full_candidate_cost
+        champion_cost, accepted = _resolve_challenger(
+            champion_cost,
+            full_candidate_cost,
+        )
+        candidate_cost = full_candidate_cost
         reset_to_champion = False
+        should_reanchor = False
+
+        if not accepted:
+            next_rejection_count = consecutive_rejections + 1
+            should_reanchor = _should_reanchor_rejected_candidate(
+                resets_enabled=args.challenger_resets_enabled,
+                allow_reset=allow_reset,
+                consecutive_rejections=next_rejection_count,
+                reset_patience=args.challenger_reset_patience,
+            )
+            if should_reanchor:
+                # IQ-45: before throwing a rejected PPO direction away, test the
+                # exact midpoint. Recurrent closed-loop cost is extremely sensitive,
+                # so a useful direction can still overshoot at the full Adam step.
+                candidate_state = agent.snapshot_training_state()
+                midpoint_state = _midpoint_challenger_state(
+                    champion_state,
+                    candidate_state,
+                )
+                agent.restore_training_state(midpoint_state)
+                report["training"]["midpoint_rescue_evaluations"] += 1
+                midpoint_cost = validate_policy_cost()
+                report["training"]["last_midpoint_candidate_cost_vnd"] = midpoint_cost
+                rescued_cost, rescued = _resolve_challenger(
+                    champion_cost,
+                    midpoint_cost,
+                )
+                if rescued:
+                    champion_cost = rescued_cost
+                    candidate_cost = midpoint_cost
+                    accepted = True
+                    report["training"]["midpoint_rescues"] += 1
+
         if accepted:
             report["training"]["accepted_updates"] += 1
             consecutive_rejections = 0
@@ -1240,12 +1314,6 @@ def main() -> None:
         else:
             report["training"]["rejected_updates"] += 1
             consecutive_rejections += 1
-            should_reanchor = _should_reanchor_rejected_candidate(
-                resets_enabled=args.challenger_resets_enabled,
-                allow_reset=allow_reset,
-                consecutive_rejections=consecutive_rejections,
-                reset_patience=args.challenger_reset_patience,
-            )
             if should_reanchor:
                 _restore_reanchor_state(
                     agent,

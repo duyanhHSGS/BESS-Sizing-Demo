@@ -21,6 +21,7 @@ from bess.training.runners.train_ppo_dataset import (
     _behavior_clone_critic,
     _champion_curve_point,
     _initialize_champion,
+    _midpoint_challenger_state,
     _oracle_dispatch_wear_cost_vnd,
     _oracle_teacher_action,
     _resolve_challenger,
@@ -123,6 +124,38 @@ class PPOTrainingStateTests(unittest.TestCase):
         self.assertFalse(agent.opt.state)
         for key, value in agent.collector_net.state_dict().items():
             self.assertTrue(torch.equal(value, agent.net.state_dict()[key].cpu()))
+
+    def test_midpoint_challenger_state_halves_floating_network_delta(self):
+        champion_state = {
+            "network": {
+                "weight": torch.tensor([0.0, 2.0]),
+                "counter": torch.tensor([1], dtype=torch.int64),
+            },
+            "optimizer": {"state": "champion"},
+        }
+        candidate_state = {
+            "network": {
+                "weight": torch.tensor([2.0, 6.0]),
+                "counter": torch.tensor([9], dtype=torch.int64),
+            },
+            "optimizer": {"state": "candidate"},
+        }
+
+        midpoint_state = _midpoint_challenger_state(
+            champion_state,
+            candidate_state,
+        )
+
+        self.assertTrue(
+            torch.equal(midpoint_state["network"]["weight"], torch.tensor([1.0, 4.0]))
+        )
+        self.assertTrue(
+            torch.equal(
+                midpoint_state["network"]["counter"],
+                candidate_state["network"]["counter"],
+            )
+        )
+        self.assertEqual(midpoint_state["optimizer"], candidate_state["optimizer"])
 
 
 class PPOOracleTeacherTests(unittest.TestCase):
