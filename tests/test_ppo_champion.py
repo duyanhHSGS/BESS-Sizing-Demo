@@ -300,6 +300,48 @@ class PPORecurrentMemoryTests(unittest.TestCase):
             self.assertAlmostEqual(first_action, loaded.predict_action(probe), places=6)
             self.assertAlmostEqual(second_action, loaded.predict_action(probe), places=6)
 
+    def test_recurrent_behavior_clone_restores_lowest_cost_epoch(self):
+        agent = PPOAgent(
+            obs_dim=7,
+            seed=3,
+            device="cpu",
+            hidden_size=8,
+            recurrent_enabled=True,
+            recurrent_sequence_length=4,
+        )
+        rng = np.random.default_rng(1234)
+        observations = rng.normal(size=(12, 7)).astype(np.float32)
+        targets = np.tanh(0.4 * observations[:, 0] - 0.2 * observations[:, 3]).astype(np.float32)
+        scores = iter((30.0, 10.0, 20.0))
+        scored_predictions: list[np.ndarray] = []
+
+        def score_policy_cost() -> float:
+            with torch.inference_mode():
+                obs_t = torch.as_tensor(observations, dtype=torch.float32)
+                mean, _, _ = agent.net.actor_sequence(obs_t.unsqueeze(0), None)
+                prediction = torch.tanh(mean.squeeze(0)).squeeze(-1).cpu().numpy().copy()
+            scored_predictions.append(prediction)
+            return next(scores)
+
+        stats = _behavior_clone_actor(
+            agent,
+            observations,
+            targets,
+            seed=3,
+            max_epochs=3,
+            target_mse=0.0,
+            score_policy_cost=score_policy_cost,
+        )
+
+        with torch.inference_mode():
+            obs_t = torch.as_tensor(observations, dtype=torch.float32)
+            mean, _, _ = agent.net.actor_sequence(obs_t.unsqueeze(0), None)
+            selected_prediction = torch.tanh(mean.squeeze(0)).squeeze(-1).cpu().numpy()
+
+        self.assertEqual(stats["economic_best_epoch"], 2)
+        self.assertEqual(stats["economic_best_validation_cost_vnd"], 10.0)
+        np.testing.assert_allclose(selected_prediction, scored_predictions[1], atol=1e-6)
+
 
 class PPODeterminismTests(unittest.TestCase):
     def test_same_seed_replays_the_same_collection_and_update(self):

@@ -227,6 +227,7 @@ def _behavior_clone_actor(
     learning_rate: float = PPO_ORACLE_BC_LEARNING_RATE,
     minibatch: int = PPO_ORACLE_BC_MINIBATCH,
     target_mse: float = PPO_ORACLE_BC_TARGET_MSE,
+    score_policy_cost=None,
 ) -> dict[str, float | int]:
     """Supervised-fit the existing generic PPO actor to Oracle teacher actions."""
     if observations.ndim != 2 or observations.shape[1] != OBSERVATION_DIM:
@@ -258,17 +259,27 @@ def _behavior_clone_actor(
 
     initial_mse = full_mse()
     epochs_completed = 0
+    best_validation_cost = float("inf")
+    best_validation_epoch = 0
+    best_validation_mse = float("inf")
+    best_actor_state = None
     for epoch in range(max_epochs):
         if agent.recurrent_enabled:
-            # Full-episode BPTT keeps every hidden state consistent with the same
-            # network weights. The old chunked loop stepped Adam between chunks,
-            # then fed later chunks hidden state produced by pre-update weights.
-            mean, _, _ = agent.net.actor_sequence(obs_t.unsqueeze(0), None)
-            prediction = torch.tanh(mean.squeeze(0)).squeeze(-1)
-            loss = torch.mean((prediction - target_t) ** 2)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            # IQ-34's proven truncated recurrent teacher loop: preserve time order
+            # and carry memory across chunks while taking one Adam step per chunk.
+            hidden = None
+            for start in range(0, len(observations), agent.recurrent_sequence_length):
+                stop = min(start + agent.recurrent_sequence_length, len(observations))
+                mean, _, hidden = agent.net.actor_sequence(
+                    obs_t[start:stop].unsqueeze(0),
+                    hidden,
+                )
+                prediction = torch.tanh(mean.squeeze(0)).squeeze(-1)
+                loss = torch.mean((prediction - target_t[start:stop]) ** 2)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                hidden = hidden.detach()
         else:
             indexes = rng.permutation(len(observations))
             for start in range(0, len(indexes), minibatch):
@@ -283,12 +294,29 @@ def _behavior_clone_actor(
                 loss.backward()
                 optimizer.step()
         epochs_completed = epoch + 1
-        if full_mse() <= target_mse:
+        epoch_mse = full_mse()
+        if score_policy_cost is not None:
+            # Teacher-forced MSE is not the deployment objective. Re-score the
+            # actual closed-loop policy every epoch and remember the cheapest one.
+            agent._sync_collector()
+            validation_cost = float(score_policy_cost())
+            if validation_cost < best_validation_cost:
+                best_validation_cost = validation_cost
+                best_validation_epoch = epochs_completed
+                best_validation_mse = epoch_mse
+                best_actor_state = {
+                    key: value.detach().clone()
+                    for key, value in agent.net.state_dict().items()
+                }
+        if epoch_mse <= target_mse:
             break
 
+    last_epoch_mse = full_mse()
+    if best_actor_state is not None:
+        agent.net.load_state_dict(best_actor_state)
     final_mse = full_mse()
     agent._sync_collector()
-    return {
+    stats = {
         "samples": len(observations),
         "charge_samples": int(np.count_nonzero(targets < -1e-6)),
         "idle_samples": int(np.count_nonzero(np.abs(targets) <= 1e-6)),
@@ -296,7 +324,17 @@ def _behavior_clone_actor(
         "epochs_completed": int(epochs_completed),
         "initial_mse": initial_mse,
         "final_mse": final_mse,
+        "last_epoch_mse": last_epoch_mse,
     }
+    if best_actor_state is not None:
+        stats.update(
+            {
+                "economic_best_epoch": int(best_validation_epoch),
+                "economic_best_validation_cost_vnd": best_validation_cost,
+                "economic_best_mse": best_validation_mse,
+            }
+        )
+    return stats
 
 
 def _behavior_clone_critic(
@@ -351,14 +389,19 @@ def _behavior_clone_critic(
     epochs_completed = 0
     for epoch in range(max_epochs):
         if agent.recurrent_enabled:
-            # Match actor warm-start semantics: one chronological month graph,
-            # one optimizer step, no stale hidden state crossing an Adam update.
-            prediction, _ = agent.net.value_sequence(obs_t.unsqueeze(0), None)
-            prediction = prediction.squeeze(0)
-            loss = torch.mean((prediction - return_t) ** 2)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            hidden = None
+            for start in range(0, len(observations), agent.recurrent_sequence_length):
+                stop = min(start + agent.recurrent_sequence_length, len(observations))
+                prediction, hidden = agent.net.value_sequence(
+                    obs_t[start:stop].unsqueeze(0),
+                    hidden,
+                )
+                prediction = prediction.squeeze(0)
+                loss = torch.mean((prediction - return_t[start:stop]) ** 2)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                hidden = hidden.detach()
         else:
             indexes = rng.permutation(len(observations))
             for start in range(0, len(indexes), minibatch):
@@ -1048,6 +1091,7 @@ def main() -> None:
                 learning_rate=args.oracle_bc_learning_rate,
                 minibatch=args.oracle_bc_minibatch,
                 target_mse=args.oracle_bc_target_mse,
+                score_policy_cost=validate_policy_cost if agent.recurrent_enabled else None,
             )
         )
         bc_stats.update(
