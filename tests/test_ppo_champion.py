@@ -21,6 +21,7 @@ from bess.training.runners.train_ppo_dataset import (
     _resolve_challenger,
     _restore_reanchor_state,
     _save_accepted_champion,
+    _should_reanchor_rejected_candidate,
 )
 
 
@@ -392,6 +393,59 @@ class PPOChampionSelectionTests(unittest.TestCase):
             accepted_sequence.append(champion_cost)
 
         self.assertEqual(accepted_sequence, [100.0, 80.0, 80.0, 70.0, 70.0])
+
+    def test_reanchor_waits_while_rejected_learner_is_improving(self):
+        common = {
+            "resets_enabled": True,
+            "allow_reset": True,
+            "reset_patience": 1,
+        }
+        self.assertFalse(
+            _should_reanchor_rejected_candidate(
+                **common,
+                consecutive_rejections=1,
+                candidate_cost=120.0,
+                previous_rejected_cost=None,
+            )
+        )
+        self.assertFalse(
+            _should_reanchor_rejected_candidate(
+                **common,
+                consecutive_rejections=2,
+                candidate_cost=110.0,
+                previous_rejected_cost=120.0,
+            )
+        )
+        self.assertTrue(
+            _should_reanchor_rejected_candidate(
+                **common,
+                consecutive_rejections=3,
+                candidate_cost=111.0,
+                previous_rejected_cost=110.0,
+            )
+        )
+
+    def test_reanchor_gate_still_respects_disable_and_patience_controls(self):
+        self.assertFalse(
+            _should_reanchor_rejected_candidate(
+                resets_enabled=False,
+                allow_reset=True,
+                consecutive_rejections=99,
+                reset_patience=1,
+                candidate_cost=120.0,
+                previous_rejected_cost=110.0,
+            )
+        )
+        self.assertFalse(
+            _should_reanchor_rejected_candidate(
+                resets_enabled=True,
+                allow_reset=True,
+                consecutive_rejections=2,
+                reset_patience=3,
+                candidate_cost=120.0,
+                previous_rejected_cost=110.0,
+            )
+        )
 
     def test_initial_champion_is_validated_and_saved_before_any_challenger(self):
         events: list[str] = []
