@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import copy
 import json
 import math
 import time
@@ -611,20 +612,19 @@ def _midpoint_challenger_state(champion_state: dict, candidate_state: dict) -> d
         else:
             midpoint_network[key] = candidate_value
 
-    candidate_optimizer = candidate_state["optimizer"]
-    fresh_midpoint_optimizer = {
-        "state": {},
-        "param_groups": [
-            {**group, "params": list(group["params"])}
-            for group in candidate_optimizer["param_groups"]
-        ],
-    }
+    midpoint_optimizer = copy.deepcopy(candidate_state["optimizer"])
+    for parameter_state in midpoint_optimizer["state"].values():
+        exp_avg = parameter_state.get("exp_avg")
+        if torch.is_tensor(exp_avg):
+            exp_avg.zero_()
+
     return {
         "network": midpoint_network,
-        # IQ-48: the half-step network was never reached by the rejected full Adam
-        # step, so do not attach that full-step momentum/history to a rescued state.
-        # TODO(IQ-48): keep fresh midpoint Adam only if remote unseen-test evidence wins.
-        "optimizer": fresh_midpoint_optimizer,
+        # IQ-49: a rejected full step should not steer the rescued half-step via
+        # Adam's first moment. Keep step/variance history so adaptive scaling and
+        # bias correction remain internally consistent instead of becoming fake Adam.
+        # TODO(IQ-49): keep this partial Adam reset only if unseen-month evidence wins.
+        "optimizer": midpoint_optimizer,
     }
 
 
@@ -1086,7 +1086,7 @@ def main() -> None:
         "reset_optimizer_on_reanchor": args.reset_optimizer_on_reanchor,
         "preserve_critic_on_reanchor": args.preserve_critic_on_reanchor,
         "reanchor_scope": reanchor_scope,
-        "rejected_midpoint_rescue": "fixed_half_step_fresh_adam_v2",
+        "rejected_midpoint_rescue": "fixed_half_step_zero_first_moment_v3",
         "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,
         "oracle_actor_behavior_cloning_max_epochs": args.oracle_actor_bc_max_epochs,
         "oracle_behavior_cloning_max_epochs": args.oracle_bc_max_epochs,
@@ -1203,7 +1203,7 @@ def main() -> None:
             "reset_optimizer_on_reanchor": args.reset_optimizer_on_reanchor,
             "preserve_critic_on_reanchor": args.preserve_critic_on_reanchor,
             "reanchor_scope": reanchor_scope,
-            "rejected_midpoint_rescue": "fixed_half_step_fresh_adam_v2",
+            "rejected_midpoint_rescue": "fixed_half_step_zero_first_moment_v3",
             "midpoint_rescue_evaluations": 0,
             "midpoint_rescues": 0,
             "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,
