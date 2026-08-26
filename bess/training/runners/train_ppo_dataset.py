@@ -611,11 +611,20 @@ def _midpoint_challenger_state(champion_state: dict, candidate_state: dict) -> d
         else:
             midpoint_network[key] = candidate_value
 
+    candidate_optimizer = candidate_state["optimizer"]
+    fresh_midpoint_optimizer = {
+        "state": {},
+        "param_groups": [
+            {**group, "params": list(group["params"])}
+            for group in candidate_optimizer["param_groups"]
+        ],
+    }
     return {
         "network": midpoint_network,
-        # Adam moments came from the gradient that created this direction, so keep
-        # them even though validation tests only half of the resulting weight move.
-        "optimizer": candidate_state["optimizer"],
+        # IQ-48: the half-step network was never reached by the rejected full Adam
+        # step, so do not attach that full-step momentum/history to a rescued state.
+        # TODO(IQ-48): keep fresh midpoint Adam only if remote unseen-test evidence wins.
+        "optimizer": fresh_midpoint_optimizer,
     }
 
 
@@ -1077,7 +1086,7 @@ def main() -> None:
         "reset_optimizer_on_reanchor": args.reset_optimizer_on_reanchor,
         "preserve_critic_on_reanchor": args.preserve_critic_on_reanchor,
         "reanchor_scope": reanchor_scope,
-        "rejected_midpoint_rescue": "fixed_half_step_on_reanchor_v1",
+        "rejected_midpoint_rescue": "fixed_half_step_fresh_adam_v2",
         "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,
         "oracle_actor_behavior_cloning_max_epochs": args.oracle_actor_bc_max_epochs,
         "oracle_behavior_cloning_max_epochs": args.oracle_bc_max_epochs,
@@ -1194,7 +1203,7 @@ def main() -> None:
             "reset_optimizer_on_reanchor": args.reset_optimizer_on_reanchor,
             "preserve_critic_on_reanchor": args.preserve_critic_on_reanchor,
             "reanchor_scope": reanchor_scope,
-            "rejected_midpoint_rescue": "fixed_half_step_on_reanchor_v1",
+            "rejected_midpoint_rescue": "fixed_half_step_fresh_adam_v2",
             "midpoint_rescue_evaluations": 0,
             "midpoint_rescues": 0,
             "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,

@@ -127,21 +127,28 @@ class PPOTrainingStateTests(unittest.TestCase):
         for key, value in agent.collector_net.state_dict().items():
             self.assertTrue(torch.equal(value, agent.net.state_dict()[key].cpu()))
 
-    def test_midpoint_challenger_state_halves_floating_network_delta(self):
+    def test_midpoint_challenger_state_halves_floating_network_delta_and_clears_adam(self):
         champion_state = {
             "network": {
                 "weight": torch.tensor([0.0, 2.0]),
                 "counter": torch.tensor([1], dtype=torch.int64),
             },
-            "optimizer": {"state": "champion"},
+            "optimizer": {
+                "state": {1: {"step": torch.tensor(3.0)}},
+                "param_groups": [{"lr": 1e-4, "params": [1, 2]}],
+            },
         }
         candidate_state = {
             "network": {
                 "weight": torch.tensor([2.0, 6.0]),
                 "counter": torch.tensor([9], dtype=torch.int64),
             },
-            "optimizer": {"state": "candidate"},
+            "optimizer": {
+                "state": {1: {"step": torch.tensor(9.0)}},
+                "param_groups": [{"lr": 1e-4, "params": [1, 2]}],
+            },
         }
+        candidate_optimizer_before = copy.deepcopy(candidate_state["optimizer"])
 
         midpoint_state = _midpoint_challenger_state(
             champion_state,
@@ -157,7 +164,45 @@ class PPOTrainingStateTests(unittest.TestCase):
                 candidate_state["network"]["counter"],
             )
         )
-        self.assertEqual(midpoint_state["optimizer"], candidate_state["optimizer"])
+        self.assertEqual(midpoint_state["optimizer"]["state"], {})
+        self.assertEqual(
+            midpoint_state["optimizer"]["param_groups"],
+            candidate_state["optimizer"]["param_groups"],
+        )
+        _assert_nested_equal(self, candidate_state["optimizer"], candidate_optimizer_before)
+
+    def test_midpoint_fresh_adam_state_restores_and_repopulates_on_next_update(self):
+        agent = PPOAgent(obs_dim=4, seed=23, device="cpu", epochs=1, minibatch=4)
+        agent.update(_make_buffer(agent, seed=20), 0.0)
+        champion_state = agent.snapshot_training_state()
+
+        agent.update(_make_buffer(agent, seed=21), 0.0)
+        candidate_state = agent.snapshot_training_state()
+        self.assertTrue(candidate_state["optimizer"]["state"])
+
+        midpoint_state = _midpoint_challenger_state(champion_state, candidate_state)
+        agent.restore_training_state(midpoint_state)
+        self.assertFalse(agent.opt.state)
+        for key, value in agent.collector_net.state_dict().items():
+            self.assertTrue(torch.equal(value, agent.net.state_dict()[key].cpu()))
+
+        agent.update(_make_buffer(agent, seed=22), 0.0)
+        self.assertTrue(agent.opt.state)
+
+    def test_midpoint_fresh_adam_keeps_optimizer_hyperparameters(self):
+        agent = PPOAgent(obs_dim=4, seed=29, device="cpu", epochs=1, minibatch=4)
+        agent.update(_make_buffer(agent, seed=30), 0.0)
+        champion_state = agent.snapshot_training_state()
+        agent.update(_make_buffer(agent, seed=31), 0.0)
+        candidate_state = agent.snapshot_training_state()
+
+        midpoint_state = _midpoint_challenger_state(champion_state, candidate_state)
+
+        self.assertEqual(midpoint_state["optimizer"]["state"], {})
+        self.assertEqual(
+            midpoint_state["optimizer"]["param_groups"],
+            candidate_state["optimizer"]["param_groups"],
+        )
 
 
 class PPORealDataSplitTests(unittest.TestCase):
