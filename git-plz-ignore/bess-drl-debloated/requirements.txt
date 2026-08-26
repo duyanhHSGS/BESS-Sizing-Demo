@@ -1,7 +1,0 @@
-# Intentionally tiny: no FastAPI, MongoDB, Beanie, Motor, HTTPX, or APScheduler.
-numpy>=1.26
-pydantic>=2.7
-scipy>=1.13
-torch>=2.3
-gmqtt>=0.7
-flask>=3.0
