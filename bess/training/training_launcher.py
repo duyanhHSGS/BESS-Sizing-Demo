@@ -171,7 +171,12 @@ def _bounded_float(
 
 
 def _split_months(payload: dict) -> tuple[int, int]:
-    val_months = _int(payload, "val_months", 1)
+    # IQ-52: one validation month let Champion selection specialize to August
+    # while September repeatedly stayed below No-BESS. Use a two-month jury by
+    # default so accepted policies must generalize across two unseen billing months.
+    # TODO(IQ-52): compare July+August validation against the old August-only gate
+    # using the unchanged September diagnostic holdout before keeping this default.
+    val_months = _int(payload, "val_months", 2)
     test_months = _int(payload, "test_months", 1)
     if val_months < 1:
         raise TrainingLaunchError("validation months must be at least 1")

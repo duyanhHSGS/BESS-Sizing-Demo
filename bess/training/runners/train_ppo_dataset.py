@@ -866,7 +866,11 @@ def main() -> None:
     parser.add_argument("--billing", choices=("2tc", "tou"), default="2tc")
     parser.add_argument("--training-config", type=str, required=True)
     parser.add_argument("--oracle-cache", required=True)
-    parser.add_argument("--val-months", type=int, default=1)
+    # IQ-52 defaults Champion selection to a two-month validation jury. This does
+    # not alter Brain7, BrainEnv, recurrent architecture, or PPO scalar settings.
+    # TODO(IQ-52): retain two-month validation only if September generalization
+    # improves versus the IQ-48/IQ-49/IQ-51 -0.731094% diagnostic baseline.
+    parser.add_argument("--val-months", type=int, default=2)
     parser.add_argument("--test-months", type=int, default=1)
     parser.add_argument("--obs-variant", choices=("brain7",), default="brain7")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")

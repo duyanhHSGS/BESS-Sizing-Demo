@@ -15,12 +15,31 @@ from bess.training.training_launcher import (
     TrainingLaunchError,
     UnsupportedAlgorithm,
     _control_dt_minutes,
+    _split_months,
     build_training_command,
     write_training_config,
 )
 
 
 class SharedTrainingHelpersTests(unittest.TestCase):
+    def test_generic_ppo_defaults_to_two_validation_months_and_one_test_month(self):
+        self.assertEqual(_split_months({}), (2, 1))
+
+    def test_generic_ppo_split_preserves_explicit_user_values(self):
+        self.assertEqual(_split_months({"val_months": 3, "test_months": 2}), (3, 2))
+
+    def test_generic_ppo_split_rejects_nonpositive_holdouts(self):
+        for payload in (
+            {"val_months": 0, "test_months": 1},
+            {"val_months": 1, "test_months": 0},
+            {"val_months": -1, "test_months": 1},
+            {"val_months": 1, "test_months": -1},
+        ):
+            with self.subTest(payload=payload), self.assertRaises(TrainingLaunchError):
+                _split_months(payload)
+
+    # TODO(IQ-52): keep split-default coverage beside the launcher contract so a
+    # future UI cleanup cannot silently return Champion selection to one month.
     def test_augmentation_is_seeded_and_handles_pv(self):
         day = DayData(
             load=np.full(8, 100.0, dtype=np.float64),
