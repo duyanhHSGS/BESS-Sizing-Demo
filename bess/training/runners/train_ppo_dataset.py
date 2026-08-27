@@ -528,54 +528,58 @@ def _calendar_month_is_complete(month: MonthData) -> bool:
 
 
 def _complete_calendar_month_blocks(days):
-    """Keep complete calendar months, allowing only incomplete edge fragments."""
+    """Return complete calendar months and separately retain every incomplete month."""
     calendar_months = month_blocks(list(days), minimum_days=1)
-    complete = [_calendar_month_is_complete(month) for month in calendar_months]
-    if not any(complete):
+    complete_months = []
+    incomplete_months = []
+    for month in calendar_months:
+        target = complete_months if _calendar_month_is_complete(month) else incomplete_months
+        target.append(month)
+    if not complete_months:
         raise ValueError("Training CSV contains no complete calendar month")
-
-    first_complete = complete.index(True)
-    last_complete = len(complete) - 1 - complete[::-1].index(True)
-    incomplete_internal = [
-        calendar_months[index].source
-        for index in range(first_complete, last_complete + 1)
-        if not complete[index]
-    ]
-    if incomplete_internal:
-        raise ValueError(
-            "Training CSV has incomplete internal calendar month(s): "
-            + ", ".join(incomplete_internal)
-        )
-
-    ignored_edge_months = (
-        calendar_months[:first_complete] + calendar_months[last_complete + 1:]
-    )
-    return calendar_months[first_complete:last_complete + 1], ignored_edge_months
+    return complete_months, incomplete_months
 
 
-def _chronological_month_holdout_split(days, val_months: int, test_months: int):
-    """Split complete months: oldest train / newer validation / newest test."""
-    if val_months < 1 or test_months < 1:
-        raise ValueError("Validation and test holdouts must each contain at least 1 month")
-    calendar_months, ignored_edge_months = _complete_calendar_month_blocks(days)
-    required_months = val_months + test_months + 1
-    if len(calendar_months) < required_months:
+def _chronological_month_holdout_split(
+    days,
+    train_months: int,
+    val_months: int,
+    test_months: int,
+):
+    """Dynamically use the latest requested complete months for train/val/test."""
+    if train_months < 1 or val_months < 1 or test_months < 1:
+        raise ValueError("Training, validation, and test splits must each contain at least 1 month")
+    complete_months, incomplete_months = _complete_calendar_month_blocks(days)
+    required_months = train_months + val_months + test_months
+    if len(complete_months) < required_months:
         raise ValueError(
             "Training CSV must contain at least "
-            f"{required_months} complete calendar months for {val_months} validation + "
-            f"{test_months} test + at least 1 training month; got {len(calendar_months)}"
+            f"{required_months} complete calendar months for {train_months} training + "
+            f"{val_months} validation + {test_months} test; got {len(complete_months)}"
         )
-    train_stop = len(calendar_months) - val_months - test_months
-    val_stop = len(calendar_months) - test_months
+
+    # IQ-53: real telemetry may have holes inside otherwise useful history. Keep
+    # billing math honest by skipping incomplete months, then slide the requested
+    # train/validation/test window to the newest complete months automatically.
+    # TODO(IQ-53): re-audit the dynamic 5/1/1 split whenever new Youngone months
+    # accumulate; never fabricate missing dates merely to make a month complete.
+    selected = complete_months[-required_months:]
+    older_complete_months = complete_months[:-required_months]
+    train_stop = train_months
+    val_stop = train_months + val_months
 
     def _flatten(blocks):
         return [day for month in blocks for day in month.days]
 
+    ignored_months = sorted(
+        [*incomplete_months, *older_complete_months],
+        key=lambda month: month.source,
+    )
     return (
-        _flatten(calendar_months[:train_stop]),
-        _flatten(calendar_months[train_stop:val_stop]),
-        _flatten(calendar_months[val_stop:]),
-        _flatten(ignored_edge_months),
+        _flatten(selected[:train_stop]),
+        _flatten(selected[train_stop:val_stop]),
+        _flatten(selected[val_stop:]),
+        _flatten(ignored_months),
     )
 
 
@@ -866,11 +870,11 @@ def main() -> None:
     parser.add_argument("--billing", choices=("2tc", "tou"), default="2tc")
     parser.add_argument("--training-config", type=str, required=True)
     parser.add_argument("--oracle-cache", required=True)
-    # IQ-52 defaults Champion selection to a two-month validation jury. This does
-    # not alter Brain7, BrainEnv, recurrent architecture, or PPO scalar settings.
-    # TODO(IQ-52): retain two-month validation only if September generalization
-    # improves versus the IQ-48/IQ-49/IQ-51 -0.731094% diagnostic baseline.
-    parser.add_argument("--val-months", type=int, default=2)
+    # IQ-53 defaults to a dynamic latest-complete-month 5/1/1 split. This changes
+    # data selection only; Brain7, BrainEnv, recurrent architecture, and PPO scalar
+    # settings remain untouched.
+    parser.add_argument("--train-months", type=int, default=5)
+    parser.add_argument("--val-months", type=int, default=1)
     parser.add_argument("--test-months", type=int, default=1)
     parser.add_argument("--obs-variant", choices=("brain7",), default="brain7")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
@@ -1004,16 +1008,17 @@ def main() -> None:
     csv_dt = 24.0 / len(days[0].load)
 
     try:
-        train_days, val_days, test_days, ignored_edge_days = (
+        train_days, val_days, test_days, ignored_split_days = (
             _chronological_month_holdout_split(
                 days,
+                args.train_months,
                 args.val_months,
                 args.test_months,
             )
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    ignored_edge_months = sorted({str(day.date_iso)[:7] for day in ignored_edge_days})
+    ignored_split_months = sorted({str(day.date_iso)[:7] for day in ignored_split_days})
     # Training-only scale: validation/test peaks must not leak into the policy's
     # observation normalization or reference power.
     p_ref = _training_reference_power_kw(train_days)
@@ -1038,8 +1043,12 @@ def main() -> None:
         raise SystemExit("Training split contains no usable calendar-month episode")
     validation_months = month_blocks(val_days, minimum_days=1)
     test_months = month_blocks(test_days, minimum_days=1)
-    if len(validation_months) != args.val_months or len(test_months) != args.test_months:
-        raise RuntimeError("Chronological month holdout split lost a calendar block")
+    if (
+        len(train_months) != args.train_months
+        or len(validation_months) != args.val_months
+        or len(test_months) != args.test_months
+    ):
+        raise RuntimeError("Dynamic complete-month split lost a calendar block")
     gamma = args.gamma
     native_steps = native_steps_per_action(cfg.dt, args.control_dt_minutes)
     decisions_per_day = len(days[0].load) // native_steps
@@ -1123,9 +1132,9 @@ def main() -> None:
         "validation_range": [val_days[0].date_iso, val_days[-1].date_iso],
         "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
         "temporary_full_dataset_overlap": False,
-        "data_overlap_note": "disjoint complete chronological calendar-month holdouts",
-        "ignored_incomplete_edge_days": len(ignored_edge_days),
-        "ignored_incomplete_edge_months": ignored_edge_months,
+        "data_overlap_note": "dynamic latest complete calendar-month split; incomplete months are skipped",
+        "ignored_unselected_days": len(ignored_split_days),
+        "ignored_unselected_months": ignored_split_months,
         "validation_month_count": len(validation_months),
         "test_month_count": len(test_months),
         "training_augmentation_enabled": False,
@@ -1201,9 +1210,10 @@ def main() -> None:
             "validation_range": [val_days[0].date_iso, val_days[-1].date_iso],
             "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
             "temporary_full_dataset_overlap": False,
-            "split_mode": "complete_chronological_calendar_months",
-            "ignored_incomplete_edge_days": len(ignored_edge_days),
-            "ignored_incomplete_edge_months": ignored_edge_months,
+            "split_mode": "dynamic_latest_complete_calendar_months",
+            "ignored_unselected_days": len(ignored_split_days),
+            "ignored_unselected_months": ignored_split_months,
+            "training_months": len(train_months),
             "validation_months": len(validation_months),
             "test_months": len(test_months),
         },
@@ -1302,7 +1312,7 @@ def main() -> None:
         f"train {len(train_months)}mo/{len(train_days)}d | "
         f"val {len(validation_months)}mo/{len(val_days)}d | "
         f"test {len(test_months)}mo/{len(test_days)}d | "
-        f"ignored edge {len(ignored_edge_days)}d | "
+        f"ignored/unselected {len(ignored_split_days)}d | "
         f"gamma {gamma:g} | lambda {args.lambda_value:g} | "
         f"UI wear {battery_wear_cost:g} VND/kWh | "
         f"learner {learner_device} (requested {args.device}) | BrainEnv eyes={OBSERVATION_DIM} | "

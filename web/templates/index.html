@@ -1444,9 +1444,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label>E_cap (kWh) <input type="number" id="train-ecap" step="50" value="{{ battery_capacity_kWh }}"></label>
           <label>P_rated (kW) <input type="number" id="train-prated" step="25"
               value="{{ battery_power_limit_kW }}"></label>
-          <!-- IQ-52: default to two validation months so Champion selection is not an August-only beauty contest. -->
-          <!-- TODO(IQ-52): keep this UI default only if the unchanged September diagnostic improves. -->
-          <label class="train-day-split-field">Validation months <input type="number" id="train-val-months" min="1" step="1" value="2"></label>
+          <!-- IQ-53: counts stay explicit while the runner dynamically selects the latest complete measured months. -->
+          <!-- TODO(IQ-53): revisit 5/1/1 only after clean-data unseen-month evidence. -->
+          <label class="train-day-split-field">Training months <input type="number" id="train-train-months" min="1" step="1" value="5"></label>
+          <label class="train-day-split-field">Validation months <input type="number" id="train-val-months" min="1" step="1" value="1"></label>
           <label class="train-day-split-field">Test months <input type="number" id="train-test-months" min="1" step="1" value="1"></label>
           <label class="train-learning-field">Custom sampling Δt
             <select id="train-control-dt"></select>
@@ -4483,6 +4484,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const trainDevice = document.getElementById("train-device");
     const trainEcap = document.getElementById("train-ecap");
     const trainPrated = document.getElementById("train-prated");
+    const trainTrainMonths = document.getElementById("train-train-months");
     const trainValMonths = document.getElementById("train-val-months");
     const trainTestMonths = document.getElementById("train-test-months");
     const trainControlDt = document.getElementById("train-control-dt");
@@ -4953,6 +4955,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         device: trainDevice.value,
         e_cap_kwh: Number(trainEcap.value),
         p_rated_kw: Number(trainPrated.value),
+        train_months: Number(trainTrainMonths.value),
         val_months: Number(trainValMonths.value),
         test_months: Number(trainTestMonths.value),
         steps: Number(trainSteps.value),

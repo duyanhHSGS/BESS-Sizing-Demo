@@ -170,19 +170,20 @@ def _bounded_float(
     return value
 
 
-def _split_months(payload: dict) -> tuple[int, int]:
-    # IQ-52: one validation month let Champion selection specialize to August
-    # while September repeatedly stayed below No-BESS. Use a two-month jury by
-    # default so accepted policies must generalize across two unseen billing months.
-    # TODO(IQ-52): compare July+August validation against the old August-only gate
-    # using the unchanged September diagnostic holdout before keeping this default.
-    val_months = _int(payload, "val_months", 2)
+def _split_months(payload: dict) -> tuple[int, int, int]:
+    # IQ-53: use a fixed-size 5/1/1 billing-month window, but let the runner slide
+    # that window dynamically over the latest complete measured months.
+    # TODO(IQ-53): revisit the 5/1/1 counts only after clean-data unseen-month evidence.
+    train_months = _int(payload, "train_months", 5)
+    val_months = _int(payload, "val_months", 1)
     test_months = _int(payload, "test_months", 1)
+    if train_months < 1:
+        raise TrainingLaunchError("training months must be at least 1")
     if val_months < 1:
         raise TrainingLaunchError("validation months must be at least 1")
     if test_months < 1:
         raise TrainingLaunchError("test months must be at least 1")
-    return val_months, test_months
+    return train_months, val_months, test_months
 
 
 def _control_dt_minutes(payload: dict, csv_path: Path) -> int:
@@ -290,9 +291,9 @@ def build_training_command(
     e_cap = _float(payload, "e_cap_kwh")
     p_rated = _float(payload, "p_rated_kw")
     if algo == "ppo2":
-        val_months, test_months = 0, 0  # PPO2 owns its separate calendar split.
+        train_months, val_months, test_months = 0, 0, 0  # PPO2 owns its separate calendar split.
     else:
-        val_months, test_months = _split_months(payload)
+        train_months, val_months, test_months = _split_months(payload)
     dataset_id = str(payload.get("dataset_id", "dataset"))
     default_obs_variant = "base" if algo == "ppo2" else "brain7"
     obs_variant = str(payload.get("obs_variant", default_obs_variant)).strip().lower()
@@ -357,6 +358,7 @@ def build_training_command(
     if algo != "ppo2":
         cmd.extend(["--oracle-cache", str(oracle_cache_path)])
     if algo == "ppo":
+        cmd.extend(["--train-months", str(train_months)])
         defaults = PPO_TUNABLE_DEFAULTS
         gamma = _bounded_float(
             payload,
@@ -695,15 +697,15 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
     algo = str(payload.get("algo", "ppo")).lower()
     source, oracle_parameters = training_oracle_parameters(payload, parameters)
     if algo == "ppo2":
-        val_months, test_months = 0, 0
+        train_months, val_months, test_months = 0, 0, 0
         required_train_days = 1
         n_days = require_min_days(source, required_train_days)
         oracle_path = Path("")  # PPO2 builds the senior fixed-block month LP internally.
     else:
-        val_months, test_months = _split_months(payload)
+        train_months, val_months, test_months = _split_months(payload)
         # Cheap launcher guard only. The runner validates actual date_iso calendar
         # coverage because day count alone cannot prove distinct billing months.
-        required_train_days = val_months + test_months + 1
+        required_train_days = train_months + val_months + test_months
         n_days = require_min_days(source, required_train_days)
         oracle_path, _ = oracle_cache.require_cached_oracle(oracle_parameters)
 
@@ -728,6 +730,7 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
     return job, {
         "job_id": job.id,
         "n_days": n_days,
+        "train_months": train_months,
         "val_months": val_months,
         "test_months": test_months,
         "settings": str(settings_path),

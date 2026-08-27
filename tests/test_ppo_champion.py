@@ -307,19 +307,24 @@ class PPOTrainingStateTests(unittest.TestCase):
 
 
 class PPORealDataSplitTests(unittest.TestCase):
-    def test_chronological_holdout_is_disjoint_and_keeps_whole_months(self):
-        month_lengths = {1: 31, 2: 28, 3: 31, 4: 30, 5: 31, 6: 30}
+    def test_dynamic_five_one_one_split_is_disjoint_and_keeps_whole_months(self):
+        month_lengths = {1: 31, 2: 28, 3: 31, 4: 30, 5: 31, 6: 30, 7: 31}
         days = [
             SimpleNamespace(date_iso=f"2026-{month:02d}-{day:02d}")
             for month, month_length in month_lengths.items()
             for day in range(1, month_length + 1)
         ]
 
-        train, validation, test, ignored = _chronological_month_holdout_split(days, 2, 1)
+        train, validation, test, ignored = _chronological_month_holdout_split(
+            days, 5, 1, 1
+        )
 
-        self.assertEqual(sorted({day.date_iso[:7] for day in train}), ["2026-01", "2026-02", "2026-03"])
-        self.assertEqual(sorted({day.date_iso[:7] for day in validation}), ["2026-04", "2026-05"])
-        self.assertEqual(sorted({day.date_iso[:7] for day in test}), ["2026-06"])
+        self.assertEqual(
+            sorted({day.date_iso[:7] for day in train}),
+            ["2026-01", "2026-02", "2026-03", "2026-04", "2026-05"],
+        )
+        self.assertEqual({day.date_iso[:7] for day in validation}, {"2026-06"})
+        self.assertEqual({day.date_iso[:7] for day in test}, {"2026-07"})
         self.assertEqual(ignored, [])
         self.assertTrue(set(map(id, train)).isdisjoint(map(id, validation)))
         self.assertTrue(set(map(id, train)).isdisjoint(map(id, test)))
@@ -337,15 +342,17 @@ class PPORealDataSplitTests(unittest.TestCase):
             for day in range(1, 10)
         )
 
-        train, validation, test, ignored = _chronological_month_holdout_split(days, 1, 1)
+        train, validation, test, ignored = _chronological_month_holdout_split(
+            days, 1, 1, 1
+        )
 
-        self.assertEqual(sorted({day.date_iso[:7] for day in train}), ["2026-01"])
-        self.assertEqual(sorted({day.date_iso[:7] for day in validation}), ["2026-02"])
-        self.assertEqual(sorted({day.date_iso[:7] for day in test}), ["2026-03"])
+        self.assertEqual({day.date_iso[:7] for day in train}, {"2026-01"})
+        self.assertEqual({day.date_iso[:7] for day in validation}, {"2026-02"})
+        self.assertEqual({day.date_iso[:7] for day in test}, {"2026-03"})
         self.assertEqual(len(ignored), 9)
         self.assertEqual({day.date_iso[:7] for day in ignored}, {"2026-04"})
 
-    def test_incomplete_internal_month_is_rejected(self):
+    def test_incomplete_internal_month_is_skipped_without_fabricating_days(self):
         month_lengths = {1: 31, 2: 28, 3: 31, 4: 30}
         days = [
             SimpleNamespace(date_iso=f"2026-{month:02d}-{day:02d}")
@@ -354,8 +361,56 @@ class PPORealDataSplitTests(unittest.TestCase):
             if not (month == 2 and day == 15)
         ]
 
-        with self.assertRaisesRegex(ValueError, "incomplete internal calendar month"):
-            _chronological_month_holdout_split(days, 1, 1)
+        train, validation, test, ignored = _chronological_month_holdout_split(
+            days, 1, 1, 1
+        )
+
+        self.assertEqual({day.date_iso[:7] for day in train}, {"2026-01"})
+        self.assertEqual({day.date_iso[:7] for day in validation}, {"2026-03"})
+        self.assertEqual({day.date_iso[:7] for day in test}, {"2026-04"})
+        self.assertEqual({day.date_iso[:7] for day in ignored}, {"2026-02"})
+        self.assertEqual(len(ignored), 27)
+
+    def test_latest_complete_window_drops_older_complete_months(self):
+        month_lengths = {1: 31, 2: 28, 3: 31, 4: 30, 5: 31, 6: 30, 7: 31, 8: 31}
+        days = [
+            SimpleNamespace(date_iso=f"2026-{month:02d}-{day:02d}")
+            for month, month_length in month_lengths.items()
+            for day in range(1, month_length + 1)
+        ]
+
+        train, validation, test, ignored = _chronological_month_holdout_split(
+            days, 5, 1, 1
+        )
+
+        self.assertEqual(
+            sorted({day.date_iso[:7] for day in train}),
+            ["2026-02", "2026-03", "2026-04", "2026-05", "2026-06"],
+        )
+        self.assertEqual({day.date_iso[:7] for day in validation}, {"2026-07"})
+        self.assertEqual({day.date_iso[:7] for day in test}, {"2026-08"})
+        self.assertEqual({day.date_iso[:7] for day in ignored}, {"2026-01"})
+
+    def test_split_rejects_when_fewer_complete_months_than_requested(self):
+        month_lengths = {1: 31, 2: 28, 3: 31, 4: 30, 5: 31, 6: 30}
+        days = [
+            SimpleNamespace(date_iso=f"2026-{month:02d}-{day:02d}")
+            for month, month_length in month_lengths.items()
+            for day in range(1, month_length + 1)
+        ]
+
+        with self.assertRaisesRegex(ValueError, "at least 7 complete calendar months"):
+            _chronological_month_holdout_split(days, 5, 1, 1)
+
+    def test_split_rejects_nonpositive_requested_month_counts(self):
+        january = [
+            SimpleNamespace(date_iso=f"2026-01-{day:02d}") for day in range(1, 32)
+        ]
+        for counts in ((0, 1, 1), (1, 0, 1), (1, 1, 0)):
+            with self.subTest(counts=counts), self.assertRaisesRegex(
+                ValueError, "must each contain at least 1 month"
+            ):
+                _chronological_month_holdout_split(january, *counts)
 
     def test_reference_power_uses_training_days_only(self):
         training_days = [
