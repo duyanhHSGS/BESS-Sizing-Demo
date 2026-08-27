@@ -17,6 +17,7 @@ from bess.agents.ppo_agent import (
 )
 from bess.training.runners.train_ppo_dataset import (
     _action_mismatch_penalty_vnd,
+    _backtracked_challenger_state,
     _behavior_clone_actor,
     _behavior_clone_critic,
     _champion_curve_point,
@@ -29,6 +30,7 @@ from bess.training.runners.train_ppo_dataset import (
     _restore_reanchor_state,
     _save_accepted_champion,
     _should_reanchor_rejected_candidate,
+    _should_try_quarter_step,
     _training_reference_power_kw,
 )
 
@@ -127,7 +129,7 @@ class PPOTrainingStateTests(unittest.TestCase):
         for key, value in agent.collector_net.state_dict().items():
             self.assertTrue(torch.equal(value, agent.net.state_dict()[key].cpu()))
 
-    def test_midpoint_challenger_halves_network_and_zeroes_only_adam_first_moment(self):
+    def test_backtracked_challenger_builds_half_and_quarter_with_fresh_adam(self):
         champion_state = {
             "network": {
                 "weight": torch.tensor([0.0, 2.0]),
@@ -140,7 +142,7 @@ class PPOTrainingStateTests(unittest.TestCase):
         }
         candidate_state = {
             "network": {
-                "weight": torch.tensor([2.0, 6.0]),
+                "weight": torch.tensor([4.0, 10.0]),
                 "counter": torch.tensor([9], dtype=torch.int64),
             },
             "optimizer": {
@@ -149,7 +151,6 @@ class PPOTrainingStateTests(unittest.TestCase):
                         "step": torch.tensor(9.0),
                         "exp_avg": torch.tensor([2.0, -3.0]),
                         "exp_avg_sq": torch.tensor([4.0, 9.0]),
-                        "max_exp_avg_sq": torch.tensor([5.0, 10.0]),
                     }
                 },
                 "param_groups": [{"lr": 1e-4, "params": [1, 2]}],
@@ -158,32 +159,71 @@ class PPOTrainingStateTests(unittest.TestCase):
         candidate_optimizer_before = copy.deepcopy(candidate_state["optimizer"])
 
         midpoint_state = _midpoint_challenger_state(champion_state, candidate_state)
-        midpoint_adam = midpoint_state["optimizer"]["state"][1]
+        quarter_state = _backtracked_challenger_state(
+            champion_state,
+            candidate_state,
+            fraction=0.25,
+        )
 
         self.assertTrue(
-            torch.equal(midpoint_state["network"]["weight"], torch.tensor([1.0, 4.0]))
+            torch.equal(midpoint_state["network"]["weight"], torch.tensor([2.0, 6.0]))
+        )
+        self.assertTrue(
+            torch.equal(quarter_state["network"]["weight"], torch.tensor([1.0, 4.0]))
         )
         self.assertTrue(
             torch.equal(
-                midpoint_state["network"]["counter"],
+                quarter_state["network"]["counter"],
                 candidate_state["network"]["counter"],
             )
         )
-        self.assertTrue(torch.equal(midpoint_adam["exp_avg"], torch.zeros(2)))
-        self.assertTrue(
-            torch.equal(midpoint_adam["exp_avg_sq"], torch.tensor([4.0, 9.0]))
-        )
-        self.assertTrue(
-            torch.equal(midpoint_adam["max_exp_avg_sq"], torch.tensor([5.0, 10.0]))
-        )
-        self.assertTrue(torch.equal(midpoint_adam["step"], torch.tensor(9.0)))
+        self.assertEqual(midpoint_state["optimizer"]["state"], {})
+        self.assertEqual(quarter_state["optimizer"]["state"], {})
         self.assertEqual(
-            midpoint_state["optimizer"]["param_groups"],
+            quarter_state["optimizer"]["param_groups"],
             candidate_state["optimizer"]["param_groups"],
         )
         _assert_nested_equal(self, candidate_state["optimizer"], candidate_optimizer_before)
 
-    def test_midpoint_partial_adam_state_restores_and_learns_new_momentum(self):
+    def test_backtracked_challenger_rejects_invalid_fractions(self):
+        champion_state = {
+            "network": {"weight": torch.tensor([0.0])},
+            "optimizer": {"state": {}, "param_groups": [{"params": [1]}]},
+        }
+        candidate_state = {
+            "network": {"weight": torch.tensor([2.0])},
+            "optimizer": {"state": {}, "param_groups": [{"params": [1]}]},
+        }
+
+        for fraction in (0.0, 1.0, -0.25, 1.25, float("nan"), float("inf")):
+            with (
+                self.subTest(fraction=fraction),
+                self.assertRaisesRegex(ValueError, "Backtracking fraction"),
+            ):
+                _backtracked_challenger_state(
+                    champion_state,
+                    candidate_state,
+                    fraction=fraction,
+                )
+
+    def test_backtracked_challenger_rejects_network_shape_mismatch(self):
+        champion_state = {
+            "network": {"weight": torch.tensor([0.0, 1.0])},
+            "optimizer": {"state": {}, "param_groups": [{"params": [1]}]},
+        }
+        candidate_state = {
+            "network": {"weight": torch.tensor([2.0])},
+            "optimizer": {"state": {}, "param_groups": [{"params": [1]}]},
+        }
+
+        with self.assertRaisesRegex(ValueError, "tensor shape mismatch"):
+            _backtracked_challenger_state(
+                champion_state,
+                candidate_state,
+                fraction=0.25,
+            )
+
+    def test_midpoint_fresh_adam_state_restores_and_repopulates_on_next_update(self):
         agent = PPOAgent(obs_dim=4, seed=23, device="cpu", epochs=1, minibatch=4)
         agent.update(_make_buffer(agent, seed=20), 0.0)
         champion_state = agent.snapshot_training_state()
@@ -194,77 +234,39 @@ class PPOTrainingStateTests(unittest.TestCase):
 
         midpoint_state = _midpoint_challenger_state(champion_state, candidate_state)
         agent.restore_training_state(midpoint_state)
-        self.assertTrue(agent.opt.state)
-        for parameter_state in agent.opt.state.values():
-            self.assertTrue(torch.equal(parameter_state["exp_avg"], torch.zeros_like(parameter_state["exp_avg"])))
-            self.assertTrue(torch.any(parameter_state["exp_avg_sq"] > 0.0))
-            self.assertGreater(float(parameter_state["step"]), 0.0)
+        self.assertFalse(agent.opt.state)
         for key, value in agent.collector_net.state_dict().items():
             self.assertTrue(torch.equal(value, agent.net.state_dict()[key].cpu()))
 
         agent.update(_make_buffer(agent, seed=22), 0.0)
-        self.assertTrue(
-            any(
-                torch.any(parameter_state["exp_avg"] != 0.0)
-                for parameter_state in agent.opt.state.values()
-            )
-        )
+        self.assertTrue(agent.opt.state)
 
-    def test_midpoint_partial_adam_preserves_variance_step_and_hyperparameters(self):
+    def test_backtracked_fresh_adam_keeps_optimizer_hyperparameters(self):
         agent = PPOAgent(obs_dim=4, seed=29, device="cpu", epochs=1, minibatch=4)
         agent.update(_make_buffer(agent, seed=30), 0.0)
         champion_state = agent.snapshot_training_state()
         agent.update(_make_buffer(agent, seed=31), 0.0)
         candidate_state = agent.snapshot_training_state()
 
-        midpoint_state = _midpoint_challenger_state(champion_state, candidate_state)
+        quarter_state = _backtracked_challenger_state(
+            champion_state,
+            candidate_state,
+            fraction=0.25,
+        )
 
+        self.assertEqual(quarter_state["optimizer"]["state"], {})
         self.assertEqual(
-            midpoint_state["optimizer"]["param_groups"],
+            quarter_state["optimizer"]["param_groups"],
             candidate_state["optimizer"]["param_groups"],
         )
-        for parameter_id, candidate_adam in candidate_state["optimizer"]["state"].items():
-            midpoint_adam = midpoint_state["optimizer"]["state"][parameter_id]
-            self.assertTrue(
-                torch.equal(midpoint_adam["exp_avg"], torch.zeros_like(candidate_adam["exp_avg"]))
-            )
-            self.assertTrue(torch.equal(midpoint_adam["exp_avg_sq"], candidate_adam["exp_avg_sq"]))
-            self.assertTrue(torch.equal(midpoint_adam["step"], candidate_adam["step"]))
 
-    def test_midpoint_partial_adam_handles_empty_optimizer_state(self):
-        champion_state = {
-            "network": {"weight": torch.tensor([0.0])},
-            "optimizer": {"state": {}, "param_groups": [{"params": [1]}]},
-        }
-        candidate_state = {
-            "network": {"weight": torch.tensor([2.0])},
-            "optimizer": {"state": {}, "param_groups": [{"params": [1]}]},
-        }
-
-        midpoint_state = _midpoint_challenger_state(champion_state, candidate_state)
-
-        self.assertTrue(torch.equal(midpoint_state["network"]["weight"], torch.tensor([1.0])))
-        self.assertEqual(midpoint_state["optimizer"], candidate_state["optimizer"])
-
-    def test_midpoint_partial_adam_preserves_unknown_optimizer_state_fields(self):
-        champion_state = {
-            "network": {"weight": torch.tensor([0.0])},
-            "optimizer": {"state": {}, "param_groups": [{"params": [1]}]},
-        }
-        candidate_state = {
-            "network": {"weight": torch.tensor([2.0])},
-            "optimizer": {
-                "state": {1: {"step": torch.tensor(4.0), "future_adam_field": 123}},
-                "param_groups": [{"params": [1]}],
-            },
-        }
-
-        midpoint_state = _midpoint_challenger_state(champion_state, candidate_state)
-
-        self.assertEqual(midpoint_state["optimizer"]["state"][1]["future_adam_field"], 123)
-        self.assertTrue(
-            torch.equal(midpoint_state["optimizer"]["state"][1]["step"], torch.tensor(4.0))
-        )
+    def test_quarter_step_gate_requires_half_to_improve_on_full(self):
+        self.assertTrue(_should_try_quarter_step(510.0, 505.0))
+        self.assertFalse(_should_try_quarter_step(510.0, 510.0))
+        self.assertFalse(_should_try_quarter_step(510.0, 515.0))
+        self.assertFalse(_should_try_quarter_step(float("nan"), 505.0))
+        self.assertFalse(_should_try_quarter_step(510.0, float("nan")))
+        self.assertFalse(_should_try_quarter_step(float("inf"), 505.0))
 
 
 class PPORealDataSplitTests(unittest.TestCase):

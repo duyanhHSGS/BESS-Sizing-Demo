@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import calendar
-import copy
 import json
 import math
 import time
@@ -588,44 +587,72 @@ def _training_reference_power_kw(train_days) -> float:
     return math.ceil(peak / 500.0) * 500.0
 
 
-def _midpoint_challenger_state(champion_state: dict, candidate_state: dict) -> dict:
-    """Build the exact half-step network between Champion and challenger."""
+def _backtracked_challenger_state(
+    champion_state: dict,
+    candidate_state: dict,
+    *,
+    fraction: float,
+) -> dict:
+    """Interpolate a rejected challenger toward Champion and restart Adam cleanly."""
+    if not math.isfinite(fraction) or not 0.0 < fraction < 1.0:
+        raise ValueError("Backtracking fraction must be finite and strictly between 0 and 1")
+
     champion_network = champion_state["network"]
     candidate_network = candidate_state["network"]
     if champion_network.keys() != candidate_network.keys():
         raise ValueError("Champion/challenger network states do not match")
 
-    midpoint_network = {}
+    backtracked_network = {}
     for key, champion_value in champion_network.items():
         candidate_value = candidate_network[key]
         if torch.is_tensor(champion_value) and torch.is_tensor(candidate_value):
             if champion_value.shape != candidate_value.shape:
                 raise ValueError(f"Champion/challenger tensor shape mismatch for {key}")
             if torch.is_floating_point(champion_value):
-                midpoint_network[key] = torch.lerp(
+                backtracked_network[key] = torch.lerp(
                     champion_value,
                     candidate_value,
-                    0.5,
+                    fraction,
                 )
             else:
-                midpoint_network[key] = candidate_value.detach().clone()
+                backtracked_network[key] = candidate_value.detach().clone()
         else:
-            midpoint_network[key] = candidate_value
+            backtracked_network[key] = candidate_value
 
-    midpoint_optimizer = copy.deepcopy(candidate_state["optimizer"])
-    for parameter_state in midpoint_optimizer["state"].values():
-        exp_avg = parameter_state.get("exp_avg")
-        if torch.is_tensor(exp_avg):
-            exp_avg.zero_()
-
-    return {
-        "network": midpoint_network,
-        # IQ-49: a rejected full step should not steer the rescued half-step via
-        # Adam's first moment. Keep step/variance history so adaptive scaling and
-        # bias correction remain internally consistent instead of becoming fake Adam.
-        # TODO(IQ-49): keep this partial Adam reset only if unseen-month evidence wins.
-        "optimizer": midpoint_optimizer,
+    candidate_optimizer = candidate_state["optimizer"]
+    fresh_optimizer = {
+        "state": {},
+        "param_groups": [
+            {**group, "params": list(group["params"])}
+            for group in candidate_optimizer["param_groups"]
+        ],
     }
+    return {
+        "network": backtracked_network,
+        # IQ-50 uses IQ-48's proven fresh-Adam rescue baseline and changes only
+        # geometric backtracking depth. Rejected full-step moments stay discarded.
+        # TODO(IQ-50): keep conditional quarter-step backtracking only if remote
+        # unseen-month evidence beats the IQ-48/IQ-49 tied baseline.
+        "optimizer": fresh_optimizer,
+    }
+
+
+def _midpoint_challenger_state(champion_state: dict, candidate_state: dict) -> dict:
+    """Build the exact 50% Champion/challenger state with fresh Adam."""
+    return _backtracked_challenger_state(
+        champion_state,
+        candidate_state,
+        fraction=0.5,
+    )
+
+
+def _should_try_quarter_step(full_candidate_cost: float, midpoint_cost: float) -> bool:
+    """Spend a quarter-step validation only when halving improved the direction."""
+    return (
+        math.isfinite(full_candidate_cost)
+        and math.isfinite(midpoint_cost)
+        and midpoint_cost < full_candidate_cost
+    )
 
 
 def _should_reanchor_rejected_candidate(
@@ -1086,7 +1113,7 @@ def main() -> None:
         "reset_optimizer_on_reanchor": args.reset_optimizer_on_reanchor,
         "preserve_critic_on_reanchor": args.preserve_critic_on_reanchor,
         "reanchor_scope": reanchor_scope,
-        "rejected_midpoint_rescue": "fixed_half_step_zero_first_moment_v3",
+        "rejected_midpoint_rescue": "conditional_quarter_backtrack_fresh_adam_v4",
         "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,
         "oracle_actor_behavior_cloning_max_epochs": args.oracle_actor_bc_max_epochs,
         "oracle_behavior_cloning_max_epochs": args.oracle_bc_max_epochs,
@@ -1203,9 +1230,11 @@ def main() -> None:
             "reset_optimizer_on_reanchor": args.reset_optimizer_on_reanchor,
             "preserve_critic_on_reanchor": args.preserve_critic_on_reanchor,
             "reanchor_scope": reanchor_scope,
-            "rejected_midpoint_rescue": "fixed_half_step_zero_first_moment_v3",
+            "rejected_midpoint_rescue": "conditional_quarter_backtrack_fresh_adam_v4",
             "midpoint_rescue_evaluations": 0,
             "midpoint_rescues": 0,
+            "quarter_step_evaluations": 0,
+            "quarter_step_rescues": 0,
             "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,
             "oracle_actor_behavior_cloning_max_epochs": args.oracle_actor_bc_max_epochs,
             "oracle_behavior_cloning_max_epochs": args.oracle_bc_max_epochs,
@@ -1523,6 +1552,25 @@ def main() -> None:
                     candidate_cost = midpoint_cost
                     accepted = True
                     report["training"]["midpoint_rescues"] += 1
+                elif _should_try_quarter_step(full_candidate_cost, midpoint_cost):
+                    quarter_state = _backtracked_challenger_state(
+                        champion_state,
+                        candidate_state,
+                        fraction=0.25,
+                    )
+                    agent.restore_training_state(quarter_state)
+                    report["training"]["quarter_step_evaluations"] += 1
+                    quarter_cost = validate_policy_cost()
+                    report["training"]["last_quarter_candidate_cost_vnd"] = quarter_cost
+                    rescued_cost, rescued = _resolve_challenger(
+                        champion_cost,
+                        quarter_cost,
+                    )
+                    if rescued:
+                        champion_cost = rescued_cost
+                        candidate_cost = quarter_cost
+                        accepted = True
+                        report["training"]["quarter_step_rescues"] += 1
 
         if accepted:
             report["training"]["accepted_updates"] += 1
