@@ -23,8 +23,6 @@ from itertools import pairwise
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from bess.paths import PROJECT_ROOT
-
 SPEC = {
     "name": "youngone",
     "base_url": "https://solar.datainsight.vn",
@@ -41,7 +39,9 @@ START_DATE = "2025-06-01"
 END_DATE = "2026-07-01"
 INTERVAL_MINUTES = 15
 
-BASE_DIR = PROJECT_ROOT
+# Keep this utility directly runnable without importing the application package.
+# TODO(DIRECT-RUN): keep standalone scripts independent from `bess` imports.
+BASE_DIR = Path(__file__).resolve().parents[1]
 OUTPUT_CSV = BASE_DIR / "data" / f"offline_{SPEC['name']}.csv"
 
 TOKEN_TTL_SECONDS = 2 * 60 * 60

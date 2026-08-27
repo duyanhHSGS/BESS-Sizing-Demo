@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
-from scripts.download_tb_data import _sensor_quality_issue
+from scripts.download_tb_data import BASE_DIR, _sensor_quality_issue
 
 INTERVAL_MINUTES = 15
 SAMPLES_PER_DAY = 24 * 60 // INTERVAL_MINUTES
+
+
+def test_downloader_resolves_repo_root_without_bess_import() -> None:
+    assert BASE_DIR == Path(__file__).resolve().parents[1]
 
 
 def test_sensor_quality_accepts_normal_factory_day() -> None:
