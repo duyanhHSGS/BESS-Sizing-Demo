@@ -30,7 +30,9 @@ from bess.training.runners.train_ppo_dataset import (
     _restore_reanchor_state,
     _save_accepted_champion,
     _should_reanchor_rejected_candidate,
+    _should_start_quarter_probation,
     _should_try_quarter_step,
+    _should_validate_candidate,
     _training_reference_power_kw,
 )
 
@@ -267,6 +269,41 @@ class PPOTrainingStateTests(unittest.TestCase):
         self.assertFalse(_should_try_quarter_step(float("nan"), 505.0))
         self.assertFalse(_should_try_quarter_step(510.0, float("nan")))
         self.assertFalse(_should_try_quarter_step(float("inf"), 505.0))
+
+    def test_quarter_step_probation_requires_strict_finite_champion_improvement(self):
+        self.assertTrue(_should_start_quarter_probation(500.0, 499.0))
+        self.assertFalse(_should_start_quarter_probation(500.0, 500.0))
+        self.assertFalse(_should_start_quarter_probation(500.0, 501.0))
+        self.assertFalse(_should_start_quarter_probation(float("nan"), 499.0))
+        self.assertFalse(_should_start_quarter_probation(500.0, float("nan")))
+        self.assertFalse(_should_start_quarter_probation(float("inf"), 499.0))
+        self.assertFalse(_should_start_quarter_probation(500.0, float("-inf")))
+
+    def test_quarter_probation_forces_the_very_next_validation(self):
+        self.assertFalse(
+            _should_validate_candidate(3, 10, quarter_probation_active=False)
+        )
+        self.assertTrue(
+            _should_validate_candidate(3, 10, quarter_probation_active=True)
+        )
+        self.assertTrue(
+            _should_validate_candidate(10, 10, quarter_probation_active=False)
+        )
+        self.assertTrue(
+            _should_validate_candidate(10, 10, quarter_probation_active=True)
+        )
+
+    def test_candidate_validation_rejects_invalid_cadence_even_during_probation(self):
+        for cadence in (0, -1):
+            with (
+                self.subTest(cadence=cadence),
+                self.assertRaisesRegex(ValueError, "Validation cadence"),
+            ):
+                _should_validate_candidate(
+                    1,
+                    cadence,
+                    quarter_probation_active=True,
+                )
 
 
 class PPORealDataSplitTests(unittest.TestCase):

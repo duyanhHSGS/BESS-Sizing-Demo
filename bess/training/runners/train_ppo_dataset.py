@@ -629,10 +629,10 @@ def _backtracked_challenger_state(
     }
     return {
         "network": backtracked_network,
-        # IQ-50 uses IQ-48's proven fresh-Adam rescue baseline and changes only
-        # geometric backtracking depth. Rejected full-step moments stay discarded.
-        # TODO(IQ-50): keep conditional quarter-step backtracking only if remote
-        # unseen-month evidence beats the IQ-48/IQ-49 tied baseline.
+        # IQ-51 keeps IQ-48's proven fresh-Adam rescue baseline. Quarter-step
+        # geometry may start probation, but only a later full PPO update can crown.
+        # TODO(IQ-51): keep quarter probation only if remote complete-month evidence
+        # generalizes better than IQ-50 without sacrificing the IQ-48 baseline.
         "optimizer": fresh_optimizer,
     }
 
@@ -653,6 +653,27 @@ def _should_try_quarter_step(full_candidate_cost: float, midpoint_cost: float) -
         and math.isfinite(midpoint_cost)
         and midpoint_cost < full_candidate_cost
     )
+
+
+def _should_start_quarter_probation(champion_cost: float, quarter_cost: float) -> bool:
+    """Let a quarter-step continue learning only when it already beats Champion."""
+    return (
+        math.isfinite(champion_cost)
+        and math.isfinite(quarter_cost)
+        and quarter_cost < champion_cost
+    )
+
+
+def _should_validate_candidate(
+    updates: int,
+    validate_every_updates: int,
+    *,
+    quarter_probation_active: bool,
+) -> bool:
+    """Force the one-update probation exam even outside normal validation cadence."""
+    if validate_every_updates < 1:
+        raise ValueError("Validation cadence must be at least one update")
+    return quarter_probation_active or updates % validate_every_updates == 0
 
 
 def _should_reanchor_rejected_candidate(
@@ -1113,7 +1134,7 @@ def main() -> None:
         "reset_optimizer_on_reanchor": args.reset_optimizer_on_reanchor,
         "preserve_critic_on_reanchor": args.preserve_critic_on_reanchor,
         "reanchor_scope": reanchor_scope,
-        "rejected_midpoint_rescue": "conditional_quarter_backtrack_fresh_adam_v4",
+        "rejected_midpoint_rescue": "conditional_quarter_probation_fresh_adam_v5",
         "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,
         "oracle_actor_behavior_cloning_max_epochs": args.oracle_actor_bc_max_epochs,
         "oracle_behavior_cloning_max_epochs": args.oracle_bc_max_epochs,
@@ -1230,11 +1251,16 @@ def main() -> None:
             "reset_optimizer_on_reanchor": args.reset_optimizer_on_reanchor,
             "preserve_critic_on_reanchor": args.preserve_critic_on_reanchor,
             "reanchor_scope": reanchor_scope,
-            "rejected_midpoint_rescue": "conditional_quarter_backtrack_fresh_adam_v4",
+            "rejected_midpoint_rescue": "conditional_quarter_probation_fresh_adam_v5",
             "midpoint_rescue_evaluations": 0,
             "midpoint_rescues": 0,
             "quarter_step_evaluations": 0,
             "quarter_step_rescues": 0,
+            "quarter_step_probations_started": 0,
+            "quarter_step_probations_passed": 0,
+            "quarter_step_probations_failed": 0,
+            "quarter_step_probations_expired": 0,
+            "quarter_step_probation_active": False,
             "oracle_behavior_cloning_enabled": args.oracle_bc_enabled,
             "oracle_actor_behavior_cloning_max_epochs": args.oracle_actor_bc_max_epochs,
             "oracle_behavior_cloning_max_epochs": args.oracle_bc_max_epochs,
@@ -1492,6 +1518,7 @@ def main() -> None:
     candidate_evaluations = 0
     consecutive_rejections = 0
     last_validated_update = 0
+    quarter_probation_active = False
     rollout_action_sum = 0.0
     rollout_action_abs_sum = 0.0
     rollout_action_saturation = 0
@@ -1510,8 +1537,14 @@ def main() -> None:
         nonlocal candidate_evaluations
         nonlocal consecutive_rejections
         nonlocal last_validated_update
+        nonlocal quarter_probation_active
 
         candidate_evaluations += 1
+        probation_follow_up = quarter_probation_active
+        if probation_follow_up:
+            quarter_probation_active = False
+            report["training"]["quarter_step_probation_active"] = False
+
         full_candidate_cost = validate_policy_cost()
         report["training"]["last_full_candidate_cost_vnd"] = full_candidate_cost
         champion_cost, accepted = _resolve_challenger(
@@ -1522,7 +1555,18 @@ def main() -> None:
         reset_to_champion = False
         should_reanchor = False
 
-        if not accepted:
+        if probation_follow_up:
+            if accepted:
+                report["training"]["quarter_step_probations_passed"] += 1
+                report["training"]["quarter_step_rescues"] += 1
+                report["training"]["last_quarter_probation_outcome"] = "passed"
+            else:
+                # IQ-51 probation gets exactly one ordinary PPO update. A failed
+                # follow-up cannot line-search again; the sacred Champion wins.
+                should_reanchor = True
+                report["training"]["quarter_step_probations_failed"] += 1
+                report["training"]["last_quarter_probation_outcome"] = "failed"
+        elif not accepted:
             next_rejection_count = consecutive_rejections + 1
             should_reanchor = _should_reanchor_rejected_candidate(
                 resets_enabled=args.challenger_resets_enabled,
@@ -1562,15 +1606,15 @@ def main() -> None:
                     report["training"]["quarter_step_evaluations"] += 1
                     quarter_cost = validate_policy_cost()
                     report["training"]["last_quarter_candidate_cost_vnd"] = quarter_cost
-                    rescued_cost, rescued = _resolve_challenger(
-                        champion_cost,
-                        quarter_cost,
-                    )
-                    if rescued:
-                        champion_cost = rescued_cost
-                        candidate_cost = quarter_cost
-                        accepted = True
-                        report["training"]["quarter_step_rescues"] += 1
+                    if _should_start_quarter_probation(champion_cost, quarter_cost):
+                        # IQ-51: the quarter-step may borrow the learner for exactly
+                        # one PPO update, but it cannot touch Champion/checkpoint yet.
+                        quarter_probation_active = True
+                        should_reanchor = False
+                        report["training"]["quarter_step_probations_started"] += 1
+                        report["training"]["quarter_step_probation_active"] = True
+                        report["training"]["last_quarter_probation_outcome"] = "started"
+                        report["training"]["last_quarter_probation_entry_cost_vnd"] = quarter_cost
 
         if accepted:
             report["training"]["accepted_updates"] += 1
@@ -1704,14 +1748,21 @@ def main() -> None:
         report["training"]["updates"] = updates
         report["training"]["last_update"] = {**update_stats, **rollout_stats}
 
-        should_validate = updates % args.validate_every_updates == 0
+        should_validate = _should_validate_candidate(
+            updates,
+            args.validate_every_updates,
+            quarter_probation_active=quarter_probation_active,
+        )
         should_log = updates == 1 or updates % args.log_every_updates == 0
         if should_validate:
             point, candidate_cost, accepted, reset_to_champion = evaluate_live_candidate(
                 allow_reset=True
             )
             if should_log:
-                verdict = "ACCEPTED 👑" if accepted else "REJECTED 💀"
+                if report["training"]["quarter_step_probation_active"]:
+                    verdict = "PROBATION 🧪"
+                else:
+                    verdict = "ACCEPTED 👑" if accepted else "REJECTED 💀"
                 reset_note = " | RESET→CHAMPION" if reset_to_champion else ""
                 print(
                     f"  update {updates:>4} | step {steps:>7} | "
@@ -1734,6 +1785,10 @@ def main() -> None:
                 f"  champion stats | accepted {report['training']['accepted_updates']} / "
                 f"{candidate_evaluations} evals | rejected {report['training']['rejected_updates']} / "
                 f"{candidate_evaluations} | resets {report['training']['learner_resets']} | "
+                f"probation {report['training']['quarter_step_probations_started']} start / "
+                f"{report['training']['quarter_step_probations_passed']} pass / "
+                f"{report['training']['quarter_step_probations_failed']} fail / "
+                f"{report['training']['quarter_step_probations_expired']} expire | "
                 f"rate {report['training']['acceptance_rate_pct']:.1f}%",
                 flush=True,
             )
@@ -1749,6 +1804,23 @@ def main() -> None:
         rollout_mismatch_kwh = 0.0
         rollout_count = 0
         rollout_started = time.perf_counter()
+
+    if quarter_probation_active:
+        # A quarter-step cannot become the final learner just because the step
+        # budget ended before its mandatory one-update probation exam.
+        _restore_reanchor_state(
+            agent,
+            champion_state,
+            preserve_critic=args.preserve_critic_on_reanchor,
+            reset_optimizer=args.reset_optimizer_on_reanchor,
+        )
+        quarter_probation_active = False
+        report["training"]["quarter_step_probation_active"] = False
+        report["training"]["quarter_step_probations_expired"] += 1
+        report["training"]["last_quarter_probation_outcome"] = "expired"
+        report["training"]["learner_resets"] += 1
+        consecutive_rejections = 0
+        report["training"]["consecutive_rejections"] = 0
 
     # The requested step budget may end after 1-3 unvalidated full PPO updates.
     # Score that final learner once so a late improvement is not thrown away.
