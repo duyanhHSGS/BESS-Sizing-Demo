@@ -19,18 +19,18 @@ import urllib.parse
 import urllib.request
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
-
-from bess.paths import PROJECT_ROOT
 from zoneinfo import ZoneInfo
 
+from bess.paths import PROJECT_ROOT
 
 SPEC = {
-    "name": "namduoc",
+    "name": "youngone",
     "base_url": "https://solar.datainsight.vn",
     "username": "oee2024@gmail.com",
     "password": "Oee@2124",
-    "device_id": "39ce5a90-84b4-11f0-afa5-2533bc830589",
+    "device_id": "9b745ee0-377d-11f0-af45-2533bc830589",
     "key_load": "INVT_T:PLoad",
     "key_pv": "INVT_T:ActivePowerSum",
     "unit_scale": 1.0,
@@ -39,15 +39,23 @@ SPEC = {
 
 START_DATE = "2025-06-01"
 END_DATE = "2026-07-01"
-INTERVAL_MINUTES = 1
+INTERVAL_MINUTES = 15
 
 BASE_DIR = PROJECT_ROOT
-OUTPUT_CSV = BASE_DIR / "data" / f"offline_{SPEC['name']}_1min.csv"
+OUTPUT_CSV = BASE_DIR / "data" / f"offline_{SPEC['name']}.csv"
 
 TOKEN_TTL_SECONDS = 2 * 60 * 60
 MAX_INTERVALS_PER_REQUEST = 650
 MAX_INTERPOLATION_GAP_MINUTES = 15
 PV_ZERO_THRESHOLD_KW = 1.0
+MAX_FROZEN_LOAD_MINUTES = 240
+MAX_MIRRORED_LOAD_PV_MINUTES = 60
+SENSOR_EQUALITY_TOLERANCE_KW = 0.05
+SENSOR_FROZEN_TOLERANCE_KW = 1e-6
+SENSOR_NONZERO_FLOOR_KW = 0.01
+# TODO(DATA-CLEAN): tune these sensor-health thresholds against the fresh Youngone
+# download and keep the strictest settings that reject corruption without removing
+# legitimate factory shutdowns.
 CSV_HEADERS = (
     "day_index",
     "date_iso",
@@ -81,8 +89,7 @@ def _post_json(url: str, payload: dict, timeout: int = 20) -> dict:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         raise RuntimeError(
-            f"ThingsBoard rejected the login ({error.code}): "
-            f"{_error_message(error)}"
+            f"ThingsBoard rejected the login ({error.code}): {_error_message(error)}"
         ) from error
 
 
@@ -112,7 +119,9 @@ def _login(force: bool = False) -> str:
     try:
         _token = str(response["token"])
     except KeyError as error:
-        raise RuntimeError("ThingsBoard login response did not contain a token") from error
+        raise RuntimeError(
+            "ThingsBoard login response did not contain a token"
+        ) from error
     _token_expires_at = time.time() + TOKEN_TTL_SECONDS
     return _token
 
@@ -170,7 +179,8 @@ def _format_point_counts(keys: list[str], counts: dict[str, int]) -> str:
 def _fetch_range(start_iso: str, end_iso: str, interval_min: int) -> dict:
     start_day = date.fromisoformat(start_iso)
     end_day = date.fromisoformat(end_iso)
-    yesterday = date.today() - timedelta(days=1)
+    timezone = ZoneInfo(str(SPEC.get("timezone") or "Asia/Bangkok"))
+    yesterday = datetime.now(timezone).date() - timedelta(days=1)
     if end_day > yesterday:
         end_day = yesterday
         print(f"[clamp] End date moved back to {end_day}; today is incomplete.")
@@ -213,10 +223,7 @@ def _fetch_range(start_iso: str, end_iso: str, interval_min: int) -> dict:
         for key, values in part.items():
             merged[key].extend(values)
 
-        chunk_counts = {
-            key: len(part.get(key, []))
-            for key in telemetry_keys
-        }
+        chunk_counts = {key: len(part.get(key, [])) for key in telemetry_keys}
         for key, count in chunk_counts.items():
             total_points[key] += count
 
@@ -311,13 +318,15 @@ def _interpolate(
         zero_threshold is not None and abs(first_value) <= zero_threshold
     ):
         return None
-    edge_value = 0.0 if (
-        zero_threshold is not None and abs(first_value) <= zero_threshold
-    ) else first_value
+    edge_value = (
+        0.0
+        if (zero_threshold is not None and abs(first_value) <= zero_threshold)
+        else first_value
+    )
     for index in range(first):
         result[index] = edge_value
 
-    for left, right in zip(known, known[1:]):
+    for left, right in pairwise(known):
         left_value = float(values[left])
         right_value = float(values[right])
         missing_steps = right - left - 1
@@ -340,9 +349,11 @@ def _interpolate(
         zero_threshold is not None and abs(last_value) <= zero_threshold
     ):
         return None
-    edge_value = 0.0 if (
-        zero_threshold is not None and abs(last_value) <= zero_threshold
-    ) else last_value
+    edge_value = (
+        0.0
+        if (zero_threshold is not None and abs(last_value) <= zero_threshold)
+        else last_value
+    )
     for index in range(last + 1, len(values)):
         result[index] = edge_value
 
@@ -376,25 +387,87 @@ def _despike_load(load: list[float], max_run: int) -> tuple[list[float], int]:
         while end < len(cleaned) and cleaned[end] > threshold:
             end += 1
         run_length = end - index
-        if (
-            run_length > 1
-            and max(cleaned[index:end]) <= multi_threshold
-        ):
+        if run_length > 1 and max(cleaned[index:end]) <= multi_threshold:
             index = end
             continue
         if run_length <= max_run:
-            left = cleaned[index - 1] if index > 0 else (
-                cleaned[end] if end < len(cleaned) else baseline
+            left = (
+                cleaned[index - 1]
+                if index > 0
+                else (cleaned[end] if end < len(cleaned) else baseline)
             )
             right = cleaned[end] if end < len(cleaned) else left
             for offset in range(run_length):
-                cleaned[index + offset] = (
-                    left
-                    + (right - left) * (offset + 1) / (run_length + 1)
+                cleaned[index + offset] = left + (right - left) * (offset + 1) / (
+                    run_length + 1
                 )
             changed += run_length
         index = end
     return cleaned, changed
+
+
+def _max_nonzero_frozen_run(values: list[float]) -> int:
+    """Longest positive/nonzero run where the sensor value is effectively frozen."""
+    best = 0
+    current = 0
+    previous: float | None = None
+    for value in values:
+        if abs(value) < SENSOR_NONZERO_FLOOR_KW:
+            current = 0
+            previous = None
+            continue
+        if previous is not None and abs(value - previous) <= SENSOR_FROZEN_TOLERANCE_KW:
+            current += 1
+        else:
+            current = 1
+        best = max(best, current)
+        previous = value
+    return best
+
+
+def _max_mirrored_run(load: list[float], pv: list[float]) -> int:
+    """Longest run where independent load/PV channels suspiciously mirror each other."""
+    best = 0
+    current = 0
+    for load_value, pv_value in zip(load, pv, strict=True):
+        mirrored = (
+            max(abs(load_value), abs(pv_value)) >= SENSOR_NONZERO_FLOOR_KW
+            and abs(load_value - pv_value) <= SENSOR_EQUALITY_TOLERANCE_KW
+        )
+        current = current + 1 if mirrored else 0
+        best = max(best, current)
+    return best
+
+
+def _sensor_quality_issue(
+    load: list[float], pv: list[float], interval_min: int
+) -> str | None:
+    """Return a high-confidence telemetry corruption reason, else ``None``."""
+    if interval_min <= 0:
+        raise ValueError("interval_min must be positive")
+    if len(load) != len(pv):
+        return "load/PV sample counts differ"
+    if not load:
+        return "day contains no samples"
+
+    if any(not math.isfinite(value) for value in load):
+        return "load contains non-finite values"
+    if any(not math.isfinite(value) for value in pv):
+        return "PV contains non-finite values"
+    if any(value < 0.0 for value in load):
+        return "load contains negative values"
+    if any(value < 0.0 for value in pv):
+        return "PV contains negative values"
+
+    frozen_minutes = _max_nonzero_frozen_run(load) * interval_min
+    if frozen_minutes > MAX_FROZEN_LOAD_MINUTES:
+        return f"load sensor frozen for {frozen_minutes} minutes"
+
+    mirrored_minutes = _max_mirrored_run(load, pv) * interval_min
+    if mirrored_minutes > MAX_MIRRORED_LOAD_PV_MINUTES:
+        return f"load/PV channels mirror each other for {mirrored_minutes} minutes"
+
+    return None
 
 
 def _build_days(
@@ -462,9 +535,19 @@ def _build_days(
             )
             continue
 
+        quality_issue = _sensor_quality_issue(load, pv, interval_min)
+        if quality_issue is not None:
+            bad_sensor_days += 1
+            print(f"[skip] {calendar_day}: suspicious telemetry: {quality_issue}.")
+            continue
+
         dead_load_fraction = sum(value < 1.0 for value in load) / steps_per_day
         if dead_load_fraction > 0.98 and max(pv) > 50.0:
             bad_sensor_days += 1
+            print(
+                f"[skip] {calendar_day}: load is below 1 kW for "
+                f"{dead_load_fraction:.1%} of the day while PV remains active."
+            )
             continue
 
         load, changed = _despike_load(
@@ -475,9 +558,7 @@ def _build_days(
         days.append(
             {
                 "date": calendar_day,
-                "day_type": (
-                    "weekend" if calendar_day.weekday() >= 5 else "working"
-                ),
+                "day_type": ("weekend" if calendar_day.weekday() >= 5 else "working"),
                 "load": load,
                 "pv": pv,
             }
