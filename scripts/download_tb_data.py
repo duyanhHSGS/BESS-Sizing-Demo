@@ -29,14 +29,14 @@ SPEC = {
     "username": "oee2024@gmail.com",
     "password": "Oee@2124",
     "device_id": "9b745ee0-377d-11f0-af45-2533bc830589",
-    "key_load": "INVT_T:PLoad",
+    "key_load": "INVT_T:P_Load",
     "key_pv": "INVT_T:ActivePowerSum",
     "unit_scale": 1.0,
     "timezone": "Asia/Bangkok",
 }
 
 START_DATE = "2025-06-01"
-END_DATE = "2026-07-01"
+END_DATE = "2026-08-26"
 INTERVAL_MINUTES = 15
 
 # Keep this utility directly runnable without importing the application package.
