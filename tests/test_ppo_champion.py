@@ -390,12 +390,10 @@ class PPORealDataSplitTests(unittest.TestCase):
             if day_index not in missing
         ]
 
-    def test_dynamic_five_one_one_split_uses_dispatch_day_index_buckets(self):
+    def test_all_complete_buckets_are_used_with_latest_one_one_holdouts(self):
         days = self._indexed_days(210)
 
-        train, validation, test, ignored = _chronological_month_holdout_split(
-            days, 5, 1, 1
-        )
+        train, validation, test, ignored = _chronological_month_holdout_split(days, 1, 1)
 
         self.assertEqual([day.day_index for day in train], list(range(1, 151)))
         self.assertEqual([day.day_index for day in validation], list(range(151, 181)))
@@ -405,49 +403,49 @@ class PPORealDataSplitTests(unittest.TestCase):
         self.assertTrue(set(map(id, train)).isdisjoint(map(id, test)))
         self.assertTrue(set(map(id, validation)).isdisjoint(map(id, test)))
 
-    def test_332_day_dataset_uses_latest_seven_complete_buckets_and_cuts_tail(self):
+    def test_332_day_dataset_becomes_nine_one_one_and_cuts_only_tail(self):
         days = self._indexed_days(332)
 
-        train, validation, test, ignored = _chronological_month_holdout_split(
-            days, 5, 1, 1
-        )
+        train, validation, test, ignored = _chronological_month_holdout_split(days, 1, 1)
 
-        self.assertEqual([day.day_index for day in train], list(range(121, 271)))
+        self.assertEqual([day.day_index for day in train], list(range(1, 271)))
         self.assertEqual([day.day_index for day in validation], list(range(271, 301)))
         self.assertEqual([day.day_index for day in test], list(range(301, 331)))
-        self.assertEqual(
-            [day.day_index for day in ignored],
-            [*range(1, 121), 331, 332],
-        )
-        self.assertNotIn(331, {day.day_index for day in train + validation + test})
-        self.assertNotIn(332, {day.day_index for day in train + validation + test})
+        self.assertEqual([day.day_index for day in ignored], [331, 332])
 
-    def test_partial_trailing_bucket_is_never_train_validation_or_test(self):
+    def test_partial_trailing_bucket_is_the_only_ignored_data(self):
         days = self._indexed_days(213)
 
-        train, validation, test, ignored = _chronological_month_holdout_split(
-            days, 1, 1, 1
-        )
+        train, validation, test, ignored = _chronological_month_holdout_split(days, 1, 1)
 
-        self.assertEqual([day.day_index for day in train], list(range(121, 151)))
+        self.assertEqual([day.day_index for day in train], list(range(1, 151)))
         self.assertEqual([day.day_index for day in validation], list(range(151, 181)))
         self.assertEqual([day.day_index for day in test], list(range(181, 211)))
-        self.assertEqual([day.day_index for day in ignored][-3:], [211, 212, 213])
+        self.assertEqual([day.day_index for day in ignored], [211, 212, 213])
 
-    def test_incomplete_internal_bucket_is_skipped_without_fabricating_day(self):
+    def test_242_days_dynamically_becomes_six_one_one(self):
+        train, validation, test, ignored = _chronological_month_holdout_split(
+            self._indexed_days(242), 1, 1
+        )
+        self.assertEqual(len(train), 6 * 30)
+        self.assertEqual([day.day_index for day in validation], list(range(181, 211)))
+        self.assertEqual([day.day_index for day in test], list(range(211, 241)))
+        self.assertEqual([day.day_index for day in ignored], [241, 242])
+
+    def test_272_days_dynamically_becomes_seven_one_one(self):
+        train, validation, test, ignored = _chronological_month_holdout_split(
+            self._indexed_days(272), 1, 1
+        )
+        self.assertEqual(len(train), 7 * 30)
+        self.assertEqual([day.day_index for day in validation], list(range(211, 241)))
+        self.assertEqual([day.day_index for day in test], list(range(241, 271)))
+        self.assertEqual([day.day_index for day in ignored], [271, 272])
+
+    def test_incomplete_internal_bucket_fails_instead_of_being_ignored(self):
         days = self._indexed_days(120, missing={45})
 
-        train, validation, test, ignored = _chronological_month_holdout_split(
-            days, 1, 1, 1
-        )
-
-        self.assertEqual([day.day_index for day in train], list(range(1, 31)))
-        self.assertEqual([day.day_index for day in validation], list(range(61, 91)))
-        self.assertEqual([day.day_index for day in test], list(range(91, 121)))
-        self.assertEqual(
-            [day.day_index for day in ignored],
-            [day_index for day_index in range(31, 61) if day_index != 45],
-        )
+        with self.assertRaisesRegex(ValueError, "incomplete non-trailing Dispatch bucket"):
+            _chronological_month_holdout_split(days, 1, 1)
 
     def test_bucket_builder_sorts_day_indexes_and_marks_tail_incomplete(self):
         days = list(reversed(self._indexed_days(33)))
@@ -461,23 +459,21 @@ class PPORealDataSplitTests(unittest.TestCase):
         self.assertEqual(complete[0].source, "dispatch-bucket:1-30")
         self.assertEqual(incomplete[0].source, "dispatch-bucket:31-60")
 
-    def test_latest_complete_window_drops_older_dispatch_buckets(self):
+    def test_older_complete_dispatch_buckets_are_never_dropped(self):
         days = self._indexed_days(240)
 
-        train, validation, test, ignored = _chronological_month_holdout_split(
-            days, 5, 1, 1
-        )
+        train, validation, test, ignored = _chronological_month_holdout_split(days, 1, 1)
 
-        self.assertEqual([day.day_index for day in train], list(range(31, 181)))
+        self.assertEqual([day.day_index for day in train], list(range(1, 181)))
         self.assertEqual([day.day_index for day in validation], list(range(181, 211)))
         self.assertEqual([day.day_index for day in test], list(range(211, 241)))
-        self.assertEqual([day.day_index for day in ignored], list(range(1, 31)))
+        self.assertEqual(ignored, [])
 
-    def test_split_rejects_when_fewer_complete_dispatch_buckets_than_requested(self):
-        days = self._indexed_days(209)
+    def test_split_rejects_without_one_training_bucket_beyond_holdouts(self):
+        days = self._indexed_days(89)
 
-        with self.assertRaisesRegex(ValueError, "at least 7 complete 30-day Dispatch Viewer buckets"):
-            _chronological_month_holdout_split(days, 5, 1, 1)
+        with self.assertRaisesRegex(ValueError, "at least 3 complete 30-day Dispatch Viewer buckets"):
+            _chronological_month_holdout_split(days, 1, 1)
 
     def test_bucket_builder_rejects_duplicate_day_index(self):
         days = self._indexed_days(30)
@@ -492,11 +488,11 @@ class PPORealDataSplitTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "positive 1-based"):
             _dispatch_month_bucket_blocks(days)
 
-    def test_split_rejects_nonpositive_requested_month_counts(self):
+    def test_split_rejects_nonpositive_holdout_counts(self):
         days = self._indexed_days(90)
-        for counts in ((0, 1, 1), (1, 0, 1), (1, 1, 0)):
+        for counts in ((0, 1), (1, 0)):
             with self.subTest(counts=counts), self.assertRaisesRegex(
-                ValueError, "must each contain at least 1 month"
+                ValueError, "must each contain at least 1 bucket"
             ):
                 _chronological_month_holdout_split(days, *counts)
 

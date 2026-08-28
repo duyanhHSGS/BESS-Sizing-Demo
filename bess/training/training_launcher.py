@@ -171,24 +171,28 @@ def _bounded_float(
     return value
 
 
-def _split_months(payload: dict) -> tuple[int, int, int]:
-    # IQ-58: generic PPO "months" are Dispatch Viewer fixed 30-day buckets.
-    # TODO(IQ-58): keep the 5/1/1 bucket counts explicit while Viewer/training share boundaries.
-    train_months = _int(payload, "train_months", 5)
+def _split_months(payload: dict) -> tuple[int, int]:
+    # IQ-58: training bucket count is automatic; only validation/test reserve counts
+    # are configurable. Every older complete Dispatch bucket becomes training data.
+    # TODO(IQ-58): never reintroduce a fixed training-bucket count.
     val_months = _int(payload, "val_months", 1)
     test_months = _int(payload, "test_months", 1)
-    if train_months < 1:
-        raise TrainingLaunchError("training months must be at least 1")
     if val_months < 1:
-        raise TrainingLaunchError("validation months must be at least 1")
+        raise TrainingLaunchError("validation buckets must be at least 1")
     if test_months < 1:
-        raise TrainingLaunchError("test months must be at least 1")
-    return train_months, val_months, test_months
+        raise TrainingLaunchError("test buckets must be at least 1")
+    return val_months, test_months
 
 
-def _required_generic_ppo_days(train_months: int, val_months: int, test_months: int) -> int:
-    """Cheap preflight day-count floor for complete Dispatch Viewer buckets."""
-    return (train_months + val_months + test_months) * DISPATCH_MONTH_BUCKET_DAYS
+def _required_generic_ppo_days(val_months: int, test_months: int) -> int:
+    """Cheap floor: one training bucket plus every requested holdout bucket."""
+    return (1 + val_months + test_months) * DISPATCH_MONTH_BUCKET_DAYS
+
+
+def _automatic_train_bucket_count(n_days: int, val_months: int, test_months: int) -> int:
+    """Report the expected train count when only the final partial bucket may be incomplete."""
+    complete_buckets = int(n_days) // DISPATCH_MONTH_BUCKET_DAYS
+    return max(0, complete_buckets - val_months - test_months)
 
 
 def _control_dt_minutes(payload: dict, csv_path: Path) -> int:
@@ -296,9 +300,9 @@ def build_training_command(
     e_cap = _float(payload, "e_cap_kwh")
     p_rated = _float(payload, "p_rated_kw")
     if algo == "ppo2":
-        train_months, val_months, test_months = 0, 0, 0  # PPO2 owns its separate calendar split.
+        val_months, test_months = 0, 0  # PPO2 owns its separate calendar split.
     else:
-        train_months, val_months, test_months = _split_months(payload)
+        val_months, test_months = _split_months(payload)
     dataset_id = str(payload.get("dataset_id", "dataset"))
     default_obs_variant = "base" if algo == "ppo2" else "brain7"
     obs_variant = str(payload.get("obs_variant", default_obs_variant)).strip().lower()
@@ -363,7 +367,6 @@ def build_training_command(
     if algo != "ppo2":
         cmd.extend(["--oracle-cache", str(oracle_cache_path)])
     if algo == "ppo":
-        cmd.extend(["--train-months", str(train_months)])
         defaults = PPO_TUNABLE_DEFAULTS
         gamma = _bounded_float(
             payload,
@@ -707,15 +710,12 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
         n_days = require_min_days(source, required_train_days)
         oracle_path = Path("")  # PPO2 builds the senior fixed-block month LP internally.
     else:
-        train_months, val_months, test_months = _split_months(payload)
-        # Cheap launcher guard only. The runner still validates exact day_index coverage,
-        # but every requested generic-PPO billing bucket requires all 30 source days.
-        required_train_days = _required_generic_ppo_days(
-            train_months,
-            val_months,
-            test_months,
-        )
+        val_months, test_months = _split_months(payload)
+        # Cheap launcher guard only. The runner validates exact day_index continuity
+        # and permits only one trailing partial bucket.
+        required_train_days = _required_generic_ppo_days(val_months, test_months)
         n_days = require_min_days(source, required_train_days)
+        train_months = _automatic_train_bucket_count(n_days, val_months, test_months)
         oracle_path, _ = oracle_cache.require_cached_oracle(oracle_parameters)
 
     USER_DATA_DIR.mkdir(parents=True, exist_ok=True)

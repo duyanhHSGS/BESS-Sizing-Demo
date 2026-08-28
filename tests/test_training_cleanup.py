@@ -14,6 +14,7 @@ from bess.training.training_common import augment_month, build_training_bess_con
 from bess.training.training_launcher import (
     TrainingLaunchError,
     UnsupportedAlgorithm,
+    _automatic_train_bucket_count,
     _control_dt_minutes,
     _required_generic_ppo_days,
     _split_months,
@@ -23,45 +24,46 @@ from bess.training.training_launcher import (
 
 
 class SharedTrainingHelpersTests(unittest.TestCase):
-    def test_generic_ppo_defaults_to_dynamic_five_one_one_months(self):
-        self.assertEqual(_split_months({}), (5, 1, 1))
+    def test_generic_ppo_defaults_to_auto_train_one_one_holdouts(self):
+        self.assertEqual(_split_months({}), (1, 1))
 
-    def test_generic_ppo_split_preserves_explicit_user_values(self):
+    def test_generic_ppo_holdouts_preserve_explicit_user_values_and_ignore_train_months(self):
         self.assertEqual(
-            _split_months({"train_months": 4, "val_months": 3, "test_months": 2}),
-            (4, 3, 2),
+            _split_months({"train_months": 999, "val_months": 3, "test_months": 2}),
+            (3, 2),
         )
 
-    def test_default_five_one_one_bucket_preflight_requires_210_days(self):
-        self.assertEqual(_required_generic_ppo_days(5, 1, 1), 210)
-        self.assertEqual(_required_generic_ppo_days(1, 1, 1), 90)
-        self.assertEqual(_required_generic_ppo_days(4, 3, 2), 270)
+    def test_auto_train_bucket_preflight_requires_one_training_bucket_plus_holdouts(self):
+        self.assertEqual(_required_generic_ppo_days(1, 1), 90)
+        self.assertEqual(_required_generic_ppo_days(3, 2), 180)
+        self.assertEqual(_automatic_train_bucket_count(332, 1, 1), 9)
+        self.assertEqual(_automatic_train_bucket_count(242, 1, 1), 6)
+        self.assertEqual(_automatic_train_bucket_count(272, 1, 1), 7)
 
-    def test_generic_ppo_ui_labels_split_counts_as_dispatch_30_day_buckets(self):
+    def test_generic_ppo_ui_marks_training_buckets_automatic(self):
         template = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(
             encoding="utf-8"
         )
-        self.assertIn("Training 30-day buckets", template)
+        self.assertIn("Training 30-day buckets: auto (all remaining full buckets)", template)
         self.assertIn("Validation 30-day buckets", template)
         self.assertIn("Test 30-day buckets", template)
-        self.assertIn('id="train-train-months"', template)
+        self.assertNotIn('id="train-train-months"', template)
+        self.assertNotIn("train_months: Number", template)
         self.assertIn('id="train-val-months"', template)
         self.assertIn('id="train-test-months"', template)
 
-    def test_generic_ppo_split_rejects_nonpositive_month_counts(self):
+    def test_generic_ppo_holdouts_reject_nonpositive_counts(self):
         for payload in (
-            {"train_months": 0, "val_months": 1, "test_months": 1},
-            {"train_months": 1, "val_months": 0, "test_months": 1},
-            {"train_months": 1, "val_months": 1, "test_months": 0},
-            {"train_months": -1, "val_months": 1, "test_months": 1},
-            {"train_months": 1, "val_months": -1, "test_months": 1},
-            {"train_months": 1, "val_months": 1, "test_months": -1},
+            {"val_months": 0, "test_months": 1},
+            {"val_months": 1, "test_months": 0},
+            {"val_months": -1, "test_months": 1},
+            {"val_months": 1, "test_months": -1},
         ):
             with self.subTest(payload=payload), self.assertRaises(TrainingLaunchError):
                 _split_months(payload)
 
-    # TODO(IQ-53): keep 5/1/1 split-default coverage beside the launcher contract
-    # so UI refactors cannot silently change the clean-data experiment geometry.
+    # TODO(IQ-58): keep automatic-training-bucket coverage beside the launcher
+    # contract so UI refactors cannot silently bring back a fixed train count.
     def test_augmentation_is_seeded_and_handles_pv(self):
         day = DayData(
             load=np.full(8, 100.0, dtype=np.float64),
@@ -219,7 +221,6 @@ class GenericPPOLauncherTests(unittest.TestCase):
             )["cmd"]
 
         expected_values = {
-            "--train-months": "4",
             "--val-months": "2",
             "--test-months": "3",
             "--steps": "12345",
@@ -252,6 +253,7 @@ class GenericPPOLauncherTests(unittest.TestCase):
             "--log-every-updates": "5",
             "--torch-threads": "4",
         }
+        self.assertNotIn("--train-months", command)
         for flag, expected in expected_values.items():
             self.assertEqual(command[command.index(flag) + 1], expected)
         self.assertIn("--no-recurrent-enabled", command)

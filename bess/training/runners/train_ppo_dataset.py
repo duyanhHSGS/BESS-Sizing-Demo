@@ -596,42 +596,53 @@ def _dispatch_month_bucket_blocks(days):
 
 def _chronological_month_holdout_split(
     days,
-    train_months: int,
     val_months: int,
     test_months: int,
 ):
-    """Use the latest complete Dispatch Viewer 30-day buckets for train/val/test."""
-    if train_months < 1 or val_months < 1 or test_months < 1:
-        raise ValueError("Training, validation, and test splits must each contain at least 1 month")
+    """Train on every complete Dispatch bucket except the newest val/test holdouts."""
+    if val_months < 1 or test_months < 1:
+        raise ValueError("Validation and test splits must each contain at least 1 bucket")
     complete_buckets, incomplete_buckets = _dispatch_month_bucket_blocks(days)
-    required_months = train_months + val_months + test_months
-    if len(complete_buckets) < required_months:
+
+    # TODO(IQ-58): every complete 30-day bucket is useful data. The only bucket we
+    # may ignore is one contiguous unfinished bucket at the very end of the dataset.
+    if incomplete_buckets:
+        if len(incomplete_buckets) != 1:
+            raise ValueError("Training CSV may contain only one incomplete trailing Dispatch bucket")
+        tail = incomplete_buckets[0]
+        tail_start = int(tail.days[0].day_index)
+        last_complete_start = max(
+            (int(bucket.days[0].day_index) for bucket in complete_buckets),
+            default=0,
+        )
+        actual_tail_indexes = [int(day.day_index) for day in tail.days]
+        expected_tail_indexes = list(range(tail_start, tail_start + len(tail.days)))
+        if tail_start <= last_complete_start or actual_tail_indexes != expected_tail_indexes:
+            raise ValueError(
+                "Training CSV has an incomplete non-trailing Dispatch bucket; only the final "
+                "contiguous partial 30-day bucket may be ignored"
+            )
+
+    holdout_buckets = val_months + test_months
+    if len(complete_buckets) <= holdout_buckets:
         raise ValueError(
             "Training CSV must contain at least "
-            f"{required_months} complete 30-day Dispatch Viewer buckets for "
-            f"{train_months} training + {val_months} validation + {test_months} test; "
+            f"{holdout_buckets + 1} complete 30-day Dispatch Viewer buckets for at least "
+            f"1 training + {val_months} validation + {test_months} test; "
             f"got {len(complete_buckets)}"
         )
 
-    # TODO(IQ-58): the Dispatch Viewer 30-day bucket is now the training billing-month
-    # source of truth. Never promote a partial bucket into train/validation/test.
-    selected = complete_buckets[-required_months:]
-    older_complete_buckets = complete_buckets[:-required_months]
-    train_stop = train_months
-    val_stop = train_months + val_months
+    train_stop = len(complete_buckets) - holdout_buckets
+    val_stop = train_stop + val_months
 
     def _flatten(blocks):
         return [day for bucket in blocks for day in bucket.days]
 
-    ignored_buckets = sorted(
-        [*incomplete_buckets, *older_complete_buckets],
-        key=lambda bucket: int(bucket.days[0].day_index),
-    )
     return (
-        _flatten(selected[:train_stop]),
-        _flatten(selected[train_stop:val_stop]),
-        _flatten(selected[val_stop:]),
-        _flatten(ignored_buckets),
+        _flatten(complete_buckets[:train_stop]),
+        _flatten(complete_buckets[train_stop:val_stop]),
+        _flatten(complete_buckets[val_stop:]),
+        _flatten(incomplete_buckets),
     )
 
 
@@ -922,10 +933,9 @@ def main() -> None:
     parser.add_argument("--billing", choices=("2tc", "tou"), default="2tc")
     parser.add_argument("--training-config", type=str, required=True)
     parser.add_argument("--oracle-cache", required=True)
-    # IQ-53 defaults to a dynamic latest-complete-month 5/1/1 split. This changes
-    # data selection only; Brain7, BrainEnv, recurrent architecture, and PPO scalar
-    # settings remain untouched.
-    parser.add_argument("--train-months", type=int, default=5)
+    # IQ-58 reserves only validation/test holdout bucket counts; training consumes
+    # every earlier complete Dispatch 30-day bucket automatically. Brain7, BrainEnv,
+    # recurrent architecture, and PPO scalar settings remain untouched.
     parser.add_argument("--val-months", type=int, default=1)
     parser.add_argument("--test-months", type=int, default=1)
     parser.add_argument("--obs-variant", choices=("brain7",), default="brain7")
@@ -1063,7 +1073,6 @@ def main() -> None:
         train_days, val_days, test_days, ignored_split_days = (
             _chronological_month_holdout_split(
                 days,
-                args.train_months,
                 args.val_months,
                 args.test_months,
             )
@@ -1101,8 +1110,7 @@ def main() -> None:
     if train_incomplete or validation_incomplete or test_incomplete:
         raise RuntimeError("Selected Dispatch Viewer split unexpectedly contains a partial 30-day bucket")
     if (
-        len(train_months) != args.train_months
-        or len(validation_months) != args.val_months
+        len(validation_months) != args.val_months
         or len(test_months) != args.test_months
     ):
         raise RuntimeError("Dynamic complete-bucket split lost a Dispatch Viewer block")
@@ -1191,7 +1199,7 @@ def main() -> None:
         "validation_range": [val_days[0].date_iso, val_days[-1].date_iso],
         "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
         "temporary_full_dataset_overlap": False,
-        "data_overlap_note": "dynamic latest complete Dispatch Viewer 30-day buckets; partial buckets are skipped",
+        "data_overlap_note": "all complete Dispatch Viewer 30-day buckets are used; newest buckets are validation/test holdouts and only the final contiguous partial bucket may be ignored",
         "ignored_unselected_days": len(ignored_split_days),
         "ignored_unselected_buckets": ignored_split_buckets,
         "ignored_unselected_months": ignored_split_buckets,
@@ -1271,8 +1279,9 @@ def main() -> None:
             "validation_range": [val_days[0].date_iso, val_days[-1].date_iso],
             "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
             "temporary_full_dataset_overlap": False,
-            "split_mode": "dynamic_latest_complete_dispatch_30_day_buckets",
+            "split_mode": "all_complete_dispatch_30_day_buckets_with_latest_holdouts",
             "dispatch_month_bucket_days": DISPATCH_MONTH_BUCKET_DAYS,
+            "training_bucket_count_mode": "automatic_all_complete_before_holdouts",
             "ignored_unselected_days": len(ignored_split_days),
             "ignored_unselected_buckets": ignored_split_buckets,
             "ignored_unselected_months": ignored_split_buckets,
