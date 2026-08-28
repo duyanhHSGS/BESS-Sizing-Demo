@@ -479,7 +479,98 @@ class PPOOracleTeacherTests(unittest.TestCase):
             seed=0,
         )
         self.assertLess(stats["critic_final_mse"], stats["critic_initial_mse"])
+        self.assertEqual(stats["critic_final_mse"], stats["critic_best_mse"])
+        self.assertGreaterEqual(stats["critic_best_epoch"], 1)
+        self.assertLessEqual(stats["critic_best_epoch"], stats["critic_epochs_completed"])
         self.assertEqual(stats["critic_epochs_completed"], 100)
+
+    def test_behavior_clone_critic_never_restores_worse_than_initial_state(self):
+        agent = PPOAgent(7, seed=0, device="cpu")
+        rng = np.random.default_rng(654)
+        observations = rng.normal(size=(32, 7)).astype(np.float32)
+        rewards = rng.normal(scale=0.25, size=32).astype(np.float32)
+
+        stats = _behavior_clone_critic(
+            agent,
+            observations,
+            rewards,
+            gamma=1.0,
+            seed=0,
+            max_epochs=4,
+            learning_rate=1.0,
+            target_mse=0.0,
+        )
+
+        self.assertLessEqual(stats["critic_final_mse"], stats["critic_initial_mse"] + 1e-6)
+        self.assertAlmostEqual(stats["critic_final_mse"], stats["critic_best_mse"], places=6)
+        self.assertGreaterEqual(stats["critic_best_epoch"], 0)
+        self.assertLessEqual(stats["critic_best_epoch"], stats["critic_epochs_completed"])
+
+    def test_recurrent_behavior_clone_critic_restores_best_full_episode_mse(self):
+        agent = PPOAgent(
+            7,
+            seed=0,
+            device="cpu",
+            recurrent_enabled=True,
+            recurrent_sequence_length=4,
+        )
+        rng = np.random.default_rng(987)
+        observations = rng.normal(size=(16, 7)).astype(np.float32)
+        rewards = rng.normal(scale=0.1, size=16).astype(np.float32)
+
+        stats = _behavior_clone_critic(
+            agent,
+            observations,
+            rewards,
+            gamma=0.999,
+            seed=0,
+            max_epochs=5,
+            learning_rate=0.01,
+            target_mse=0.0,
+            episode_lengths=[8, 8],
+        )
+
+        self.assertLessEqual(stats["critic_final_mse"], stats["critic_initial_mse"] + 1e-6)
+        self.assertAlmostEqual(stats["critic_final_mse"], stats["critic_best_mse"], places=6)
+        self.assertGreaterEqual(stats["critic_last_epoch_mse"], 0.0)
+        self.assertGreaterEqual(stats["critic_best_epoch"], 0)
+        self.assertLessEqual(stats["critic_best_epoch"], stats["critic_epochs_completed"])
+
+    def test_behavior_clone_critic_never_mutates_actor_or_ppo_optimizer(self):
+        agent = PPOAgent(
+            7,
+            seed=0,
+            device="cpu",
+            recurrent_enabled=True,
+            recurrent_sequence_length=4,
+        )
+        rng = np.random.default_rng(222)
+        observations = rng.normal(size=(16, 7)).astype(np.float32)
+        rewards = rng.normal(scale=0.2, size=16).astype(np.float32)
+        actor_state_before = {
+            key: value.detach().clone()
+            for key, value in agent.net.state_dict().items()
+            if not key.startswith(("critic_encoder.", "critic_gru.", "critic."))
+        }
+        ppo_optimizer_before = copy.deepcopy(agent.opt.state_dict())
+
+        _behavior_clone_critic(
+            agent,
+            observations,
+            rewards,
+            gamma=0.999,
+            seed=0,
+            max_epochs=3,
+            learning_rate=0.01,
+            target_mse=0.0,
+            episode_lengths=[8, 8],
+        )
+
+        actor_state_after = agent.net.state_dict()
+        self.assertGreater(len(actor_state_before), 0)
+        for key, expected in actor_state_before.items():
+            self.assertTrue(torch.equal(actor_state_after[key], expected), key)
+        self.assertEqual(agent.opt.state_dict(), ppo_optimizer_before)
 
     def test_behavior_clone_critic_resets_returns_between_real_months(self):
         agent = PPOAgent(7, seed=0, device="cpu")
@@ -498,6 +589,9 @@ class PPOOracleTeacherTests(unittest.TestCase):
 
         # Month-local returns are [2, 1] and [20, 10]; no future-month reward leaks backward.
         self.assertAlmostEqual(stats["critic_target_mean"], 8.25)
+        self.assertEqual(stats["critic_best_epoch"], 0)
+        self.assertAlmostEqual(stats["critic_final_mse"], stats["critic_initial_mse"])
+        self.assertAlmostEqual(stats["critic_last_epoch_mse"], stats["critic_initial_mse"])
 
 
 class PPOActionMismatchPenaltyTests(unittest.TestCase):

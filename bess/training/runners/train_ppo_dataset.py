@@ -447,6 +447,21 @@ def _behavior_clone_critic(
 
     initial_mse = full_mse()
     epochs_completed = 0
+    best_mse = initial_mse
+    best_epoch = 0
+    critic_state_prefixes = (
+        ("critic_encoder.", "critic_gru.", "critic.")
+        if agent.recurrent_enabled
+        else ("critic.",)
+    )
+    best_critic_state = {
+        key: value.detach().clone()
+        for key, value in agent.net.state_dict().items()
+        if key.startswith(critic_state_prefixes)
+    }
+    last_epoch_mse = initial_mse
+    # TODO(IQ-54): compare best-epoch critic restoration against IQ-53's
+    # degraded final critic before changing any PPO/environment contract.
     for epoch in range(max_epochs):
         if agent.recurrent_enabled:
             for episode_start, episode_stop in episode_ranges:
@@ -481,14 +496,31 @@ def _behavior_clone_critic(
                 loss.backward()
                 optimizer.step()
         epochs_completed = epoch + 1
-        if full_mse() <= target_mse:
+        epoch_mse = full_mse()
+        last_epoch_mse = epoch_mse
+        if epoch_mse < best_mse:
+            best_mse = epoch_mse
+            best_epoch = epochs_completed
+            best_critic_state = {
+                key: value.detach().clone()
+                for key, value in agent.net.state_dict().items()
+                if key.startswith(critic_state_prefixes)
+            }
+        if epoch_mse <= target_mse:
             break
 
+    current_state = agent.net.state_dict()
+    current_state.update(best_critic_state)
+    agent.net.load_state_dict(current_state)
+    final_mse = full_mse()
     agent._sync_collector()
     return {
         "critic_epochs_completed": int(epochs_completed),
         "critic_initial_mse": initial_mse,
-        "critic_final_mse": full_mse(),
+        "critic_final_mse": final_mse,
+        "critic_last_epoch_mse": last_epoch_mse,
+        "critic_best_epoch": int(best_epoch),
+        "critic_best_mse": best_mse,
         "critic_target_mean": float(np.mean(returns)),
         "critic_target_std": float(np.std(returns)),
     }
