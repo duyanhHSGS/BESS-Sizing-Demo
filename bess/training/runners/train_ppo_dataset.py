@@ -395,8 +395,9 @@ def _behavior_clone_critic(
     minibatch: int = PPO_ORACLE_BC_MINIBATCH,
     target_mse: float = PPO_ORACLE_BC_TARGET_MSE,
     episode_lengths: list[int] | None = None,
-) -> dict[str, float | int]:
-    """Warm-start the existing critic on Oracle-path discounted reward-to-go."""
+    enabled: bool = True,
+) -> dict[str, float | int | bool]:
+    """Score and optionally warm-start the critic on Oracle-path returns."""
     if observations.ndim != 2 or observations.shape[1] != OBSERVATION_DIM:
         raise ValueError("Oracle critic observations must have shape (N, OBSERVATION_DIM)")
     if rewards.ndim != 1 or len(rewards) != len(observations) or len(rewards) == 0:
@@ -460,9 +461,10 @@ def _behavior_clone_critic(
         if key.startswith(critic_state_prefixes)
     }
     last_epoch_mse = initial_mse
-    # TODO(IQ-54): compare best-epoch critic restoration against IQ-53's
-    # degraded final critic before changing any PPO/environment contract.
-    for epoch in range(max_epochs):
+    effective_max_epochs = max_epochs if enabled else 0
+    # TODO(IQ-55): compare actor-only Oracle teaching against IQ-54 before
+    # deciding whether Oracle-path critic homework belongs in generic PPO.
+    for epoch in range(effective_max_epochs):
         if agent.recurrent_enabled:
             for episode_start, episode_stop in episode_ranges:
                 hidden = None
@@ -515,6 +517,7 @@ def _behavior_clone_critic(
     final_mse = full_mse()
     agent._sync_collector()
     return {
+        "critic_oracle_bc_enabled": bool(enabled),
         "critic_epochs_completed": int(epochs_completed),
         "critic_initial_mse": initial_mse,
         "critic_final_mse": final_mse,
@@ -1486,6 +1489,7 @@ def main() -> None:
                 minibatch=args.oracle_bc_minibatch,
                 target_mse=args.oracle_bc_target_mse,
                 episode_lengths=teacher_episode_lengths,
+                enabled=False,
             )
         )
         bc_stats["seconds"] = time.perf_counter() - bc_started

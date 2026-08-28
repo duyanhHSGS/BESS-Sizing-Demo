@@ -572,6 +572,47 @@ class PPOOracleTeacherTests(unittest.TestCase):
             self.assertTrue(torch.equal(actor_state_after[key], expected), key)
         self.assertEqual(agent.opt.state_dict(), ppo_optimizer_before)
 
+    def test_behavior_clone_critic_disabled_keeps_exact_epoch_zero_state(self):
+        agent = PPOAgent(
+            7,
+            seed=0,
+            device="cpu",
+            recurrent_enabled=True,
+            recurrent_sequence_length=4,
+        )
+        rng = np.random.default_rng(333)
+        observations = rng.normal(size=(16, 7)).astype(np.float32)
+        rewards = rng.normal(scale=0.2, size=16).astype(np.float32)
+        network_before = {
+            key: value.detach().clone()
+            for key, value in agent.net.state_dict().items()
+        }
+        ppo_optimizer_before = copy.deepcopy(agent.opt.state_dict())
+
+        stats = _behavior_clone_critic(
+            agent,
+            observations,
+            rewards,
+            gamma=0.999,
+            seed=0,
+            max_epochs=100,
+            learning_rate=0.01,
+            target_mse=0.0,
+            episode_lengths=[8, 8],
+            enabled=False,
+        )
+
+        self.assertFalse(stats["critic_oracle_bc_enabled"])
+        self.assertEqual(stats["critic_epochs_completed"], 0)
+        self.assertEqual(stats["critic_best_epoch"], 0)
+        self.assertAlmostEqual(stats["critic_final_mse"], stats["critic_initial_mse"])
+        self.assertAlmostEqual(stats["critic_best_mse"], stats["critic_initial_mse"])
+        self.assertAlmostEqual(stats["critic_last_epoch_mse"], stats["critic_initial_mse"])
+        network_after = agent.net.state_dict()
+        for key, expected in network_before.items():
+            self.assertTrue(torch.equal(network_after[key], expected), key)
+        self.assertEqual(agent.opt.state_dict(), ppo_optimizer_before)
+
     def test_behavior_clone_critic_resets_returns_between_real_months(self):
         agent = PPOAgent(7, seed=0, device="cpu")
         observations = np.zeros((4, 7), dtype=np.float32)
