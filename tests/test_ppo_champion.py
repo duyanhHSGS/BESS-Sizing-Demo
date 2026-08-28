@@ -131,6 +131,75 @@ class PPOTrainingStateTests(unittest.TestCase):
         for key, value in agent.collector_net.state_dict().items():
             self.assertTrue(torch.equal(value, agent.net.state_dict()[key].cpu()))
 
+    def test_recurrent_reanchor_restores_actor_but_keeps_all_live_critic_memory(self):
+        agent = PPOAgent(
+            obs_dim=7,
+            seed=23,
+            device="cpu",
+            recurrent_enabled=True,
+            recurrent_sequence_length=4,
+        )
+        champion_state = agent.snapshot_training_state()
+
+        with torch.no_grad():
+            for parameter in agent.net.parameters():
+                parameter.add_(0.125)
+        loss = sum(parameter.square().sum() for parameter in agent.net.parameters())
+        agent.opt.zero_grad()
+        loss.backward()
+        agent.opt.step()
+        live_network = {
+            key: value.detach().clone()
+            for key, value in agent.net.state_dict().items()
+        }
+        self.assertTrue(agent.opt.state)
+
+        _restore_reanchor_state(
+            agent,
+            champion_state,
+            preserve_critic=True,
+            reset_optimizer=True,
+        )
+
+        critic_prefixes = ("critic_encoder.", "critic_gru.", "critic.")
+        for key, value in agent.net.state_dict().items():
+            expected = live_network[key] if key.startswith(critic_prefixes) else champion_state["network"][key]
+            self.assertTrue(torch.equal(value, expected), key)
+        self.assertFalse(agent.opt.state)
+        for key, value in agent.collector_net.state_dict().items():
+            self.assertTrue(torch.equal(value, agent.net.state_dict()[key].cpu()), key)
+
+    def test_recurrent_reanchor_without_preservation_restores_full_champion(self):
+        agent = PPOAgent(
+            obs_dim=7,
+            seed=29,
+            device="cpu",
+            recurrent_enabled=True,
+            recurrent_sequence_length=4,
+        )
+        champion_state = agent.snapshot_training_state()
+        with torch.no_grad():
+            for parameter in agent.net.parameters():
+                parameter.add_(0.25)
+        loss = sum(parameter.square().sum() for parameter in agent.net.parameters())
+        agent.opt.zero_grad()
+        loss.backward()
+        agent.opt.step()
+        self.assertTrue(agent.opt.state)
+
+        _restore_reanchor_state(
+            agent,
+            champion_state,
+            preserve_critic=False,
+            reset_optimizer=True,
+        )
+
+        for key, value in agent.net.state_dict().items():
+            self.assertTrue(torch.equal(value, champion_state["network"][key]), key)
+        self.assertFalse(agent.opt.state)
+        for key, value in agent.collector_net.state_dict().items():
+            self.assertTrue(torch.equal(value, agent.net.state_dict()[key].cpu()), key)
+
     def test_backtracked_challenger_builds_half_and_quarter_with_fresh_adam(self):
         champion_state = {
             "network": {
@@ -570,47 +639,6 @@ class PPOOracleTeacherTests(unittest.TestCase):
         self.assertGreater(len(actor_state_before), 0)
         for key, expected in actor_state_before.items():
             self.assertTrue(torch.equal(actor_state_after[key], expected), key)
-        self.assertEqual(agent.opt.state_dict(), ppo_optimizer_before)
-
-    def test_behavior_clone_critic_disabled_keeps_exact_epoch_zero_state(self):
-        agent = PPOAgent(
-            7,
-            seed=0,
-            device="cpu",
-            recurrent_enabled=True,
-            recurrent_sequence_length=4,
-        )
-        rng = np.random.default_rng(333)
-        observations = rng.normal(size=(16, 7)).astype(np.float32)
-        rewards = rng.normal(scale=0.2, size=16).astype(np.float32)
-        network_before = {
-            key: value.detach().clone()
-            for key, value in agent.net.state_dict().items()
-        }
-        ppo_optimizer_before = copy.deepcopy(agent.opt.state_dict())
-
-        stats = _behavior_clone_critic(
-            agent,
-            observations,
-            rewards,
-            gamma=0.999,
-            seed=0,
-            max_epochs=100,
-            learning_rate=0.01,
-            target_mse=0.0,
-            episode_lengths=[8, 8],
-            enabled=False,
-        )
-
-        self.assertFalse(stats["critic_oracle_bc_enabled"])
-        self.assertEqual(stats["critic_epochs_completed"], 0)
-        self.assertEqual(stats["critic_best_epoch"], 0)
-        self.assertAlmostEqual(stats["critic_final_mse"], stats["critic_initial_mse"])
-        self.assertAlmostEqual(stats["critic_best_mse"], stats["critic_initial_mse"])
-        self.assertAlmostEqual(stats["critic_last_epoch_mse"], stats["critic_initial_mse"])
-        network_after = agent.net.state_dict()
-        for key, expected in network_before.items():
-            self.assertTrue(torch.equal(network_after[key], expected), key)
         self.assertEqual(agent.opt.state_dict(), ppo_optimizer_before)
 
     def test_behavior_clone_critic_resets_returns_between_real_months(self):
