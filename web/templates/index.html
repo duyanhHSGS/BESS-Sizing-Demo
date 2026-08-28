@@ -1444,11 +1444,11 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <label>E_cap (kWh) <input type="number" id="train-ecap" step="50" value="{{ battery_capacity_kWh }}"></label>
           <label>P_rated (kW) <input type="number" id="train-prated" step="25"
               value="{{ battery_power_limit_kW }}"></label>
-          <!-- IQ-53: counts stay explicit while the runner dynamically selects the latest complete measured months. -->
-          <!-- TODO(IQ-53): revisit 5/1/1 only after clean-data unseen-month evidence. -->
-          <label class="train-day-split-field">Training months <input type="number" id="train-train-months" min="1" step="1" value="5"></label>
-          <label class="train-day-split-field">Validation months <input type="number" id="train-val-months" min="1" step="1" value="1"></label>
-          <label class="train-day-split-field">Test months <input type="number" id="train-test-months" min="1" step="1" value="1"></label>
+          <!-- IQ-58: generic PPO uses the Dispatch Viewer fixed day_index buckets 1-30, 31-60, ... -->
+          <!-- TODO(IQ-58): keep these labels aligned with the shared 30-day bucket contract. -->
+          <label class="train-day-split-field">Training 30-day buckets <input type="number" id="train-train-months" min="1" step="1" value="5"></label>
+          <label class="train-day-split-field">Validation 30-day buckets <input type="number" id="train-val-months" min="1" step="1" value="1"></label>
+          <label class="train-day-split-field">Test 30-day buckets <input type="number" id="train-test-months" min="1" step="1" value="1"></label>
           <label class="train-learning-field">Custom sampling Δt
             <select id="train-control-dt"></select>
           </label>

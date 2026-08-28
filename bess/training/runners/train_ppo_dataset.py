@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import calendar
 import json
 import math
 import time
@@ -66,6 +65,7 @@ from bess.core.settings import (
     PPO_VALIDATE_EVERY_UPDATES,
     PPO_VALUE_COEF,
 )
+from bess.core.timebase import DISPATCH_MONTH_BUCKET_DAYS, dispatch_month_start_day
 from bess.evaluation.baselines import run_drl_policy, run_no_bess
 from bess.evaluation.oracle.oracle_cache import (
     load_cached_training_dispatch,
@@ -74,7 +74,6 @@ from bess.evaluation.oracle.oracle_cache import (
 from bess.training.training_common import (
     build_training_bess_config,
     load_training_days,
-    month_blocks,
 )
 from bess.training.training_reports import (
     PPO_CHAMPION_CURVE_FIELDS,
@@ -131,12 +130,12 @@ def _score_ppo_operating_month(
     }
 
 
-def _score_grid_calendar_months(
+def _score_grid_dispatch_buckets(
     p_grid_days: list[np.ndarray],
     months: list[MonthData],
     cfg,
 ) -> float:
-    """Sum utility bills without merging demand peaks across calendar months."""
+    """Sum utility bills without merging demand peaks across Dispatch 30-day buckets."""
     cursor = 0
     total_cost = 0.0
     for month in months:
@@ -150,7 +149,7 @@ def _score_grid_calendar_months(
         )
         cursor = stop
     if cursor != len(p_grid_days):
-        raise ValueError("Grid traces do not exactly match calendar-month holdouts")
+        raise ValueError("Grid traces do not exactly match Dispatch 30-day bucket holdouts")
     return total_cost
 
 
@@ -560,33 +559,39 @@ def _resolve_challenger(
     return champion_cost, False
 
 
-def _calendar_month_is_complete(month: MonthData) -> bool:
-    """Return True only when a month contains every calendar day exactly once."""
-    if not month.days:
-        return False
-    dates = [datetime.fromisoformat(str(day.date_iso)).date() for day in month.days]
-    year = dates[0].year
-    month_number = dates[0].month
-    if any(date.year != year or date.month != month_number for date in dates):
-        return False
-    expected_days = calendar.monthrange(year, month_number)[1]
-    return (
-        len(dates) == expected_days
-        and {date.day for date in dates} == set(range(1, expected_days + 1))
-    )
+def _dispatch_month_bucket_blocks(days):
+    """Group days exactly like Dispatch Viewer: 1-30, 31-60, ... by day_index."""
+    by_bucket: dict[int, list] = {}
+    seen_day_indexes: set[int] = set()
+    for day in days:
+        day_index = int(day.day_index)
+        if day_index in seen_day_indexes:
+            raise ValueError(f"Training CSV contains duplicate day_index {day_index}")
+        seen_day_indexes.add(day_index)
+        bucket_start = dispatch_month_start_day(day_index)
+        by_bucket.setdefault(bucket_start, []).append(day)
 
+    complete_buckets: list[MonthData] = []
+    incomplete_buckets: list[MonthData] = []
+    for bucket_start in sorted(by_bucket):
+        bucket_days = sorted(by_bucket[bucket_start], key=lambda day: int(day.day_index))
+        expected_indexes = set(
+            range(bucket_start, bucket_start + DISPATCH_MONTH_BUCKET_DAYS)
+        )
+        actual_indexes = {int(day.day_index) for day in bucket_days}
+        bucket = MonthData(
+            days=bucket_days,
+            source=(
+                f"dispatch-bucket:{bucket_start}-"
+                f"{bucket_start + DISPATCH_MONTH_BUCKET_DAYS - 1}"
+            ),
+        )
+        target = complete_buckets if actual_indexes == expected_indexes else incomplete_buckets
+        target.append(bucket)
 
-def _complete_calendar_month_blocks(days):
-    """Return complete calendar months and separately retain every incomplete month."""
-    calendar_months = month_blocks(list(days), minimum_days=1)
-    complete_months = []
-    incomplete_months = []
-    for month in calendar_months:
-        target = complete_months if _calendar_month_is_complete(month) else incomplete_months
-        target.append(month)
-    if not complete_months:
-        raise ValueError("Training CSV contains no complete calendar month")
-    return complete_months, incomplete_months
+    if not complete_buckets:
+        raise ValueError("Training CSV contains no complete 30-day Dispatch Viewer bucket")
+    return complete_buckets, incomplete_buckets
 
 
 def _chronological_month_holdout_split(
@@ -595,40 +600,38 @@ def _chronological_month_holdout_split(
     val_months: int,
     test_months: int,
 ):
-    """Dynamically use the latest requested complete months for train/val/test."""
+    """Use the latest complete Dispatch Viewer 30-day buckets for train/val/test."""
     if train_months < 1 or val_months < 1 or test_months < 1:
         raise ValueError("Training, validation, and test splits must each contain at least 1 month")
-    complete_months, incomplete_months = _complete_calendar_month_blocks(days)
+    complete_buckets, incomplete_buckets = _dispatch_month_bucket_blocks(days)
     required_months = train_months + val_months + test_months
-    if len(complete_months) < required_months:
+    if len(complete_buckets) < required_months:
         raise ValueError(
             "Training CSV must contain at least "
-            f"{required_months} complete calendar months for {train_months} training + "
-            f"{val_months} validation + {test_months} test; got {len(complete_months)}"
+            f"{required_months} complete 30-day Dispatch Viewer buckets for "
+            f"{train_months} training + {val_months} validation + {test_months} test; "
+            f"got {len(complete_buckets)}"
         )
 
-    # IQ-53: real telemetry may have holes inside otherwise useful history. Keep
-    # billing math honest by skipping incomplete months, then slide the requested
-    # train/validation/test window to the newest complete months automatically.
-    # TODO(IQ-53): re-audit the dynamic 5/1/1 split whenever new Youngone months
-    # accumulate; never fabricate missing dates merely to make a month complete.
-    selected = complete_months[-required_months:]
-    older_complete_months = complete_months[:-required_months]
+    # TODO(IQ-58): the Dispatch Viewer 30-day bucket is now the training billing-month
+    # source of truth. Never promote a partial bucket into train/validation/test.
+    selected = complete_buckets[-required_months:]
+    older_complete_buckets = complete_buckets[:-required_months]
     train_stop = train_months
     val_stop = train_months + val_months
 
     def _flatten(blocks):
-        return [day for month in blocks for day in month.days]
+        return [day for bucket in blocks for day in bucket.days]
 
-    ignored_months = sorted(
-        [*incomplete_months, *older_complete_months],
-        key=lambda month: month.source,
+    ignored_buckets = sorted(
+        [*incomplete_buckets, *older_complete_buckets],
+        key=lambda bucket: int(bucket.days[0].day_index),
     )
     return (
         _flatten(selected[:train_stop]),
         _flatten(selected[train_stop:val_stop]),
         _flatten(selected[val_stop:]),
-        _flatten(ignored_months),
+        _flatten(ignored_buckets),
     )
 
 
@@ -1067,7 +1070,12 @@ def main() -> None:
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    ignored_split_months = sorted({str(day.date_iso)[:7] for day in ignored_split_days})
+    ignored_split_buckets = [
+        f"{bucket_start}-{bucket_start + DISPATCH_MONTH_BUCKET_DAYS - 1}"
+        for bucket_start in sorted(
+            {dispatch_month_start_day(int(day.day_index)) for day in ignored_split_days}
+        )
+    ]
     # Training-only scale: validation/test peaks must not leak into the policy's
     # observation normalization or reference power.
     p_ref = _training_reference_power_kw(train_days)
@@ -1085,19 +1093,19 @@ def main() -> None:
     if billing == "tou" and not tag.endswith("_tou"):
         tag += "_tou"
 
-    # IQ-46 real-data mode: training days stay chronological but reset BrainEnv at
-    # calendar-month boundaries. Validation/test are newer, disjoint holdouts.
-    train_months = month_blocks(train_days, minimum_days=1)
-    if not train_months:
-        raise SystemExit("Training split contains no usable calendar-month episode")
-    validation_months = month_blocks(val_days, minimum_days=1)
-    test_months = month_blocks(test_days, minimum_days=1)
+    # IQ-58: match Dispatch Viewer billing episodes exactly. BrainEnv resets at
+    # fixed day_index buckets 1-30, 31-60, ...; real calendar dates are metadata only.
+    train_months, train_incomplete = _dispatch_month_bucket_blocks(train_days)
+    validation_months, validation_incomplete = _dispatch_month_bucket_blocks(val_days)
+    test_months, test_incomplete = _dispatch_month_bucket_blocks(test_days)
+    if train_incomplete or validation_incomplete or test_incomplete:
+        raise RuntimeError("Selected Dispatch Viewer split unexpectedly contains a partial 30-day bucket")
     if (
         len(train_months) != args.train_months
         or len(validation_months) != args.val_months
         or len(test_months) != args.test_months
     ):
-        raise RuntimeError("Dynamic complete-month split lost a calendar block")
+        raise RuntimeError("Dynamic complete-bucket split lost a Dispatch Viewer block")
     gamma = args.gamma
     native_steps = native_steps_per_action(cfg.dt, args.control_dt_minutes)
     cheap_tariff_steps = frozenset(int(step) for step in cfg.OFF)
@@ -1183,14 +1191,16 @@ def main() -> None:
         "validation_range": [val_days[0].date_iso, val_days[-1].date_iso],
         "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
         "temporary_full_dataset_overlap": False,
-        "data_overlap_note": "dynamic latest complete calendar-month split; incomplete months are skipped",
+        "data_overlap_note": "dynamic latest complete Dispatch Viewer 30-day buckets; partial buckets are skipped",
         "ignored_unselected_days": len(ignored_split_days),
-        "ignored_unselected_months": ignored_split_months,
+        "ignored_unselected_buckets": ignored_split_buckets,
+        "ignored_unselected_months": ignored_split_buckets,
+        "dispatch_month_bucket_days": DISPATCH_MONTH_BUCKET_DAYS,
         "validation_month_count": len(validation_months),
         "test_month_count": len(test_months),
         "training_augmentation_enabled": False,
         "rollout_decisions": rollout_decisions,
-        "rollout_mode": "one_calendar_month_per_update",
+        "rollout_mode": "one_dispatch_30_day_bucket_per_update",
         "training_month_count": len(train_months),
         "validation_every_updates": args.validate_every_updates,
         "challenger_reset_patience": args.challenger_reset_patience,
@@ -1232,7 +1242,7 @@ def main() -> None:
         if train_day_indexes == val_day_indexes
         else load_cached_training_dispatch(args.oracle_cache, val_day_indexes)
     )
-    val_oracle_utility = _score_grid_calendar_months(
+    val_oracle_utility = _score_grid_dispatch_buckets(
         oracle_grids,
         validation_months,
         cfg,
@@ -1261,9 +1271,11 @@ def main() -> None:
             "validation_range": [val_days[0].date_iso, val_days[-1].date_iso],
             "test_range": [test_days[0].date_iso, test_days[-1].date_iso],
             "temporary_full_dataset_overlap": False,
-            "split_mode": "dynamic_latest_complete_calendar_months",
+            "split_mode": "dynamic_latest_complete_dispatch_30_day_buckets",
+            "dispatch_month_bucket_days": DISPATCH_MONTH_BUCKET_DAYS,
             "ignored_unselected_days": len(ignored_split_days),
-            "ignored_unselected_months": ignored_split_months,
+            "ignored_unselected_buckets": ignored_split_buckets,
+            "ignored_unselected_months": ignored_split_buckets,
             "training_months": len(train_months),
             "validation_months": len(validation_months),
             "test_months": len(test_months),
@@ -1308,7 +1320,7 @@ def main() -> None:
             "initial_soc": float(cfg.SOC_min),
             "rollout_days": max(len(month.days) for month in train_months),
             "rollout_decisions": rollout_decisions,
-            "rollout_mode": "one_calendar_month_per_update",
+            "rollout_mode": "one_dispatch_30_day_bucket_per_update",
             "training_month_count": len(train_months),
             "augmentation_enabled": False,
             "validation_every_updates": args.validate_every_updates,
@@ -1360,10 +1372,10 @@ def main() -> None:
     write_curve(curve_path, [], fields=PPO_CHAMPION_CURVE_FIELDS)
     write_report(report_path, report)
     print(
-        f"[train-ds] COMPLETE CALENDAR-MONTH HOLDOUT | {len(days)} source days | "
-        f"train {len(train_months)}mo/{len(train_days)}d | "
-        f"val {len(validation_months)}mo/{len(val_days)}d | "
-        f"test {len(test_months)}mo/{len(test_days)}d | "
+        f"[train-ds] DISPATCH 30-DAY BUCKET HOLDOUT | {len(days)} source days | "
+        f"train {len(train_months)}bucket/{len(train_days)}d | "
+        f"val {len(validation_months)}bucket/{len(val_days)}d | "
+        f"test {len(test_months)}bucket/{len(test_days)}d | "
         f"ignored/unselected {len(ignored_split_days)}d | "
         f"gamma {gamma:g} | lambda {args.lambda_value:g} | "
         f"UI wear {battery_wear_cost:g} VND/kWh | "
@@ -1573,8 +1585,8 @@ def main() -> None:
         flush=True,
     )
 
-    # One PPO rollout/update is one calendar billing month. Cycle training months
-    # chronologically and reset BrainEnv/recurrent memory at every month boundary.
+    # One PPO rollout/update is one Dispatch Viewer 30-day billing bucket. Cycle
+    # buckets chronologically and reset BrainEnv/recurrent memory at each boundary.
     train_month_cursor = 0
     env = make_training_env(train_months[train_month_cursor])
     obs = observation_array(env.reset())

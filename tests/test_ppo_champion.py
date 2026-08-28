@@ -22,6 +22,7 @@ from bess.training.runners.train_ppo_dataset import (
     _behavior_clone_critic,
     _champion_curve_point,
     _chronological_month_holdout_split,
+    _dispatch_month_bucket_blocks,
     _initialize_champion,
     _midpoint_challenger_state,
     _oracle_dispatch_wear_cost_vnd,
@@ -376,110 +377,128 @@ class PPOTrainingStateTests(unittest.TestCase):
 
 
 class PPORealDataSplitTests(unittest.TestCase):
-    def test_dynamic_five_one_one_split_is_disjoint_and_keeps_whole_months(self):
-        month_lengths = {1: 31, 2: 28, 3: 31, 4: 30, 5: 31, 6: 30, 7: 31}
-        days = [
-            SimpleNamespace(date_iso=f"2026-{month:02d}-{day:02d}")
-            for month, month_length in month_lengths.items()
-            for day in range(1, month_length + 1)
+    @staticmethod
+    def _indexed_days(last_day_index: int, *, missing: set[int] | None = None):
+        missing = missing or set()
+        return [
+            SimpleNamespace(
+                day_index=day_index,
+                # Intentionally unrelated to bucket boundaries: day_index is the source of truth.
+                date_iso=f"2099-{((day_index - 1) % 12) + 1:02d}-{((day_index - 1) % 28) + 1:02d}",
+            )
+            for day_index in range(1, last_day_index + 1)
+            if day_index not in missing
         ]
+
+    def test_dynamic_five_one_one_split_uses_dispatch_day_index_buckets(self):
+        days = self._indexed_days(210)
 
         train, validation, test, ignored = _chronological_month_holdout_split(
             days, 5, 1, 1
         )
 
-        self.assertEqual(
-            sorted({day.date_iso[:7] for day in train}),
-            ["2026-01", "2026-02", "2026-03", "2026-04", "2026-05"],
-        )
-        self.assertEqual({day.date_iso[:7] for day in validation}, {"2026-06"})
-        self.assertEqual({day.date_iso[:7] for day in test}, {"2026-07"})
+        self.assertEqual([day.day_index for day in train], list(range(1, 151)))
+        self.assertEqual([day.day_index for day in validation], list(range(151, 181)))
+        self.assertEqual([day.day_index for day in test], list(range(181, 211)))
         self.assertEqual(ignored, [])
         self.assertTrue(set(map(id, train)).isdisjoint(map(id, validation)))
         self.assertTrue(set(map(id, train)).isdisjoint(map(id, test)))
         self.assertTrue(set(map(id, validation)).isdisjoint(map(id, test)))
 
-    def test_partial_trailing_month_is_ignored_instead_of_becoming_fake_test_month(self):
-        month_lengths = {1: 31, 2: 28, 3: 31}
-        days = [
-            SimpleNamespace(date_iso=f"2026-{month:02d}-{day:02d}")
-            for month, month_length in month_lengths.items()
-            for day in range(1, month_length + 1)
-        ]
-        days.extend(
-            SimpleNamespace(date_iso=f"2026-04-{day:02d}")
-            for day in range(1, 10)
-        )
-
-        train, validation, test, ignored = _chronological_month_holdout_split(
-            days, 1, 1, 1
-        )
-
-        self.assertEqual({day.date_iso[:7] for day in train}, {"2026-01"})
-        self.assertEqual({day.date_iso[:7] for day in validation}, {"2026-02"})
-        self.assertEqual({day.date_iso[:7] for day in test}, {"2026-03"})
-        self.assertEqual(len(ignored), 9)
-        self.assertEqual({day.date_iso[:7] for day in ignored}, {"2026-04"})
-
-    def test_incomplete_internal_month_is_skipped_without_fabricating_days(self):
-        month_lengths = {1: 31, 2: 28, 3: 31, 4: 30}
-        days = [
-            SimpleNamespace(date_iso=f"2026-{month:02d}-{day:02d}")
-            for month, month_length in month_lengths.items()
-            for day in range(1, month_length + 1)
-            if not (month == 2 and day == 15)
-        ]
-
-        train, validation, test, ignored = _chronological_month_holdout_split(
-            days, 1, 1, 1
-        )
-
-        self.assertEqual({day.date_iso[:7] for day in train}, {"2026-01"})
-        self.assertEqual({day.date_iso[:7] for day in validation}, {"2026-03"})
-        self.assertEqual({day.date_iso[:7] for day in test}, {"2026-04"})
-        self.assertEqual({day.date_iso[:7] for day in ignored}, {"2026-02"})
-        self.assertEqual(len(ignored), 27)
-
-    def test_latest_complete_window_drops_older_complete_months(self):
-        month_lengths = {1: 31, 2: 28, 3: 31, 4: 30, 5: 31, 6: 30, 7: 31, 8: 31}
-        days = [
-            SimpleNamespace(date_iso=f"2026-{month:02d}-{day:02d}")
-            for month, month_length in month_lengths.items()
-            for day in range(1, month_length + 1)
-        ]
+    def test_332_day_dataset_uses_latest_seven_complete_buckets_and_cuts_tail(self):
+        days = self._indexed_days(332)
 
         train, validation, test, ignored = _chronological_month_holdout_split(
             days, 5, 1, 1
         )
 
+        self.assertEqual([day.day_index for day in train], list(range(121, 271)))
+        self.assertEqual([day.day_index for day in validation], list(range(271, 301)))
+        self.assertEqual([day.day_index for day in test], list(range(301, 331)))
         self.assertEqual(
-            sorted({day.date_iso[:7] for day in train}),
-            ["2026-02", "2026-03", "2026-04", "2026-05", "2026-06"],
+            [day.day_index for day in ignored],
+            [*range(1, 121), 331, 332],
         )
-        self.assertEqual({day.date_iso[:7] for day in validation}, {"2026-07"})
-        self.assertEqual({day.date_iso[:7] for day in test}, {"2026-08"})
-        self.assertEqual({day.date_iso[:7] for day in ignored}, {"2026-01"})
+        self.assertNotIn(331, {day.day_index for day in train + validation + test})
+        self.assertNotIn(332, {day.day_index for day in train + validation + test})
 
-    def test_split_rejects_when_fewer_complete_months_than_requested(self):
-        month_lengths = {1: 31, 2: 28, 3: 31, 4: 30, 5: 31, 6: 30}
-        days = [
-            SimpleNamespace(date_iso=f"2026-{month:02d}-{day:02d}")
-            for month, month_length in month_lengths.items()
-            for day in range(1, month_length + 1)
-        ]
+    def test_partial_trailing_bucket_is_never_train_validation_or_test(self):
+        days = self._indexed_days(213)
 
-        with self.assertRaisesRegex(ValueError, "at least 7 complete calendar months"):
+        train, validation, test, ignored = _chronological_month_holdout_split(
+            days, 1, 1, 1
+        )
+
+        self.assertEqual([day.day_index for day in train], list(range(121, 151)))
+        self.assertEqual([day.day_index for day in validation], list(range(151, 181)))
+        self.assertEqual([day.day_index for day in test], list(range(181, 211)))
+        self.assertEqual([day.day_index for day in ignored][-3:], [211, 212, 213])
+
+    def test_incomplete_internal_bucket_is_skipped_without_fabricating_day(self):
+        days = self._indexed_days(120, missing={45})
+
+        train, validation, test, ignored = _chronological_month_holdout_split(
+            days, 1, 1, 1
+        )
+
+        self.assertEqual([day.day_index for day in train], list(range(1, 31)))
+        self.assertEqual([day.day_index for day in validation], list(range(61, 91)))
+        self.assertEqual([day.day_index for day in test], list(range(91, 121)))
+        self.assertEqual(
+            [day.day_index for day in ignored],
+            [day_index for day_index in range(31, 61) if day_index != 45],
+        )
+
+    def test_bucket_builder_sorts_day_indexes_and_marks_tail_incomplete(self):
+        days = list(reversed(self._indexed_days(33)))
+
+        complete, incomplete = _dispatch_month_bucket_blocks(days)
+
+        self.assertEqual(len(complete), 1)
+        self.assertEqual([day.day_index for day in complete[0].days], list(range(1, 31)))
+        self.assertEqual(len(incomplete), 1)
+        self.assertEqual([day.day_index for day in incomplete[0].days], [31, 32, 33])
+        self.assertEqual(complete[0].source, "dispatch-bucket:1-30")
+        self.assertEqual(incomplete[0].source, "dispatch-bucket:31-60")
+
+    def test_latest_complete_window_drops_older_dispatch_buckets(self):
+        days = self._indexed_days(240)
+
+        train, validation, test, ignored = _chronological_month_holdout_split(
+            days, 5, 1, 1
+        )
+
+        self.assertEqual([day.day_index for day in train], list(range(31, 181)))
+        self.assertEqual([day.day_index for day in validation], list(range(181, 211)))
+        self.assertEqual([day.day_index for day in test], list(range(211, 241)))
+        self.assertEqual([day.day_index for day in ignored], list(range(1, 31)))
+
+    def test_split_rejects_when_fewer_complete_dispatch_buckets_than_requested(self):
+        days = self._indexed_days(209)
+
+        with self.assertRaisesRegex(ValueError, "at least 7 complete 30-day Dispatch Viewer buckets"):
             _chronological_month_holdout_split(days, 5, 1, 1)
 
+    def test_bucket_builder_rejects_duplicate_day_index(self):
+        days = self._indexed_days(30)
+        days.append(SimpleNamespace(day_index=30, date_iso="2100-01-01"))
+
+        with self.assertRaisesRegex(ValueError, "duplicate day_index 30"):
+            _dispatch_month_bucket_blocks(days)
+
+    def test_bucket_builder_rejects_nonpositive_day_index(self):
+        days = [SimpleNamespace(day_index=0, date_iso="2100-01-01")]
+
+        with self.assertRaisesRegex(ValueError, "positive 1-based"):
+            _dispatch_month_bucket_blocks(days)
+
     def test_split_rejects_nonpositive_requested_month_counts(self):
-        january = [
-            SimpleNamespace(date_iso=f"2026-01-{day:02d}") for day in range(1, 32)
-        ]
+        days = self._indexed_days(90)
         for counts in ((0, 1, 1), (1, 0, 1), (1, 1, 0)):
             with self.subTest(counts=counts), self.assertRaisesRegex(
                 ValueError, "must each contain at least 1 month"
             ):
-                _chronological_month_holdout_split(january, *counts)
+                _chronological_month_holdout_split(days, *counts)
 
     def test_reference_power_uses_training_days_only(self):
         training_days = [

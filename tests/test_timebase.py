@@ -5,6 +5,7 @@ import unittest
 from bess.core.timebase import (
     build_tariff_windows,
     demand_window_steps,
+    dispatch_month_start_day,
     fixed_demand_block_averages,
     fixed_demand_windows,
     steps_per_day_from_dt,
@@ -51,6 +52,29 @@ class TimebaseTests(unittest.TestCase):
         self.assertEqual(len(blocks), 2)
         self.assertAlmostEqual(blocks[0], 14.5)
         self.assertAlmostEqual(blocks[1], 44.5)
+
+    def test_dispatch_month_bucket_boundaries_match_viewer_contract(self):
+        cases = {
+            1: 1,
+            30: 1,
+            31: 31,
+            60: 31,
+            61: 61,
+            150: 121,
+            151: 151,
+            330: 301,
+            331: 331,
+        }
+        for day_index, expected_start in cases.items():
+            with self.subTest(day_index=day_index):
+                self.assertEqual(dispatch_month_start_day(day_index), expected_start)
+
+    def test_dispatch_month_bucket_rejects_nonpositive_day_indexes(self):
+        for day_index in (0, -1, -30):
+            with self.subTest(day_index=day_index), self.assertRaisesRegex(
+                ValueError, "positive 1-based"
+            ):
+                dispatch_month_start_day(day_index)
 
 
 if __name__ == "__main__":

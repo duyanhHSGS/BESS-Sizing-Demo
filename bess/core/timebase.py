@@ -5,6 +5,16 @@ HOURS_PER_DAY = 24.0
 MINUTES_PER_HOUR = 60.0
 MINUTES_PER_DAY = HOURS_PER_DAY * MINUTES_PER_HOUR
 DEMAND_WINDOW_MINUTES = 30.0
+DISPATCH_MONTH_BUCKET_DAYS = 30
+
+
+def dispatch_month_start_day(day_index: int) -> int:
+    """Return the Dispatch Viewer fixed 30-day bucket start for one 1-based day index."""
+    index = int(day_index)
+    if index < 1:
+        raise ValueError("day_index must be a positive 1-based integer")
+    # TODO(IQ-58): keep training, Oracle, billing, and Dispatch Viewer on this one bucket rule.
+    return ((index - 1) // DISPATCH_MONTH_BUCKET_DAYS) * DISPATCH_MONTH_BUCKET_DAYS + 1
 
 
 def steps_per_day_from_dt(dt_hours: float) -> int:
@@ -13,7 +23,7 @@ def steps_per_day_from_dt(dt_hours: float) -> int:
     if dt <= 0.0:
         raise ValueError(f"dt_hours must be positive, got {dt_hours!r}")
     exact_steps = HOURS_PER_DAY / dt
-    steps = int(round(exact_steps))
+    steps = round(exact_steps)
     tolerance = max(1e-9, abs(exact_steps) * 1e-9)
     if steps <= 0 or abs(exact_steps - steps) > tolerance:
         raise ValueError(f"dt_hours={dt_hours!r} does not divide a 24-hour day")
@@ -34,7 +44,7 @@ def steps_for_minutes(duration_minutes: float, dt_hours: float) -> int:
     if step_minutes <= 0.0:
         raise ValueError(f"dt_hours must be positive, got {dt_hours!r}")
     exact_steps = float(duration_minutes) / step_minutes
-    steps = int(round(exact_steps))
+    steps = round(exact_steps)
     tolerance = max(1e-9, abs(exact_steps) * 1e-9)
     if steps <= 0 or abs(exact_steps - steps) > tolerance:
         raise ValueError(

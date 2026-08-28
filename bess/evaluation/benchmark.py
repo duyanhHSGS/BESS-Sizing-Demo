@@ -2,12 +2,15 @@ import csv
 from datetime import date
 from pathlib import Path
 
-from bess.paths import PROJECT_ROOT
-
 import numpy as np
 
-from bess.core.timebase import demand_window_steps, fixed_demand_block_averages, fixed_demand_windows
-
+from bess.core.timebase import (
+    demand_window_steps,
+    dispatch_month_start_day,
+    fixed_demand_block_averages,
+    fixed_demand_windows,
+)
+from bess.paths import PROJECT_ROOT
 
 BASE_DIR = PROJECT_ROOT
 DATA_DIR = BASE_DIR / "data"
@@ -358,7 +361,8 @@ def _month_peaks(days, dt):
 
 
 def _month_start_day(day_index):
-    return ((day_index - 1) // 30) * 30 + 1
+    """Compatibility wrapper around the shared Dispatch Viewer 30-day bucket rule."""
+    return dispatch_month_start_day(day_index)
 
 
 def _step_to_time(step, dt):

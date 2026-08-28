@@ -15,6 +15,7 @@ from bess.training.training_launcher import (
     TrainingLaunchError,
     UnsupportedAlgorithm,
     _control_dt_minutes,
+    _required_generic_ppo_days,
     _split_months,
     build_training_command,
     write_training_config,
@@ -30,6 +31,22 @@ class SharedTrainingHelpersTests(unittest.TestCase):
             _split_months({"train_months": 4, "val_months": 3, "test_months": 2}),
             (4, 3, 2),
         )
+
+    def test_default_five_one_one_bucket_preflight_requires_210_days(self):
+        self.assertEqual(_required_generic_ppo_days(5, 1, 1), 210)
+        self.assertEqual(_required_generic_ppo_days(1, 1, 1), 90)
+        self.assertEqual(_required_generic_ppo_days(4, 3, 2), 270)
+
+    def test_generic_ppo_ui_labels_split_counts_as_dispatch_30_day_buckets(self):
+        template = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Training 30-day buckets", template)
+        self.assertIn("Validation 30-day buckets", template)
+        self.assertIn("Test 30-day buckets", template)
+        self.assertIn('id="train-train-months"', template)
+        self.assertIn('id="train-val-months"', template)
+        self.assertIn('id="train-test-months"', template)
 
     def test_generic_ppo_split_rejects_nonpositive_month_counts(self):
         for payload in (

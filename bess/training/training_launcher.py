@@ -18,6 +18,7 @@ from bess.core.settings import (
     PPO_LAMBDA,
     PPO_TUNABLE_DEFAULTS,
 )
+from bess.core.timebase import DISPATCH_MONTH_BUCKET_DAYS
 from bess.evaluation.benchmark import detect_dt_hours
 from bess.evaluation.oracle import oracle_cache
 from bess.paths import PROJECT_ROOT
@@ -171,9 +172,8 @@ def _bounded_float(
 
 
 def _split_months(payload: dict) -> tuple[int, int, int]:
-    # IQ-53: use a fixed-size 5/1/1 billing-month window, but let the runner slide
-    # that window dynamically over the latest complete measured months.
-    # TODO(IQ-53): revisit the 5/1/1 counts only after clean-data unseen-month evidence.
+    # IQ-58: generic PPO "months" are Dispatch Viewer fixed 30-day buckets.
+    # TODO(IQ-58): keep the 5/1/1 bucket counts explicit while Viewer/training share boundaries.
     train_months = _int(payload, "train_months", 5)
     val_months = _int(payload, "val_months", 1)
     test_months = _int(payload, "test_months", 1)
@@ -184,6 +184,11 @@ def _split_months(payload: dict) -> tuple[int, int, int]:
     if test_months < 1:
         raise TrainingLaunchError("test months must be at least 1")
     return train_months, val_months, test_months
+
+
+def _required_generic_ppo_days(train_months: int, val_months: int, test_months: int) -> int:
+    """Cheap preflight day-count floor for complete Dispatch Viewer buckets."""
+    return (train_months + val_months + test_months) * DISPATCH_MONTH_BUCKET_DAYS
 
 
 def _control_dt_minutes(payload: dict, csv_path: Path) -> int:
@@ -703,9 +708,13 @@ def start_training(payload: dict, parameters: dict, manager: JobManager) -> tupl
         oracle_path = Path("")  # PPO2 builds the senior fixed-block month LP internally.
     else:
         train_months, val_months, test_months = _split_months(payload)
-        # Cheap launcher guard only. The runner validates actual date_iso calendar
-        # coverage because day count alone cannot prove distinct billing months.
-        required_train_days = train_months + val_months + test_months
+        # Cheap launcher guard only. The runner still validates exact day_index coverage,
+        # but every requested generic-PPO billing bucket requires all 30 source days.
+        required_train_days = _required_generic_ppo_days(
+            train_months,
+            val_months,
+            test_months,
+        )
         n_days = require_min_days(source, required_train_days)
         oracle_path, _ = oracle_cache.require_cached_oracle(oracle_parameters)
 
