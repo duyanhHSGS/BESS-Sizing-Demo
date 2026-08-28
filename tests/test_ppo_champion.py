@@ -27,6 +27,7 @@ from bess.training.runners.train_ppo_dataset import (
     _midpoint_challenger_state,
     _oracle_dispatch_wear_cost_vnd,
     _oracle_teacher_action,
+    _peak_threat_discharge_bonus_vnd,
     _resolve_challenger,
     _restore_reanchor_state,
     _save_accepted_champion,
@@ -676,6 +677,101 @@ class PPOOracleTeacherTests(unittest.TestCase):
         self.assertEqual(stats["critic_best_epoch"], 0)
         self.assertAlmostEqual(stats["critic_final_mse"], stats["critic_initial_mse"])
         self.assertAlmostEqual(stats["critic_last_epoch_mse"], stats["critic_initial_mse"])
+
+
+class PPOPeakThreatDischargeBonusTests(unittest.TestCase):
+    @staticmethod
+    def _transition(*executed_kw):
+        return SimpleNamespace(
+            native_results=tuple(
+                SimpleNamespace(
+                    bess=SimpleNamespace(
+                        physics=SimpleNamespace(final_battery_kw=value),
+                    )
+                )
+                for value in executed_kw
+            )
+        )
+
+    def test_bonus_rewards_only_discharge_that_closes_peak_threat(self):
+        observation = np.asarray([0.0, 1.0, 1.00, 0.8, 0.5, 0.85, 1.0], dtype=np.float32)
+        bonus = _peak_threat_discharge_bonus_vnd(
+            observation,
+            self._transition(100.0, 100.0),
+            power_scale_kw=1000.0,
+            demand_charge_vnd_per_kw=250_000.0,
+        )
+        self.assertAlmostEqual(bonus, 0.10 * 100.0 * 250_000.0, places=2)
+
+    def test_bonus_caps_credit_at_peak_threat(self):
+        observation = np.asarray([0.0, 1.0, 1.00, 0.8, 0.5, 0.85, 1.0], dtype=np.float32)
+        bonus = _peak_threat_discharge_bonus_vnd(
+            observation,
+            self._transition(500.0, 500.0),
+            power_scale_kw=1000.0,
+            demand_charge_vnd_per_kw=250_000.0,
+        )
+        self.assertAlmostEqual(bonus, 0.10 * 150.0 * 250_000.0, delta=1.0)
+
+    def test_bonus_is_zero_when_load_does_not_threaten_peak(self):
+        observation = np.asarray([0.0, 1.0, 0.70, 0.8, 0.5, 0.85, 1.0], dtype=np.float32)
+        self.assertEqual(
+            _peak_threat_discharge_bonus_vnd(
+                observation,
+                self._transition(500.0, 500.0),
+                power_scale_kw=1000.0,
+                demand_charge_vnd_per_kw=250_000.0,
+            ),
+            0.0,
+        )
+
+    def test_bonus_is_zero_for_charge_or_idle(self):
+        observation = np.asarray([0.0, 1.0, 1.00, 0.8, 0.5, 0.85, 1.0], dtype=np.float32)
+        self.assertEqual(
+            _peak_threat_discharge_bonus_vnd(
+                observation,
+                self._transition(-200.0, 0.0),
+                power_scale_kw=1000.0,
+                demand_charge_vnd_per_kw=250_000.0,
+            ),
+            0.0,
+        )
+
+    def test_bonus_uses_mean_executed_discharge_across_native_steps(self):
+        observation = np.asarray([0.0, 1.0, 1.00, 0.8, 0.5, 0.85, 1.0], dtype=np.float32)
+        bonus = _peak_threat_discharge_bonus_vnd(
+            observation,
+            self._transition(100.0, 0.0),
+            power_scale_kw=1000.0,
+            demand_charge_vnd_per_kw=250_000.0,
+        )
+        self.assertAlmostEqual(bonus, 0.10 * 50.0 * 250_000.0, places=2)
+
+    def test_bonus_rejects_invalid_scaling_inputs(self):
+        observation = np.asarray([0.0, 1.0, 1.00, 0.8, 0.5, 0.85, 1.0], dtype=np.float32)
+        transition = self._transition(100.0)
+        with self.assertRaises(ValueError):
+            _peak_threat_discharge_bonus_vnd(
+                observation,
+                transition,
+                power_scale_kw=0.0,
+                demand_charge_vnd_per_kw=250_000.0,
+            )
+        with self.assertRaises(ValueError):
+            _peak_threat_discharge_bonus_vnd(
+                observation,
+                transition,
+                power_scale_kw=1000.0,
+                demand_charge_vnd_per_kw=-1.0,
+            )
+        with self.assertRaises(ValueError):
+            _peak_threat_discharge_bonus_vnd(
+                observation,
+                transition,
+                power_scale_kw=1000.0,
+                demand_charge_vnd_per_kw=250_000.0,
+                shaping_fraction=1.01,
+            )
 
 
 class PPOActionMismatchPenaltyTests(unittest.TestCase):
