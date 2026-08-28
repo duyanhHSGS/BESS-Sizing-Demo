@@ -181,6 +181,26 @@ class BrainControlTransition:
     done: bool
     native_results: tuple[BrainEnvironmentStepResult, ...]
     adjusted_action: bool
+    tariff_blocked_charge_steps: int
+
+
+def constrain_charge_to_cheap_window(
+    action: float,
+    *,
+    native_step_in_day: int,
+    cheap_tariff_steps: set[int] | frozenset[int],
+    enabled: bool,
+) -> float:
+    """Return zero for charging requests outside configured off-peak clock slots."""
+    action_value = float(action)
+    if not math.isfinite(action_value):
+        raise ValueError("charge window constraint action must be finite")
+    step = int(native_step_in_day)
+    if step < 0:
+        raise ValueError("native_step_in_day must not be negative")
+    if not enabled or action_value >= 0.0:
+        return action_value
+    return action_value if step in cheap_tariff_steps else 0.0
 
 
 def step_brain_control(
@@ -189,19 +209,39 @@ def step_brain_control(
     *,
     native_steps: int,
     recorder: BrainTrajectoryRecorder | None = None,
+    charge_only_during_cheap_tariff: bool = False,
+    cheap_tariff_steps: set[int] | frozenset[int] | None = None,
 ) -> BrainControlTransition:
-    """Hold one requested action for ``native_steps`` canonical env transitions."""
+    """Hold one requested action over native env steps with optional cheap-only charging."""
     if native_steps <= 0:
         raise ValueError("native_steps must be greater than 0")
+    if charge_only_during_cheap_tariff and cheap_tariff_steps is None:
+        raise ValueError("cheap tariff step indexes are required when cheap-only charging is enabled")
+    if charge_only_during_cheap_tariff and env.episode is None:
+        raise ValueError("cheap-only charging requires an episode-backed BrainEnv")
 
     results: list[BrainEnvironmentStepResult] = []
     reward_vnd = 0.0
     next_observation: BrainObservation | None = None
     done = False
     adjusted = False
+    tariff_blocked_charge_steps = 0
 
     for _ in range(native_steps):
-        result = env.step(float(action))
+        step_action = float(action)
+        if charge_only_during_cheap_tariff:
+            assert env.episode is not None
+            timestep_index = env.bess_world.timestep_index
+            step_action = constrain_charge_to_cheap_window(
+                step_action,
+                native_step_in_day=timestep_index % env.episode.steps_per_day,
+                cheap_tariff_steps=cheap_tariff_steps,
+                enabled=True,
+            )
+            if not math.isclose(step_action, float(action), rel_tol=0.0, abs_tol=1e-12):
+                adjusted = True
+                tariff_blocked_charge_steps += 1
+        result = env.step(step_action)
         if not isinstance(result, BrainEnvironmentStepResult):
             raise TypeError("owned BrainEnv episode returned a non-episode step result")
         results.append(result)
@@ -227,6 +267,7 @@ def step_brain_control(
         done=done,
         native_results=tuple(results),
         adjusted_action=adjusted,
+        tariff_blocked_charge_steps=tariff_blocked_charge_steps,
     )
 
 

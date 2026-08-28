@@ -103,6 +103,8 @@ PPO_CHALLENGER_RESETS_ENABLED = True
 PPO_RESET_OPTIMIZER_ON_REANCHOR = True
 # TODO(IQ-56): keep this only if recurrent clean-data MEGATRAIN beats IQ-54 unseen July.
 PPO_PRESERVE_CRITIC_ON_REANCHOR = True
+# TODO(IQ-57): keep cheap-only charging as an IQ-57+ architecture rule and audit unseen-month economics.
+PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF = True
 PPO_ACTION_MISMATCH_SHAPING_SCALE = 0.10
 PPO_ORACLE_BC_ENABLED = True
 PPO_ORACLE_ACTOR_BC_MAX_EPOCHS = 300

@@ -20,6 +20,7 @@ from bess.agents.ppo_agent import (
 from bess.core.bess_env import OBSERVATION_DIM
 from bess.core.brain_runtime import (
     REWARD_SCALE_VND,
+    constrain_charge_to_cheap_window,
     make_brain_env,
     native_steps_per_action,
     observation_array,
@@ -33,6 +34,7 @@ from bess.core.settings import (
     PPO_BC_FINE_TUNE_LOG_STD,
     PPO_CHALLENGER_RESET_PATIENCE,
     PPO_CHALLENGER_RESETS_ENABLED,
+    PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
     PPO_CLIP,
     PPO_CRITIC_GRAD_CLIP,
     PPO_ENTROPY_COEF,
@@ -215,6 +217,7 @@ def _collect_oracle_teacher_samples(
     observations: list[np.ndarray] = []
     targets: list[float] = []
     rewards: list[float] = []
+    cheap_steps = frozenset(int(step) for step in cfg.OFF)
 
     for day, dispatch in zip(month.days, oracle_dispatch, strict=True):
         native_rows = len(day.load)
@@ -225,12 +228,28 @@ def _collect_oracle_teacher_samples(
         for start in range(0, native_rows, native_steps):
             stop = min(start + native_steps, native_rows)
             action = _oracle_teacher_action(dispatch, start, stop, cfg)
+            if (
+                PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF
+                and action < 0.0
+                and any(
+                    constrain_charge_to_cheap_window(
+                        action,
+                        native_step_in_day=start + offset,
+                        cheap_tariff_steps=cheap_steps,
+                        enabled=True,
+                    ) != action
+                    for offset in range(stop - start)
+                )
+            ):
+                action = 0.0
             observations.append(observation_array(observation))
             targets.append(action)
             transition = step_brain_control(
                 env,
                 action,
                 native_steps=stop - start,
+                charge_only_during_cheap_tariff=PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
+                cheap_tariff_steps=cheap_steps,
             )
             rewards.append(transition.reward_million_vnd)
             if transition.next_observation is not None:
@@ -1081,6 +1100,7 @@ def main() -> None:
         raise RuntimeError("Dynamic complete-month split lost a calendar block")
     gamma = args.gamma
     native_steps = native_steps_per_action(cfg.dt, args.control_dt_minutes)
+    cheap_tariff_steps = frozenset(int(step) for step in cfg.OFF)
     decisions_per_day = len(days[0].load) // native_steps
     rollout_decisions = decisions_per_day * max(
         len(month.days) for month in train_months
@@ -1120,6 +1140,7 @@ def main() -> None:
         "obs_variant": "brain7",
         "obs_dim": OBSERVATION_DIM,
         "battery_wear_cost": battery_wear_cost,
+        "charge_only_during_cheap_tariff": PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
         "reward_mode": "brain_savings_vnd_v1",
         "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2",
         "training_reward_shaping_scale": args.action_mismatch_shaping_scale,
@@ -1250,6 +1271,7 @@ def main() -> None:
         "battery": {"e_cap_kwh": args.e_cap, "p_rated_kw": args.p_rated},
         "economics": {
             "battery_wear_cost": battery_wear_cost,
+            "charge_only_during_cheap_tariff": PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
             "reward_mode": "brain_savings_vnd_v1",
             "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2",
             "training_reward_shaping_scale": args.action_mismatch_shaping_scale,
@@ -1567,6 +1589,8 @@ def main() -> None:
     rollout_action_abs_sum = 0.0
     rollout_action_saturation = 0
     rollout_projected = 0
+    rollout_tariff_blocked_charge_decisions = 0
+    rollout_tariff_blocked_charge_steps = 0
     rollout_soc_counts = [0, 0, 0]
     rollout_soc_projected = [0, 0, 0]
     rollout_mismatch_penalty_vnd = 0.0
@@ -1705,6 +1729,8 @@ def main() -> None:
             env,
             action,
             native_steps=native_steps,
+            charge_only_during_cheap_tariff=PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
+            cheap_tariff_steps=cheap_tariff_steps,
         )
         done = transition.done
         mismatch_penalty_vnd = _action_mismatch_penalty_vnd(
@@ -1742,8 +1768,21 @@ def main() -> None:
         rollout_action_sum += action
         rollout_action_abs_sum += abs(action)
         rollout_action_saturation += int(abs(action) >= 0.98)
-        projected = int(transition.adjusted_action)
+        projected = int(any(
+            result.horizon_adjusted
+            or not math.isclose(
+                result.projected_battery_kw,
+                result.bess.physics.final_battery_kw,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+            for result in transition.native_results
+        ))
         rollout_projected += projected
+        rollout_tariff_blocked_charge_decisions += int(
+            transition.tariff_blocked_charge_steps > 0
+        )
+        rollout_tariff_blocked_charge_steps += transition.tariff_blocked_charge_steps
         soc_bin = 0 if obs[3] < (1.0 / 3.0) else (2 if obs[3] > (2.0 / 3.0) else 1)
         rollout_soc_counts[soc_bin] += 1
         rollout_soc_projected[soc_bin] += projected
@@ -1782,6 +1821,10 @@ def main() -> None:
             "projected_action_pct_soc_low": soc_projection_pct[0],
             "projected_action_pct_soc_middle": soc_projection_pct[1],
             "projected_action_pct_soc_high": soc_projection_pct[2],
+            "tariff_blocked_charge_decision_pct": (
+                rollout_tariff_blocked_charge_decisions / rollout_count * 100.0
+            ),
+            "tariff_blocked_charge_steps": rollout_tariff_blocked_charge_steps,
             "action_mismatch_kwh": rollout_mismatch_kwh,
             "action_mismatch_penalty_vnd": rollout_mismatch_penalty_vnd,
             "action_mismatch_shaping_penalty_vnd": (
@@ -1842,6 +1885,8 @@ def main() -> None:
         rollout_action_abs_sum = 0.0
         rollout_action_saturation = 0
         rollout_projected = 0
+        rollout_tariff_blocked_charge_decisions = 0
+        rollout_tariff_blocked_charge_steps = 0
         rollout_soc_counts = [0, 0, 0]
         rollout_soc_projected = [0, 0, 0]
         rollout_mismatch_penalty_vnd = 0.0

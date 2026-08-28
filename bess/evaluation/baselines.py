@@ -84,6 +84,7 @@ def run_drl_policy(
             decisions += 1
         out = _result(env.log_grid, env.log_soc, env.log_pbess)
         out["blocked_action_count"] = 0
+        out["tariff_blocked_charge_steps"] = 0
         out["decision_count"] = decisions
         out["blocked_action_pct"] = 0.0
         if measure_latency:
@@ -110,9 +111,14 @@ def run_drl_policy(
     observation = observation_array(env.reset())
     recorder = BrainTrajectoryRecorder(month, env.bess_world.state_of_charge)
     native_steps = native_steps_per_action(cfg.dt, control_dt_minutes)
+    charge_only_during_cheap_tariff = bool(
+        meta.get("charge_only_during_cheap_tariff", False)
+    )
+    cheap_tariff_steps = frozenset(int(step) for step in cfg.OFF)
 
     latencies: list[float] = []
     blocked_actions = 0
+    tariff_blocked_charge_steps = 0
     decisions = 0
     done = False
     while not done:
@@ -131,8 +137,11 @@ def run_drl_policy(
             action,
             native_steps=native_steps,
             recorder=recorder,
+            charge_only_during_cheap_tariff=charge_only_during_cheap_tariff,
+            cheap_tariff_steps=cheap_tariff_steps,
         )
         blocked_actions += int(transition.adjusted_action)
+        tariff_blocked_charge_steps += transition.tariff_blocked_charge_steps
         decisions += 1
         done = transition.done
         if not done:
@@ -146,6 +155,7 @@ def run_drl_policy(
         recorder.battery_power_days,
     )
     out["blocked_action_count"] = blocked_actions
+    out["tariff_blocked_charge_steps"] = tariff_blocked_charge_steps
     out["decision_count"] = decisions
     out["blocked_action_pct"] = 100.0 * blocked_actions / max(1, decisions)
     if measure_latency:

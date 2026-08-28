@@ -12,6 +12,7 @@ from bess.agents.ppo_agent import PPOAgent, RolloutBuffer
 from bess.core.bess_env import OBSERVATION_DIM
 from bess.core.brain_runtime import (
     BrainTrajectoryRecorder,
+    constrain_charge_to_cheap_window,
     make_brain_env,
     observation_array,
     step_brain_control,
@@ -20,6 +21,7 @@ from bess.core.common import load_system_config, make_bess_config
 from bess.core.scenario_gen import DayData, MonthData
 from bess.evaluation.baselines import run_drl_policy
 from bess.evaluation.benchmark import _rolling_30_minute_average
+from bess.training.runners.train_ppo_dataset import _collect_oracle_teacher_samples
 
 
 def _reference_fixed_30_minute_meter(values, dt):
@@ -49,6 +51,45 @@ class FixedDemandBlockTests(unittest.TestCase):
 
 
 class InferenceAndEnvironmentTests(unittest.TestCase):
+    def test_cheap_tariff_charge_constraint_blocks_only_noncheap_charging(self):
+        cheap_steps = frozenset({0, 1, 2, 3})
+        self.assertEqual(
+            constrain_charge_to_cheap_window(
+                -0.75,
+                native_step_in_day=2,
+                cheap_tariff_steps=cheap_steps,
+                enabled=True,
+            ),
+            -0.75,
+        )
+        self.assertEqual(
+            constrain_charge_to_cheap_window(
+                -0.75,
+                native_step_in_day=20,
+                cheap_tariff_steps=cheap_steps,
+                enabled=True,
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            constrain_charge_to_cheap_window(
+                0.75,
+                native_step_in_day=20,
+                cheap_tariff_steps=cheap_steps,
+                enabled=True,
+            ),
+            0.75,
+        )
+        self.assertEqual(
+            constrain_charge_to_cheap_window(
+                -0.75,
+                native_step_in_day=20,
+                cheap_tariff_steps=cheap_steps,
+                enabled=False,
+            ),
+            -0.75,
+        )
+
     def test_actor_only_prediction_matches_deterministic_act(self):
         agent = PPOAgent(obs_dim=OBSERVATION_DIM, seed=7)
         obs = np.linspace(-1.0, 1.0, OBSERVATION_DIM, dtype=np.float32)
@@ -143,6 +184,124 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         self.assertAlmostEqual(float(result["soc_days"][0][0]), cfg.SOC_min)
         self.assertAlmostEqual(float(result["soc_days"][-1][-1]), cfg.SOC_max)
         self.assertGreater(result["blocked_action_pct"], 0.0)
+
+    def test_iq57_checkpoint_charges_only_during_cheap_tariff(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 20.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        steps = 96
+        day = DayData(
+            load=np.full(steps, 700.0, dtype=np.float64),
+            pv=np.zeros(steps, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=0,
+            date_iso="2026-01-01",
+        )
+        month = MonthData(days=[day], source="iq57-cheap-charge-test")
+
+        class AlwaysChargeAgent:
+            def __init__(self):
+                self.meta = {
+                    "obs_dim": OBSERVATION_DIM,
+                    "control_dt_minutes": 15.0,
+                    "battery_wear_cost": 0.0,
+                    "charge_only_during_cheap_tariff": True,
+                }
+
+            @staticmethod
+            def predict_action(_observation):
+                return -1.0
+
+        result = run_drl_policy(
+            month,
+            cfg,
+            AlwaysChargeAgent(),
+            p_ref_kw=1000.0,
+        )
+
+        battery_power = np.asarray(result["p_bess_days"][0], dtype=np.float64)
+        cheap_steps = np.asarray(cfg.OFF, dtype=np.int64)
+        noncheap_mask = np.ones(steps, dtype=bool)
+        noncheap_mask[cheap_steps] = False
+        self.assertTrue((battery_power[cheap_steps] < 0.0).all())
+        self.assertTrue((battery_power[noncheap_mask] == 0.0).all())
+        self.assertEqual(result["tariff_blocked_charge_steps"], int(noncheap_mask.sum()))
+        self.assertGreater(result["blocked_action_pct"], 0.0)
+
+    def test_iq57_oracle_teacher_removes_noncheap_charge_lessons(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 10000.0, 20.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        steps = 96
+        day = DayData(
+            load=np.full(steps, 700.0, dtype=np.float64),
+            pv=np.zeros(steps, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=0,
+            date_iso="2026-01-01",
+        )
+        month = MonthData(days=[day], source="iq57-oracle-filter-test")
+        oracle_dispatch = [{
+            "discharge": [0.0] * steps,
+            "grid_charge": [10.0] * steps,
+            "solar_charge": [0.0] * steps,
+        }]
+
+        observations, targets, rewards = _collect_oracle_teacher_samples(
+            month,
+            oracle_dispatch,
+            cfg,
+            power_scale_kw=1000.0,
+            battery_wear_cost=0.0,
+            native_steps=2,
+        )
+
+        self.assertEqual(observations.shape, (48, OBSERVATION_DIM))
+        self.assertEqual(rewards.shape, (48,))
+        self.assertTrue((targets[:12] < 0.0).all())
+        self.assertTrue((targets[12:] == 0.0).all())
+
+    def test_pre_iq57_checkpoint_keeps_legacy_anytime_charging(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 20.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        steps = 96
+        day = DayData(
+            load=np.full(steps, 700.0, dtype=np.float64),
+            pv=np.zeros(steps, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=0,
+            date_iso="2026-01-01",
+        )
+        month = MonthData(days=[day], source="legacy-charge-test")
+
+        class LegacyAlwaysChargeAgent:
+            def __init__(self):
+                self.meta = {
+                    "obs_dim": OBSERVATION_DIM,
+                    "control_dt_minutes": 15.0,
+                    "battery_wear_cost": 0.0,
+                }
+
+            @staticmethod
+            def predict_action(_observation):
+                return -1.0
+
+        result = run_drl_policy(
+            month,
+            cfg,
+            LegacyAlwaysChargeAgent(),
+            p_ref_kw=1000.0,
+        )
+
+        battery_power = np.asarray(result["p_bess_days"][0], dtype=np.float64)
+        noncheap_mask = np.ones(steps, dtype=bool)
+        noncheap_mask[np.asarray(cfg.OFF, dtype=np.int64)] = False
+        self.assertTrue((battery_power[noncheap_mask] < 0.0).any())
+        self.assertEqual(result["tariff_blocked_charge_steps"], 0)
 
     def test_seeded_update_stays_finite_and_checkpoint_is_compatible(self):
         agent = PPOAgent(
