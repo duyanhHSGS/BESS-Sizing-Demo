@@ -62,8 +62,10 @@ from bess.core.settings import (
     PPO_SOC_EDGE_LOG_STD_PENALTY,
     PPO_STEPS,
     PPO_TARGET_KL,
+    PPO_TEST_BUCKETS,
     PPO_TORCH_THREADS,
     PPO_VALIDATE_EVERY_UPDATES,
+    PPO_VALIDATION_BUCKETS,
     PPO_VALUE_COEF,
 )
 from bess.core.timebase import DISPATCH_MONTH_BUCKET_DAYS, dispatch_month_start_day
@@ -997,11 +999,11 @@ def main() -> None:
     parser.add_argument("--billing", choices=("2tc", "tou"), default="2tc")
     parser.add_argument("--training-config", type=str, required=True)
     parser.add_argument("--oracle-cache", required=True)
-    # IQ-58 reserves only validation/test holdout bucket counts; training consumes
-    # every earlier complete Dispatch 30-day bucket automatically. Brain7, BrainEnv,
-    # recurrent architecture, and PPO scalar settings remain untouched.
-    parser.add_argument("--val-months", type=int, default=1)
-    parser.add_argument("--test-months", type=int, default=1)
+    # IQ-63 gives Champion selection a two-bucket jury by taking one complete
+    # 30-day bucket from training. The newest bucket remains untouched test data.
+    # TODO(IQ-63): compare unseen economics against IQ-62 before keeping this split.
+    parser.add_argument("--val-months", type=int, default=PPO_VALIDATION_BUCKETS)
+    parser.add_argument("--test-months", type=int, default=PPO_TEST_BUCKETS)
     parser.add_argument("--obs-variant", choices=("brain7",), default="brain7")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     args = parser.parse_args()

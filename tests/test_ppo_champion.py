@@ -413,6 +413,39 @@ class PPORealDataSplitTests(unittest.TestCase):
         self.assertEqual([day.day_index for day in test], list(range(301, 331)))
         self.assertEqual([day.day_index for day in ignored], [331, 332])
 
+    def test_iq63_332_day_dataset_steals_one_training_bucket_for_second_validation_bucket(self):
+        days = self._indexed_days(332)
+
+        train, validation, test, ignored = _chronological_month_holdout_split(days, 2, 1)
+
+        self.assertEqual([day.day_index for day in train], list(range(1, 241)))
+        self.assertEqual([day.day_index for day in validation], list(range(241, 301)))
+        self.assertEqual([day.day_index for day in test], list(range(301, 331)))
+        self.assertEqual([day.day_index for day in ignored], [331, 332])
+        self.assertEqual(len(train), 8 * 30)
+        self.assertEqual(len(validation), 2 * 30)
+        self.assertEqual(len(test), 30)
+        self.assertTrue(set(map(id, train)).isdisjoint(map(id, validation)))
+        self.assertTrue(set(map(id, train)).isdisjoint(map(id, test)))
+        self.assertTrue(set(map(id, validation)).isdisjoint(map(id, test)))
+
+    def test_iq63_minimum_four_complete_buckets_becomes_one_two_one(self):
+        train, validation, test, ignored = _chronological_month_holdout_split(
+            self._indexed_days(120), 2, 1
+        )
+
+        self.assertEqual([day.day_index for day in train], list(range(1, 31)))
+        self.assertEqual([day.day_index for day in validation], list(range(31, 91)))
+        self.assertEqual([day.day_index for day in test], list(range(91, 121)))
+        self.assertEqual(ignored, [])
+
+    def test_iq63_rejects_three_complete_buckets_because_training_would_be_empty(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "at least 4 complete 30-day Dispatch Viewer buckets",
+        ):
+            _chronological_month_holdout_split(self._indexed_days(90), 2, 1)
+
     def test_partial_trailing_bucket_is_the_only_ignored_data(self):
         days = self._indexed_days(213)
 

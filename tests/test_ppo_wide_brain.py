@@ -7,11 +7,20 @@ from pathlib import Path
 import numpy as np
 
 from bess.agents.ppo_agent import PPOAgent
-from bess.core.settings import PPO_DECOMPOSED_CRITIC, PPO_HIDDEN_SIZE
+from bess.core.settings import (
+    PPO_DECOMPOSED_CRITIC,
+    PPO_HIDDEN_SIZE,
+    PPO_TEST_BUCKETS,
+    PPO_VALIDATION_BUCKETS,
+)
 from bess.training.runners.train_ppo_dataset import _behavior_clone_critic
 
 
 class PPOWideBrainTests(unittest.TestCase):
+    def test_iq63_defaults_to_two_validation_buckets_and_one_test_bucket(self):
+        self.assertEqual(PPO_VALIDATION_BUCKETS, 2)
+        self.assertEqual(PPO_TEST_BUCKETS, 1)
+
     def test_iq62_defaults_to_128_wide_scalar_recurrent_brain(self):
         self.assertEqual(PPO_HIDDEN_SIZE, 128)
         self.assertFalse(PPO_DECOMPOSED_CRITIC)
