@@ -230,7 +230,13 @@ def run_policy_dispatch(
         )
     p_ref = float(meta.get("p_ref_kw") or _policy_reference_kw(month))
     prepare_policy_forecast(checkpoint_name, agent, meta, month, p_ref)
-    rollout = run_drl_policy(month, cfg, agent, p_ref_kw=p_ref)
+    rollout = run_drl_policy(
+        month,
+        cfg,
+        agent,
+        p_ref_kw=p_ref,
+        record_brain_eye6=(algo == "ppo"),
+    )
     days = policy_result_to_days(month, rollout, cfg, parameters)
     if algo == "ppo2" and meta.get("reference_env") == "ppo2_senior_15m_v1":
         from bess.evaluation.oracle.ppo2_oracle import score_month as score_ppo2_month
@@ -310,6 +316,14 @@ def policy_result_to_days(
             "soc": _rounded_series(np.clip(soc, 0.0, 1.0) * 100.0),
             "final_soc": round(float(soc_raw[-1]) * 100.0, 1) if len(soc_raw) else 0.0,
         }
+        eye6_days = rollout.get("brain_eye6_running_peak_days")
+        if eye6_days is not None:
+            if len(eye6_days) != len(month.days):
+                raise RuntimeError("Brain Eye 6 dispatch trace day count does not match source data")
+            eye6 = np.asarray(eye6_days[index], dtype=np.float64)
+            if len(eye6) != expected_steps:
+                raise RuntimeError("Brain Eye 6 dispatch trace resolution does not match source data")
+            day_row["ppo_eye6_running_peak_kw"] = _rounded_series(eye6)
         day_row["grid_kWh"] = round(float(np.sum(grid) * cfg.dt), 2)
         day_row["energy_cost_vnd"] = round(_day_energy_cost(day_row, parameters, cfg.dt))
         days.append(day_row)

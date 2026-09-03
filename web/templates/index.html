@@ -1971,12 +1971,12 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const dispatchActiveSeries = Object.fromEntries(seriesStyles.map((series) => [series.key, true]));
     const dispatchSelectedPolicies = new Set();
     const dispatchPolicyPalettes = [
-      { peak: "#1d4ed8", grid: "#2563eb", rolling_grid: "#38bdf8", discharge: "#0ea5e9", charge: "#0891b2", soc: "#bae6fd" },
-      { peak: "#047857", grid: "#059669", rolling_grid: "#34d399", discharge: "#10b981", charge: "#6ee7b7", soc: "#a7f3d0" },
-      { peak: "#7c3aed", grid: "#8b5cf6", rolling_grid: "#c084fc", discharge: "#a855f7", charge: "#d8b4fe", soc: "#e9d5ff" },
-      { peak: "#b45309", grid: "#d97706", rolling_grid: "#fbbf24", discharge: "#f59e0b", charge: "#fcd34d", soc: "#fde68a" },
-      { peak: "#be123c", grid: "#e11d48", rolling_grid: "#fb7185", discharge: "#f43f5e", charge: "#fecdd3", soc: "#ffe4e6" },
-      { peak: "#0f766e", grid: "#14b8a6", rolling_grid: "#5eead4", discharge: "#2dd4bf", charge: "#99f6e4", soc: "#ccfbf1" },
+      { peak: "#1d4ed8", eye6: "#60a5fa", grid: "#2563eb", rolling_grid: "#38bdf8", discharge: "#0ea5e9", charge: "#0891b2", soc: "#bae6fd" },
+      { peak: "#047857", eye6: "#6ee7b7", grid: "#059669", rolling_grid: "#34d399", discharge: "#10b981", charge: "#6ee7b7", soc: "#a7f3d0" },
+      { peak: "#7c3aed", eye6: "#c4b5fd", grid: "#8b5cf6", rolling_grid: "#c084fc", discharge: "#a855f7", charge: "#d8b4fe", soc: "#e9d5ff" },
+      { peak: "#b45309", eye6: "#fcd34d", grid: "#d97706", rolling_grid: "#fbbf24", discharge: "#f59e0b", charge: "#fcd34d", soc: "#fde68a" },
+      { peak: "#be123c", eye6: "#fda4af", grid: "#e11d48", rolling_grid: "#fb7185", discharge: "#f43f5e", charge: "#fecdd3", soc: "#ffe4e6" },
+      { peak: "#0f766e", eye6: "#5eead4", grid: "#14b8a6", rolling_grid: "#5eead4", discharge: "#2dd4bf", charge: "#99f6e4", soc: "#ccfbf1" },
     ];
     let dispatchPolicies = [];
     let dispatchPolicyTraces = {};
@@ -2936,6 +2936,16 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           { key: `policy:${policyName}:charge`, label: `${label} battery charge`, color: colors.charge, policyName, policyCharge: true },
           { key: `policy:${policyName}:soc`, label: `${label} SOC %`, color: colors.soc, policyName, policySoc: true },
         );
+        const traceDays = dispatchPolicyTraces[policyName]?.days || [];
+        if (traceDays.some((day) => Array.isArray(day.ppo_eye6_running_peak_kw))) {
+          styles.push({
+            key: `policy:${policyName}:eye6-running-peak`,
+            label: `${label} 👁 Eye 6: running seen peak`,
+            color: colors.eye6,
+            policyName,
+            policyKey: "ppo_eye6_running_peak_kw",
+          });
+        }
       });
       styles.forEach((series) => {
         if (dispatchActiveSeries[series.key] === undefined) {
@@ -3102,7 +3112,11 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       });
 
       const overlays = selectedPolicyNames().filter((name) => policyDay(name, day.day_index)).length;
-      dispatchDayInfo.textContent = `Day ${day.day_index}, ${selectedCandidate.label}: baseline/oracle context matches Sizing Demo. Policy overlays visible for ${overlays} selected policy trace${overlays === 1 ? "" : "s"}.`;
+      const eye6Overlays = selectedPolicyNames().filter((name) => {
+        const pDay = policyDay(name, day.day_index);
+        return Array.isArray(pDay?.ppo_eye6_running_peak_kw);
+      }).length;
+      dispatchDayInfo.textContent = `Day ${day.day_index}, ${selectedCandidate.label}: baseline/oracle context matches Sizing Demo. Policy overlays visible for ${overlays} selected policy trace${overlays === 1 ? "" : "s"}. Exact PPO Eye 6 running-peak trace visible for ${eye6Overlays}.`;
       dispatchChartState = { day, oracleDay, padding, plotWidth, plotHeight, width, height, visibleSeries };
     }
 

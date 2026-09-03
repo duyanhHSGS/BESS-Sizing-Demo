@@ -67,6 +67,14 @@ def test_training_ui_wires_explicit_ppo2_fit_test_flag() -> None:
     assert "PPO2 FIT TEST:" in template
 
 
+def test_dispatch_viewer_exposes_exact_ppo_eye6_only_when_trace_has_it() -> None:
+    template = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+    assert "👁 Eye 6: running seen peak" in template
+    assert 'policyKey: "ppo_eye6_running_peak_kw"' in template
+    assert "traceDays.some((day) => Array.isArray(day.ppo_eye6_running_peak_kw))" in template
+    assert "Exact PPO Eye 6 running-peak trace visible" in template
+
+
 def test_training_ui_allows_ppo_full_dataset_fit_test() -> None:
     template = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
     assert 'item.style.display = "none";' in template

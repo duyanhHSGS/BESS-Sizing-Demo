@@ -54,6 +54,7 @@ def run_drl_policy(
     p_ref_kw: float = 500.0,
     measure_latency: bool = False,
     deterministic: bool = True,
+    record_brain_eye6: bool = False,
 ) -> dict:
     """Run PPO or PPO2 through the environment contract stored in checkpoint meta."""
     meta = getattr(agent, "meta", {}) or {}
@@ -110,6 +111,14 @@ def run_drl_policy(
     )
     observation = observation_array(env.reset())
     recorder = BrainTrajectoryRecorder(month, env.bess_world.state_of_charge)
+    # TODO(DISPATCH-EYE6): keep this trace tied to the exact pre-action Brain7
+    # observation. Do not replace it with a look-ahead max reconstructed from grid.
+    eye6_running_peak_flat = (
+        np.empty(sum(len(day.load) for day in month.days), dtype=np.float64)
+        if record_brain_eye6
+        else None
+    )
+    eye6_cursor = 0
     native_steps = native_steps_per_action(cfg.dt, control_dt_minutes)
     charge_only_during_cheap_tariff = bool(
         meta.get("charge_only_during_cheap_tariff", False)
@@ -123,6 +132,11 @@ def run_drl_policy(
     done = False
     while not done:
         started = time.perf_counter()
+        eye6_running_peak_kw = (
+            max(0.0, float(observation[5]) * float(p_ref_kw))
+            if eye6_running_peak_flat is not None
+            else None
+        )
         if deterministic and hasattr(agent, "predict_action"):
             policy_action = float(agent.predict_action(observation))
         else:
@@ -140,6 +154,10 @@ def run_drl_policy(
             charge_only_during_cheap_tariff=charge_only_during_cheap_tariff,
             cheap_tariff_steps=cheap_tariff_steps,
         )
+        if eye6_running_peak_flat is not None:
+            native_count = len(transition.native_results)
+            eye6_running_peak_flat[eye6_cursor:eye6_cursor + native_count] = eye6_running_peak_kw
+            eye6_cursor += native_count
         blocked_actions += int(transition.adjusted_action)
         tariff_blocked_charge_steps += transition.tariff_blocked_charge_steps
         decisions += 1
@@ -158,6 +176,16 @@ def run_drl_policy(
     out["tariff_blocked_charge_steps"] = tariff_blocked_charge_steps
     out["decision_count"] = decisions
     out["blocked_action_pct"] = 100.0 * blocked_actions / max(1, decisions)
+    if eye6_running_peak_flat is not None:
+        if eye6_cursor != len(eye6_running_peak_flat):
+            raise RuntimeError("Brain Eye 6 trace did not cover every native dispatch timestep")
+        eye6_days = []
+        cursor = 0
+        for day in month.days:
+            step_count = len(day.load)
+            eye6_days.append(eye6_running_peak_flat[cursor:cursor + step_count].copy())
+            cursor += step_count
+        out["brain_eye6_running_peak_days"] = eye6_days
     if measure_latency:
         out["latency_ms_mean"] = float(np.mean(latencies))
         out["latency_ms_max"] = float(np.max(latencies))

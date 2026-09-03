@@ -89,6 +89,42 @@ class CrossResolutionDispatchTests(unittest.TestCase):
         self.assertEqual(len(rolling), 1411)
         np.testing.assert_allclose(rolling, 300.0)
 
+    def test_eye6_trace_is_exact_pre_action_running_peak_and_opt_in(self):
+        policy = CountingPolicy()
+        policy.meta["control_dt_minutes"] = 30.0
+        policy.meta["native_steps_per_action"] = 2
+        policy.predict_action = lambda _obs: 0.0
+        cfg = load_system_config()
+        cfg = make_bess_config(cfg, 1000.0, 500.0, cfg.P_target_user)
+        cfg.dt = 0.25
+        steps = 96
+        load = np.full(steps, 200.0, dtype=np.float64)
+        load[:2] = 100.0
+        month = MonthData(days=[DayData(
+            load=load,
+            pv=np.zeros(steps, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )], source="eye6-test")
+
+        normal = run_drl_policy(month, cfg, policy, p_ref_kw=1000.0)
+        self.assertNotIn("brain_eye6_running_peak_days", normal)
+
+        visible = run_drl_policy(
+            month,
+            cfg,
+            policy,
+            p_ref_kw=1000.0,
+            record_brain_eye6=True,
+        )
+        eye6 = visible["brain_eye6_running_peak_days"][0]
+        self.assertEqual(len(eye6), steps)
+        np.testing.assert_allclose(eye6[:2], [0.0, 0.0])
+        np.testing.assert_allclose(eye6[2:4], [100.0, 100.0])
+        np.testing.assert_allclose(eye6[4:6], [200.0, 200.0])
+
     def test_incompatible_sampling_ratios_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "not an exact multiple"):
             validate_dispatch_sampling({"control_dt_minutes": 15.0}, 4.0)
@@ -115,6 +151,7 @@ class CrossResolutionDispatchTests(unittest.TestCase):
 
         self.assertEqual(policy.calls, 96)
         self.assertEqual(len(result["days"][0]["grid"]), 1440)
+        self.assertEqual(len(result["days"][0]["ppo_eye6_running_peak_kw"]), 1440)
         self.assertIn("15-minute decisions and 1-minute physics", result["warnings"][0])
 
     def test_dispatch_rejects_non_divisible_selected_data(self):
