@@ -20,6 +20,7 @@ from bess.core.brain_runtime import (
 )
 from bess.core.common import validate_control_interval_minutes
 from bess.core.scenario_gen import MonthData
+from bess.core.timebase import dispatch_month_start_day
 
 
 def _result(p_grid_days, soc_days, p_bess_days):
@@ -45,6 +46,74 @@ def validate_dispatch_sampling(meta: dict, native_dt_minutes: float) -> float:
     """Return a compatible policy control interval for native dispatch data."""
     control_dt_minutes = float(meta.get("control_dt_minutes", native_dt_minutes))
     return validate_control_interval_minutes(native_dt_minutes, control_dt_minutes)
+
+
+def _dispatch_month_episodes(month: MonthData) -> list[MonthData]:
+    """Split an ordered dispatch dataset at fixed 30-day billing boundaries."""
+    if not month.days:
+        return [month]
+
+    episodes: list[MonthData] = []
+    episode_days = []
+    active_bucket = None
+    seen_buckets: set[int] = set()
+    for day in month.days:
+        bucket = dispatch_month_start_day(int(day.day_index))
+        if bucket != active_bucket:
+            if bucket in seen_buckets:
+                raise ValueError("Dispatch days must keep billing buckets contiguous")
+            if episode_days:
+                episodes.append(MonthData(
+                    days=episode_days,
+                    source=f"{month.source}:dispatch-bucket-{active_bucket}",
+                ))
+            active_bucket = bucket
+            seen_buckets.add(bucket)
+            episode_days = []
+        episode_days.append(day)
+    episodes.append(MonthData(
+        days=episode_days,
+        source=f"{month.source}:dispatch-bucket-{active_bucket}",
+    ))
+    return episodes
+
+
+def _merge_brain_rollouts(
+    parts: list[dict],
+    *,
+    measure_latency: bool,
+    record_brain_eye6: bool,
+) -> dict:
+    """Join independently reset billing episodes back into one viewer trace."""
+    out = _result(
+        [day for part in parts for day in part["p_grid_days"]],
+        [day for part in parts for day in part["soc_days"]],
+        [day for part in parts for day in part["p_bess_days"]],
+    )
+    out["blocked_action_count"] = sum(int(part["blocked_action_count"]) for part in parts)
+    out["tariff_blocked_charge_steps"] = sum(
+        int(part["tariff_blocked_charge_steps"]) for part in parts
+    )
+    out["decision_count"] = sum(int(part["decision_count"]) for part in parts)
+    out["blocked_action_pct"] = (
+        100.0 * out["blocked_action_count"] / max(1, out["decision_count"])
+    )
+    if record_brain_eye6:
+        out["brain_eye6_running_peak_days"] = [
+            day
+            for part in parts
+            for day in part.get("brain_eye6_running_peak_days", [])
+        ]
+    if measure_latency:
+        out["latency_ms_mean"] = sum(
+            float(part.get("latency_ms_mean", 0.0)) * int(part["decision_count"])
+            for part in parts
+        ) / max(1, out["decision_count"])
+        out["latency_ms_max"] = max(
+            (float(part.get("latency_ms_max", 0.0)) for part in parts),
+            default=0.0,
+        )
+    return out
 
 
 def run_drl_policy(
@@ -98,6 +167,27 @@ def run_drl_policy(
         raise ValueError(
             f"checkpoint uses legacy observation dimension {checkpoint_obs_dim}; "
             f"current BrainEnv requires {OBSERVATION_DIM}. Retrain this policy."
+        )
+
+    billing_episodes = _dispatch_month_episodes(month)
+    if len(billing_episodes) > 1:
+        # TODO(DISPATCH-EYE6): keep deployment episodes identical to training:
+        # reset Eye 6 and recurrent memory at every fixed 30-day billing boundary.
+        return _merge_brain_rollouts(
+            [
+                run_drl_policy(
+                    episode,
+                    cfg,
+                    agent,
+                    p_ref_kw=p_ref_kw,
+                    measure_latency=measure_latency,
+                    deterministic=deterministic,
+                    record_brain_eye6=record_brain_eye6,
+                )
+                for episode in billing_episodes
+            ],
+            measure_latency=measure_latency,
+            record_brain_eye6=record_brain_eye6,
         )
 
     if hasattr(agent, "reset_recurrent_state"):

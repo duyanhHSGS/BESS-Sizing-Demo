@@ -67,11 +67,16 @@ def test_training_ui_wires_explicit_ppo2_fit_test_flag() -> None:
     assert "PPO2 FIT TEST:" in template
 
 
-def test_dispatch_viewer_exposes_exact_ppo_eye6_only_when_trace_has_it() -> None:
+def test_dispatch_viewer_exposes_selected_ppo_eye6_with_distinct_style() -> None:
     template = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
     assert "👁 Eye 6: running seen peak" in template
     assert 'policyKey: "ppo_eye6_running_peak_kw"' in template
-    assert "traceDays.some((day) => Array.isArray(day.ppo_eye6_running_peak_kw))" in template
+    assert 'policy?.algo === "ppo"' in template
+    assert 'const dispatchEye6Color = "#ff2bd6"' in template
+    assert "series.eye6 ? 4 : 2" in template
+    assert "Boolean(series.eye6)" in template
+    assert "Number(Boolean(left.eye6)) - Number(Boolean(right.eye6))" in template
+    assert "await createDispatchRunFor([policyName]);" in template
     assert "Exact PPO Eye 6 running-peak trace visible" in template
 
 

@@ -125,6 +125,48 @@ class CrossResolutionDispatchTests(unittest.TestCase):
         np.testing.assert_allclose(eye6[2:4], [100.0, 100.0])
         np.testing.assert_allclose(eye6[4:6], [200.0, 200.0])
 
+    def test_eye6_and_policy_episode_reset_at_fixed_month_boundary(self):
+        policy = CountingPolicy()
+        policy.meta["control_dt_minutes"] = 30.0
+        policy.meta["native_steps_per_action"] = 2
+        policy.predict_action = lambda _obs: 0.0
+        reset_count = 0
+
+        def reset_recurrent_state():
+            nonlocal reset_count
+            reset_count += 1
+
+        policy.reset_recurrent_state = reset_recurrent_state
+        cfg = load_system_config()
+        cfg = make_bess_config(cfg, 1000.0, 500.0, cfg.P_target_user)
+        cfg.dt = 0.25
+        days = [
+            DayData(
+                load=np.full(96, 1000.0 if day_index == 1 else 100.0),
+                pv=np.zeros(96),
+                day_type="working",
+                weather="test",
+                day_index=day_index,
+                date_iso=f"2026-01-{min(day_index, 31):02d}",
+            )
+            for day_index in range(1, 32)
+        ]
+
+        result = run_drl_policy(
+            MonthData(days=days, source="eye6-boundary-test"),
+            cfg,
+            policy,
+            p_ref_kw=1500.0,
+            record_brain_eye6=True,
+        )
+
+        eye6_days = result["brain_eye6_running_peak_days"]
+        self.assertEqual(len(eye6_days), 31)
+        self.assertAlmostEqual(eye6_days[29][-1], 1000.0, places=3)
+        self.assertEqual(eye6_days[30][0], 0.0)
+        np.testing.assert_allclose(eye6_days[30][2:], 100.0, rtol=0.0, atol=1e-3)
+        self.assertEqual(reset_count, 4)
+
     def test_incompatible_sampling_ratios_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "not an exact multiple"):
             validate_dispatch_sampling({"control_dt_minutes": 15.0}, 4.0)
