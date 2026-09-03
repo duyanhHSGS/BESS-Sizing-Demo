@@ -263,6 +263,9 @@ def run_policy_dispatch(
         "activity": {
             **rollout_activity(rollout, cfg.dt),
             "blocked_action_pct": rollout.get("blocked_action_pct", 0.0),
+            "peak_guard_trigger_steps": rollout.get("peak_guard_trigger_steps", 0),
+            "peak_guard_override_steps": rollout.get("peak_guard_override_steps", 0),
+            "peak_guard_unmet_steps": rollout.get("peak_guard_unmet_steps", 0),
         },
     }
 

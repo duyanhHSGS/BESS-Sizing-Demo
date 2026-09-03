@@ -54,6 +54,9 @@ from bess.core.settings import (
     PPO_ORACLE_BC_MAX_EPOCHS,
     PPO_ORACLE_BC_MINIBATCH,
     PPO_ORACLE_BC_TARGET_MSE,
+    PPO_PEAK_GUARD_DEADBAND_KW,
+    PPO_PEAK_GUARD_ENABLED,
+    PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
     PPO_PRESERVE_CRITIC_ON_REANCHOR,
     PPO_RECURRENT_ENABLED,
     PPO_RECURRENT_SEQUENCE_LENGTH,
@@ -1226,6 +1229,10 @@ def main() -> None:
         "obs_dim": OBSERVATION_DIM,
         "battery_wear_cost": battery_wear_cost,
         "charge_only_during_cheap_tariff": PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
+        "peak_guard_enabled": PPO_PEAK_GUARD_ENABLED,
+        "peak_guard_mode": "seen_peak_meter_budget_minimum_action_v1",
+        "peak_guard_min_completed_days": PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
+        "peak_guard_deadband_kw": PPO_PEAK_GUARD_DEADBAND_KW,
         "reward_mode": "brain_savings_vnd_v1",
         "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2",
         "training_reward_shaping_scale": args.action_mismatch_shaping_scale,
@@ -1363,6 +1370,10 @@ def main() -> None:
         "economics": {
             "battery_wear_cost": battery_wear_cost,
             "charge_only_during_cheap_tariff": PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
+            "peak_guard_enabled": PPO_PEAK_GUARD_ENABLED,
+            "peak_guard_mode": "seen_peak_meter_budget_minimum_action_v1",
+            "peak_guard_min_completed_days": PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
+            "peak_guard_deadband_kw": PPO_PEAK_GUARD_DEADBAND_KW,
             "reward_mode": "brain_savings_vnd_v1",
             "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2",
             "training_reward_shaping_scale": args.action_mismatch_shaping_scale,
@@ -1682,6 +1693,10 @@ def main() -> None:
     rollout_projected = 0
     rollout_tariff_blocked_charge_decisions = 0
     rollout_tariff_blocked_charge_steps = 0
+    rollout_peak_guard_trigger_decisions = 0
+    rollout_peak_guard_trigger_steps = 0
+    rollout_peak_guard_override_steps = 0
+    rollout_peak_guard_unmet_steps = 0
     rollout_soc_counts = [0, 0, 0]
     rollout_soc_projected = [0, 0, 0]
     rollout_mismatch_penalty_vnd = 0.0
@@ -1822,6 +1837,9 @@ def main() -> None:
             native_steps=native_steps,
             charge_only_during_cheap_tariff=PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
             cheap_tariff_steps=cheap_tariff_steps,
+            peak_guard_enabled=PPO_PEAK_GUARD_ENABLED,
+            peak_guard_min_completed_days=PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
+            peak_guard_deadband_kw=PPO_PEAK_GUARD_DEADBAND_KW,
         )
         done = transition.done
         mismatch_penalty_vnd = _action_mismatch_penalty_vnd(
@@ -1883,6 +1901,10 @@ def main() -> None:
             transition.tariff_blocked_charge_steps > 0
         )
         rollout_tariff_blocked_charge_steps += transition.tariff_blocked_charge_steps
+        rollout_peak_guard_trigger_decisions += int(transition.peak_guard_trigger_steps > 0)
+        rollout_peak_guard_trigger_steps += transition.peak_guard_trigger_steps
+        rollout_peak_guard_override_steps += transition.peak_guard_override_steps
+        rollout_peak_guard_unmet_steps += transition.peak_guard_unmet_steps
         soc_bin = 0 if obs[3] < (1.0 / 3.0) else (2 if obs[3] > (2.0 / 3.0) else 1)
         rollout_soc_counts[soc_bin] += 1
         rollout_soc_projected[soc_bin] += projected
@@ -1932,6 +1954,12 @@ def main() -> None:
                 rollout_tariff_blocked_charge_decisions / rollout_count * 100.0
             ),
             "tariff_blocked_charge_steps": rollout_tariff_blocked_charge_steps,
+            "peak_guard_trigger_decision_pct": (
+                rollout_peak_guard_trigger_decisions / rollout_count * 100.0
+            ),
+            "peak_guard_trigger_steps": rollout_peak_guard_trigger_steps,
+            "peak_guard_override_steps": rollout_peak_guard_override_steps,
+            "peak_guard_unmet_steps": rollout_peak_guard_unmet_steps,
             "action_mismatch_kwh": rollout_mismatch_kwh,
             "action_mismatch_penalty_vnd": rollout_mismatch_penalty_vnd,
             "action_mismatch_shaping_penalty_vnd": (
@@ -1994,6 +2022,10 @@ def main() -> None:
         rollout_projected = 0
         rollout_tariff_blocked_charge_decisions = 0
         rollout_tariff_blocked_charge_steps = 0
+        rollout_peak_guard_trigger_decisions = 0
+        rollout_peak_guard_trigger_steps = 0
+        rollout_peak_guard_override_steps = 0
+        rollout_peak_guard_unmet_steps = 0
         rollout_soc_counts = [0, 0, 0]
         rollout_soc_projected = [0, 0, 0]
         rollout_mismatch_penalty_vnd = 0.0

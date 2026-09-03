@@ -94,6 +94,15 @@ def _merge_brain_rollouts(
     out["tariff_blocked_charge_steps"] = sum(
         int(part["tariff_blocked_charge_steps"]) for part in parts
     )
+    out["peak_guard_trigger_steps"] = sum(
+        int(part.get("peak_guard_trigger_steps", 0)) for part in parts
+    )
+    out["peak_guard_override_steps"] = sum(
+        int(part.get("peak_guard_override_steps", 0)) for part in parts
+    )
+    out["peak_guard_unmet_steps"] = sum(
+        int(part.get("peak_guard_unmet_steps", 0)) for part in parts
+    )
     out["decision_count"] = sum(int(part["decision_count"]) for part in parts)
     out["blocked_action_pct"] = (
         100.0 * out["blocked_action_count"] / max(1, out["decision_count"])
@@ -155,6 +164,9 @@ def run_drl_policy(
         out = _result(env.log_grid, env.log_soc, env.log_pbess)
         out["blocked_action_count"] = 0
         out["tariff_blocked_charge_steps"] = 0
+        out["peak_guard_trigger_steps"] = 0
+        out["peak_guard_override_steps"] = 0
+        out["peak_guard_unmet_steps"] = 0
         out["decision_count"] = decisions
         out["blocked_action_pct"] = 0.0
         if measure_latency:
@@ -213,11 +225,17 @@ def run_drl_policy(
     charge_only_during_cheap_tariff = bool(
         meta.get("charge_only_during_cheap_tariff", False)
     )
+    peak_guard_enabled = bool(meta.get("peak_guard_enabled", False))
+    peak_guard_min_completed_days = int(meta.get("peak_guard_min_completed_days", 1))
+    peak_guard_deadband_kw = float(meta.get("peak_guard_deadband_kw", 1.0))
     cheap_tariff_steps = frozenset(int(step) for step in cfg.OFF)
 
     latencies: list[float] = []
     blocked_actions = 0
     tariff_blocked_charge_steps = 0
+    peak_guard_trigger_steps = 0
+    peak_guard_override_steps = 0
+    peak_guard_unmet_steps = 0
     decisions = 0
     done = False
     while not done:
@@ -243,6 +261,9 @@ def run_drl_policy(
             recorder=recorder,
             charge_only_during_cheap_tariff=charge_only_during_cheap_tariff,
             cheap_tariff_steps=cheap_tariff_steps,
+            peak_guard_enabled=peak_guard_enabled,
+            peak_guard_min_completed_days=peak_guard_min_completed_days,
+            peak_guard_deadband_kw=peak_guard_deadband_kw,
         )
         if eye6_running_peak_flat is not None:
             native_count = len(transition.native_results)
@@ -250,6 +271,9 @@ def run_drl_policy(
             eye6_cursor += native_count
         blocked_actions += int(transition.adjusted_action)
         tariff_blocked_charge_steps += transition.tariff_blocked_charge_steps
+        peak_guard_trigger_steps += transition.peak_guard_trigger_steps
+        peak_guard_override_steps += transition.peak_guard_override_steps
+        peak_guard_unmet_steps += transition.peak_guard_unmet_steps
         decisions += 1
         done = transition.done
         if not done:
@@ -264,6 +288,9 @@ def run_drl_policy(
     )
     out["blocked_action_count"] = blocked_actions
     out["tariff_blocked_charge_steps"] = tariff_blocked_charge_steps
+    out["peak_guard_trigger_steps"] = peak_guard_trigger_steps
+    out["peak_guard_override_steps"] = peak_guard_override_steps
+    out["peak_guard_unmet_steps"] = peak_guard_unmet_steps
     out["decision_count"] = decisions
     out["blocked_action_pct"] = 100.0 * blocked_actions / max(1, decisions)
     if eye6_running_peak_flat is not None:

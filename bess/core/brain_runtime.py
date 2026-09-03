@@ -14,6 +14,9 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from bess.core.bess_env import (
+    ACTION_MAX,
+    ACTION_MIN,
+    DEMAND_BLOCK_HOURS,
     OBSERVATION_DIM,
     BrainEnv,
     BrainEnvironmentStepResult,
@@ -182,6 +185,120 @@ class BrainControlTransition:
     native_results: tuple[BrainEnvironmentStepResult, ...]
     adjusted_action: bool
     tariff_blocked_charge_steps: int
+    peak_guard_trigger_steps: int
+    peak_guard_override_steps: int
+    peak_guard_unmet_steps: int
+    requested_policy_action: float
+    applied_native_actions: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PeakGuardDecision:
+    """One native-step minimum-action clamp protecting the seen demand peak."""
+
+    action: float
+    triggered: bool
+    adjusted: bool
+    allowed_grid_kw: float | None
+
+
+def enforce_seen_peak_guard(
+    action: float,
+    *,
+    net_load_kw: float,
+    monthly_peak_kw: float,
+    block_energy_kwh: float,
+    block_elapsed_hours: float,
+    timestep_hours: float,
+    battery_power_kw: float,
+    charge_efficiency: float,
+    discharge_efficiency: float,
+    enabled: bool,
+    armed: bool,
+    deadband_kw: float,
+) -> PeakGuardDecision:
+    """Raise a policy action only when its projected grid would break Eye 6.
+
+    The fixed meter has an energy budget of ``monthly_peak_kw * 0.5 h`` for
+    each block.  The remaining budget is shared evenly across the remaining
+    native samples.  This lets the guard reconsider the second 15-minute row
+    even when PPO's original action is held for 30 minutes.
+
+    The result is a lower bound, not a replacement policy: a stronger PPO
+    discharge remains untouched, and safe below-peak discharge is not blocked.
+    """
+    values = (
+        action,
+        net_load_kw,
+        monthly_peak_kw,
+        block_energy_kwh,
+        block_elapsed_hours,
+        timestep_hours,
+        battery_power_kw,
+        charge_efficiency,
+        discharge_efficiency,
+        deadband_kw,
+    )
+    if not all(math.isfinite(float(value)) for value in values):
+        raise ValueError("Peak Guard inputs must all be finite")
+
+    action_value = float(action)
+    net_load = max(0.0, float(net_load_kw))
+    seen_peak = float(monthly_peak_kw)
+    open_energy = float(block_energy_kwh)
+    open_elapsed = float(block_elapsed_hours)
+    dt_hours = float(timestep_hours)
+    rated_power = float(battery_power_kw)
+    charge_eta = float(charge_efficiency)
+    discharge_eta = float(discharge_efficiency)
+    deadband = float(deadband_kw)
+
+    if action_value < ACTION_MIN or action_value > ACTION_MAX:
+        raise ValueError("Peak Guard action must be inside [-1, 1]")
+    if seen_peak < 0.0 or open_energy < 0.0:
+        raise ValueError("Peak Guard meter values must not be negative")
+    if dt_hours <= 0.0 or dt_hours > DEMAND_BLOCK_HOURS:
+        raise ValueError("Peak Guard timestep must be inside (0, 0.5]")
+    if open_elapsed < 0.0 or open_elapsed >= DEMAND_BLOCK_HOURS:
+        raise ValueError("Peak Guard open-block elapsed time must be inside [0, 0.5)")
+    if open_elapsed + dt_hours > DEMAND_BLOCK_HOURS + 1e-12:
+        raise ValueError("Peak Guard timestep would overrun the open meter block")
+    if rated_power <= 0.0:
+        raise ValueError("Peak Guard battery power must be greater than 0")
+    if not 0.0 < charge_eta <= 1.0 or not 0.0 < discharge_eta <= 1.0:
+        raise ValueError("Peak Guard efficiencies must be inside (0, 1]")
+    if deadband < 0.0:
+        raise ValueError("Peak Guard deadband must not be negative")
+
+    if not enabled or not armed or seen_peak <= 0.0:
+        return PeakGuardDecision(action_value, False, False, None)
+
+    remaining_time_hours = DEMAND_BLOCK_HOURS - open_elapsed
+    remaining_energy_budget_kwh = seen_peak * DEMAND_BLOCK_HOURS - open_energy
+    allowed_grid_kw = max(0.0, remaining_energy_budget_kwh / remaining_time_hours)
+
+    requested_battery_kw = action_value * rated_power
+    requested_outside_kw = (
+        requested_battery_kw * discharge_eta
+        if requested_battery_kw >= 0.0
+        else requested_battery_kw / charge_eta
+    )
+    projected_grid_kw = max(0.0, net_load - requested_outside_kw)
+    if projected_grid_kw <= allowed_grid_kw + deadband:
+        return PeakGuardDecision(action_value, False, False, allowed_grid_kw)
+
+    outside_power_needed_kw = net_load - allowed_grid_kw
+    minimum_battery_kw = (
+        outside_power_needed_kw / discharge_eta
+        if outside_power_needed_kw >= 0.0
+        else outside_power_needed_kw * charge_eta
+    )
+    minimum_action = min(ACTION_MAX, max(ACTION_MIN, minimum_battery_kw / rated_power))
+    guarded_action = max(action_value, minimum_action)
+    adjusted = not math.isclose(guarded_action, action_value, rel_tol=0.0, abs_tol=1e-12)
+    # TODO(IQ-66): keep this hard lower-bound only if the untouched test bucket
+    # improves and human review confirms it stops feasible new meter peaks.
+    return PeakGuardDecision(guarded_action, True, adjusted, allowed_grid_kw)
 
 
 def constrain_charge_to_cheap_window(
@@ -211,6 +328,9 @@ def step_brain_control(
     recorder: BrainTrajectoryRecorder | None = None,
     charge_only_during_cheap_tariff: bool = False,
     cheap_tariff_steps: set[int] | frozenset[int] | None = None,
+    peak_guard_enabled: bool = False,
+    peak_guard_min_completed_days: int = 1,
+    peak_guard_deadband_kw: float = 1.0,
 ) -> BrainControlTransition:
     """Hold one requested action over native env steps with optional cheap-only charging."""
     if native_steps <= 0:
@@ -219,6 +339,12 @@ def step_brain_control(
         raise ValueError("cheap tariff step indexes are required when cheap-only charging is enabled")
     if charge_only_during_cheap_tariff and env.episode is None:
         raise ValueError("cheap-only charging requires an episode-backed BrainEnv")
+    if peak_guard_enabled and env.episode is None:
+        raise ValueError("Peak Guard requires an episode-backed BrainEnv")
+    if isinstance(peak_guard_min_completed_days, bool) or peak_guard_min_completed_days < 0:
+        raise ValueError("Peak Guard minimum completed days must be a non-negative integer")
+    if int(peak_guard_min_completed_days) != peak_guard_min_completed_days:
+        raise ValueError("Peak Guard minimum completed days must be a non-negative integer")
 
     results: list[BrainEnvironmentStepResult] = []
     reward_vnd = 0.0
@@ -226,6 +352,10 @@ def step_brain_control(
     done = False
     adjusted = False
     tariff_blocked_charge_steps = 0
+    peak_guard_trigger_steps = 0
+    peak_guard_override_steps = 0
+    peak_guard_unmet_steps = 0
+    applied_native_actions: list[float] = []
 
     for _ in range(native_steps):
         step_action = float(action)
@@ -241,6 +371,32 @@ def step_brain_control(
             if not math.isclose(step_action, float(action), rel_tol=0.0, abs_tol=1e-12):
                 adjusted = True
                 tariff_blocked_charge_steps += 1
+        peak_guard = PeakGuardDecision(step_action, False, False, None)
+        if peak_guard_enabled:
+            assert env.episode is not None
+            timestep_index = env.bess_world.timestep_index
+            timestep = env.episode.timesteps[timestep_index]
+            meter = env.bess_world.meter_state
+            completed_days = timestep_index // env.episode.steps_per_day
+            peak_guard = enforce_seen_peak_guard(
+                step_action,
+                net_load_kw=timestep.net_load_kw,
+                monthly_peak_kw=meter.monthly_peak_kw,
+                block_energy_kwh=meter.block_energy_kwh,
+                block_elapsed_hours=meter.block_elapsed_hours,
+                timestep_hours=env.bess_world.timestep_hours,
+                battery_power_kw=env.bess_world.battery_power_kw,
+                charge_efficiency=env.bess_world.charge_efficiency,
+                discharge_efficiency=env.bess_world.discharge_efficiency,
+                enabled=True,
+                armed=completed_days >= int(peak_guard_min_completed_days),
+                deadband_kw=peak_guard_deadband_kw,
+            )
+            step_action = peak_guard.action
+            peak_guard_trigger_steps += int(peak_guard.triggered)
+            peak_guard_override_steps += int(peak_guard.adjusted)
+            adjusted = adjusted or peak_guard.adjusted
+        applied_native_actions.append(step_action)
         result = env.step(step_action)
         if not isinstance(result, BrainEnvironmentStepResult):
             raise TypeError("owned BrainEnv episode returned a non-episode step result")
@@ -257,6 +413,12 @@ def step_brain_control(
         )
         if recorder is not None:
             recorder.record(result)
+        if (
+            peak_guard.allowed_grid_kw is not None
+            and result.bess.physics.grid_import_kw
+            > peak_guard.allowed_grid_kw + float(peak_guard_deadband_kw) + 1e-9
+        ):
+            peak_guard_unmet_steps += 1
         if done:
             break
 
@@ -268,6 +430,11 @@ def step_brain_control(
         native_results=tuple(results),
         adjusted_action=adjusted,
         tariff_blocked_charge_steps=tariff_blocked_charge_steps,
+        peak_guard_trigger_steps=peak_guard_trigger_steps,
+        peak_guard_override_steps=peak_guard_override_steps,
+        peak_guard_unmet_steps=peak_guard_unmet_steps,
+        requested_policy_action=float(action),
+        applied_native_actions=tuple(applied_native_actions),
     )
 
 

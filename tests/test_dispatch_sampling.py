@@ -30,6 +30,13 @@ class CountingPolicy:
         return -1.0
 
 
+class ChargeFirstDayPolicy(CountingPolicy):
+    def predict_action(self, _obs):
+        action = -1.0 if self.calls < 96 else 0.0
+        self.calls += 1
+        return action
+
+
 def dense_month(load_kw=0.0, pv_kw=1000.0):
     steps = 1440
     return MonthData(
@@ -55,6 +62,52 @@ def dense_config():
 
 
 class CrossResolutionDispatchTests(unittest.TestCase):
+    def test_iq66_checkpoint_metadata_enables_peak_guard_without_changing_legacy_policy(self):
+        cfg = load_system_config()
+        cfg = make_bess_config(cfg, 1000.0, 500.0, cfg.P_target_user)
+        cfg.dt = 0.25
+        day_two_load = np.full(96, 100.0, dtype=np.float64)
+        day_two_load[:2] = 800.0
+        days = [
+            DayData(
+                load=np.full(96, 100.0, dtype=np.float64),
+                pv=np.zeros(96, dtype=np.float64),
+                day_type="working",
+                weather="test",
+                day_index=1,
+                date_iso="2026-01-01",
+            ),
+            DayData(
+                load=day_two_load,
+                pv=np.zeros(96, dtype=np.float64),
+                day_type="working",
+                weather="test",
+                day_index=2,
+                date_iso="2026-01-02",
+            ),
+        ]
+        month = MonthData(days=days, source="iq66-meta-test")
+
+        legacy = ChargeFirstDayPolicy()
+        guarded = ChargeFirstDayPolicy()
+        guarded.meta.update({
+            "peak_guard_enabled": True,
+            "peak_guard_min_completed_days": 1,
+            "peak_guard_deadband_kw": 1.0,
+        })
+        legacy_result = run_drl_policy(month, cfg, legacy, p_ref_kw=1500.0)
+        guarded_result = run_drl_policy(month, cfg, guarded, p_ref_kw=1500.0)
+
+        legacy_day_two_peak = float(np.max(legacy_result["p_grid_days"][1]))
+        guarded_day_two_peak = float(np.max(guarded_result["p_grid_days"][1]))
+        day_one_peak = float(np.max(guarded_result["p_grid_days"][0].reshape(-1, 2).mean(axis=1)))
+        self.assertAlmostEqual(legacy_day_two_peak, 800.0)
+        self.assertLessEqual(guarded_day_two_peak, day_one_peak + 1e-9)
+        self.assertEqual(legacy_result["peak_guard_trigger_steps"], 0)
+        self.assertGreater(guarded_result["peak_guard_trigger_steps"], 0)
+        self.assertGreater(guarded_result["peak_guard_override_steps"], 0)
+        self.assertEqual(guarded_result["peak_guard_unmet_steps"], 0)
+
     def test_legacy_policy_uses_96_decisions_and_1440_native_updates(self):
         policy = CountingPolicy()
         cfg = dense_config()

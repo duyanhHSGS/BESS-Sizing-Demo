@@ -13,6 +13,7 @@ from bess.core.bess_env import OBSERVATION_DIM
 from bess.core.brain_runtime import (
     BrainTrajectoryRecorder,
     constrain_charge_to_cheap_window,
+    enforce_seen_peak_guard,
     make_brain_env,
     observation_array,
     step_brain_control,
@@ -51,6 +52,251 @@ class FixedDemandBlockTests(unittest.TestCase):
 
 
 class InferenceAndEnvironmentTests(unittest.TestCase):
+    @staticmethod
+    def _peak_guard(action, **overrides):
+        arguments = {
+            "net_load_kw": 140.0,
+            "monthly_peak_kw": 100.0,
+            "block_energy_kwh": 20.0,
+            "block_elapsed_hours": 0.25,
+            "timestep_hours": 0.25,
+            "battery_power_kw": 100.0,
+            "charge_efficiency": 0.8,
+            "discharge_efficiency": 0.8,
+            "enabled": True,
+            "armed": True,
+            "deadband_kw": 1.0,
+        }
+        arguments.update(overrides)
+        return enforce_seen_peak_guard(action, **arguments)
+
+    def test_iq66_peak_guard_raises_weak_discharge_to_meter_budget(self):
+        decision = self._peak_guard(0.10)
+
+        # First half used 20 kWh, leaving 30 kWh for the last 15 minutes:
+        # allowed grid = 120 kW. Removing the 20 kW excess through 80%
+        # efficiency requires 25 battery kW, or action 0.25.
+        self.assertTrue(decision.triggered)
+        self.assertTrue(decision.adjusted)
+        self.assertAlmostEqual(decision.allowed_grid_kw, 120.0)
+        self.assertAlmostEqual(decision.action, 0.25)
+
+    def test_iq66_peak_guard_leaves_stronger_and_safe_discharge_alone(self):
+        stronger = self._peak_guard(0.50)
+        safe = self._peak_guard(
+            0.10,
+            net_load_kw=80.0,
+            block_energy_kwh=0.0,
+            block_elapsed_hours=0.0,
+        )
+
+        self.assertFalse(stronger.triggered)
+        self.assertFalse(stronger.adjusted)
+        self.assertEqual(stronger.action, 0.50)
+        self.assertFalse(safe.triggered)
+        self.assertFalse(safe.adjusted)
+        self.assertEqual(safe.action, 0.10)
+
+    def test_iq66_peak_guard_limits_charging_that_would_create_peak(self):
+        decision = self._peak_guard(
+            -0.50,
+            net_load_kw=80.0,
+            block_energy_kwh=0.0,
+            block_elapsed_hours=0.0,
+        )
+
+        # There is 20 kW of outside charging headroom. At 80% charge
+        # efficiency that is -16 battery kW, or action -0.16.
+        self.assertTrue(decision.triggered)
+        self.assertTrue(decision.adjusted)
+        self.assertAlmostEqual(decision.action, -0.16)
+
+    def test_iq66_peak_guard_stays_off_until_armed_with_nonzero_peak(self):
+        disabled = self._peak_guard(-0.50, enabled=False)
+        unarmed = self._peak_guard(-0.50, armed=False)
+        empty_peak = self._peak_guard(-0.50, monthly_peak_kw=0.0)
+
+        for decision in (disabled, unarmed, empty_peak):
+            self.assertFalse(decision.triggered)
+            self.assertFalse(decision.adjusted)
+            self.assertEqual(decision.action, -0.50)
+            self.assertIsNone(decision.allowed_grid_kw)
+
+    def test_iq66_peak_guard_clamps_impossible_request_to_action_limit(self):
+        decision = self._peak_guard(
+            0.0,
+            net_load_kw=1000.0,
+            battery_power_kw=100.0,
+        )
+
+        self.assertTrue(decision.triggered)
+        self.assertTrue(decision.adjusted)
+        self.assertEqual(decision.action, 1.0)
+
+    def test_iq66_peak_guard_rejects_bad_meter_and_physics_inputs(self):
+        bad_cases = (
+            {"monthly_peak_kw": -1.0},
+            {"block_energy_kwh": -1.0},
+            {"block_elapsed_hours": 0.5},
+            {"timestep_hours": 0.3},
+            {"battery_power_kw": 0.0},
+            {"charge_efficiency": 0.0},
+            {"discharge_efficiency": 1.1},
+            {"deadband_kw": -1.0},
+        )
+        for overrides in bad_cases:
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                self._peak_guard(0.0, **overrides)
+
+    def test_iq66_native_guard_rescues_second_half_of_held_action(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 500.0, base.P_target_user)
+        cfg.dt = 0.25
+        day_one = DayData(
+            load=np.full(96, 100.0, dtype=np.float64),
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        day_two_load = np.full(96, 80.0, dtype=np.float64)
+        day_two_load[1] = 140.0
+        day_two = DayData(
+            load=day_two_load,
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=2,
+            date_iso="2026-01-02",
+        )
+        month = MonthData(days=[day_one, day_two], source="iq66-native-guard-test")
+        env = make_brain_env(
+            month,
+            cfg,
+            power_scale_kw=1000.0,
+            initial_state_of_charge=0.50,
+        )
+        env.reset()
+
+        first_day = step_brain_control(
+            env,
+            0.0,
+            native_steps=96,
+            peak_guard_enabled=True,
+            peak_guard_min_completed_days=1,
+            peak_guard_deadband_kw=1.0,
+        )
+        danger_block = step_brain_control(
+            env,
+            0.0,
+            native_steps=2,
+            peak_guard_enabled=True,
+            peak_guard_min_completed_days=1,
+            peak_guard_deadband_kw=1.0,
+        )
+
+        self.assertEqual(first_day.peak_guard_trigger_steps, 0)
+        self.assertAlmostEqual(env.bess_world.meter_state.monthly_peak_kw, 100.0)
+        self.assertAlmostEqual(danger_block.native_results[0].bess.physics.grid_import_kw, 80.0)
+        self.assertAlmostEqual(danger_block.native_results[1].bess.physics.grid_import_kw, 120.0)
+        self.assertEqual(danger_block.peak_guard_trigger_steps, 1)
+        self.assertEqual(danger_block.peak_guard_override_steps, 1)
+        self.assertEqual(danger_block.peak_guard_unmet_steps, 0)
+        self.assertEqual(danger_block.requested_policy_action, 0.0)
+        self.assertEqual(danger_block.applied_native_actions[0], 0.0)
+        self.assertGreater(danger_block.applied_native_actions[1], 0.0)
+
+    def test_iq66_native_guard_reports_soc_limited_unmet_peak(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 500.0, base.P_target_user)
+        cfg.dt = 0.25
+        days = [
+            DayData(
+                load=np.full(96, 100.0, dtype=np.float64),
+                pv=np.zeros(96, dtype=np.float64),
+                day_type="working",
+                weather="test",
+                day_index=1,
+                date_iso="2026-01-01",
+            ),
+            DayData(
+                load=np.concatenate((np.asarray([80.0, 140.0]), np.full(94, 80.0))),
+                pv=np.zeros(96, dtype=np.float64),
+                day_type="working",
+                weather="test",
+                day_index=2,
+                date_iso="2026-01-02",
+            ),
+        ]
+        env = make_brain_env(MonthData(days=days, source="iq66-unmet-test"), cfg, power_scale_kw=1000.0)
+        env.reset()
+        step_brain_control(
+            env,
+            0.0,
+            native_steps=96,
+            peak_guard_enabled=True,
+            peak_guard_min_completed_days=1,
+        )
+
+        danger_block = step_brain_control(
+            env,
+            0.0,
+            native_steps=2,
+            peak_guard_enabled=True,
+            peak_guard_min_completed_days=1,
+        )
+
+        self.assertEqual(danger_block.peak_guard_trigger_steps, 1)
+        self.assertEqual(danger_block.peak_guard_override_steps, 1)
+        self.assertEqual(danger_block.peak_guard_unmet_steps, 1)
+        self.assertAlmostEqual(env.bess_world.meter_state.monthly_peak_kw, 110.0)
+
+    def test_iq66_native_guard_reports_unmet_when_strong_policy_hits_empty_battery(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 500.0, base.P_target_user)
+        cfg.dt = 0.25
+        days = [
+            DayData(
+                load=np.full(96, 100.0, dtype=np.float64),
+                pv=np.zeros(96, dtype=np.float64),
+                day_type="working",
+                weather="test",
+                day_index=1,
+                date_iso="2026-01-01",
+            ),
+            DayData(
+                load=np.concatenate((np.asarray([80.0, 140.0]), np.full(94, 80.0))),
+                pv=np.zeros(96, dtype=np.float64),
+                day_type="working",
+                weather="test",
+                day_index=2,
+                date_iso="2026-01-02",
+            ),
+        ]
+        env = make_brain_env(MonthData(days=days, source="iq66-strong-unmet-test"), cfg, power_scale_kw=1000.0)
+        env.reset()
+        step_brain_control(
+            env,
+            0.0,
+            native_steps=96,
+            peak_guard_enabled=True,
+            peak_guard_min_completed_days=1,
+        )
+
+        danger_block = step_brain_control(
+            env,
+            1.0,
+            native_steps=2,
+            peak_guard_enabled=True,
+            peak_guard_min_completed_days=1,
+        )
+
+        self.assertEqual(danger_block.peak_guard_trigger_steps, 0)
+        self.assertEqual(danger_block.peak_guard_override_steps, 0)
+        self.assertEqual(danger_block.peak_guard_unmet_steps, 1)
+        self.assertAlmostEqual(env.bess_world.meter_state.monthly_peak_kw, 110.0)
+
     def test_cheap_tariff_charge_constraint_blocks_only_noncheap_charging(self):
         cheap_steps = frozenset({0, 1, 2, 3})
         self.assertEqual(

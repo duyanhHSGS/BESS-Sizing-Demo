@@ -114,6 +114,13 @@ PPO_RESET_OPTIMIZER_ON_REANCHOR = True
 PPO_PRESERVE_CRITIC_ON_REANCHOR = True
 # TODO(IQ-57): keep cheap-only charging as an IQ-57+ architecture rule and audit unseen-month economics.
 PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF = True
+# IQ-66 adds a meter-aware minimum-action clamp after one complete billing day.
+# It only strengthens an action whose projected grid would exceed Eye 6; it does
+# not block safe below-peak discharge, keeping this experiment to one behavior change.
+# TODO(IQ-66): promote Peak Guard only if unseen economics and human peak review beat IQ-65.
+PPO_PEAK_GUARD_ENABLED = True
+PPO_PEAK_GUARD_MIN_COMPLETED_DAYS = 1
+PPO_PEAK_GUARD_DEADBAND_KW = 1.0
 PPO_ACTION_MISMATCH_SHAPING_SCALE = 0.10
 PPO_ORACLE_BC_ENABLED = True
 PPO_ORACLE_ACTOR_BC_MAX_EPOCHS = 300
