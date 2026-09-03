@@ -27,7 +27,6 @@ from bess.training.runners.train_ppo_dataset import (
     _midpoint_challenger_state,
     _oracle_dispatch_wear_cost_vnd,
     _oracle_teacher_action,
-    _peak_warning_discharge_bonus_vnd,
     _resolve_challenger,
     _restore_reanchor_state,
     _save_accepted_champion,
@@ -677,100 +676,6 @@ class PPOOracleTeacherTests(unittest.TestCase):
         self.assertEqual(stats["critic_best_epoch"], 0)
         self.assertAlmostEqual(stats["critic_final_mse"], stats["critic_initial_mse"])
         self.assertAlmostEqual(stats["critic_last_epoch_mse"], stats["critic_initial_mse"])
-
-
-class PPOPeakWarningDischargeBonusTests(unittest.TestCase):
-    @staticmethod
-    def _transition(*executed_kw):
-        return SimpleNamespace(
-            native_results=tuple(
-                SimpleNamespace(
-                    bess=SimpleNamespace(
-                        physics=SimpleNamespace(final_battery_kw=value),
-                    )
-                )
-                for value in executed_kw
-            )
-        )
-
-    def test_bonus_starts_before_seen_peak_is_passed(self):
-        observation = np.asarray([0.0, 1.0, 0.98, 0.8, 0.5, 1.00, 1.0], dtype=np.float32)
-        bonus = _peak_warning_discharge_bonus_vnd(
-            observation,
-            self._transition(100.0, 100.0),
-            power_scale_kw=1000.0,
-            demand_charge_vnd_per_kw=250_000.0,
-        )
-        self.assertAlmostEqual(bonus, 0.05 * 30.0 * 250_000.0, delta=1.0)
-
-    def test_bonus_is_zero_below_warning_band(self):
-        observation = np.asarray([0.0, 1.0, 0.94, 0.8, 0.5, 1.00, 1.0], dtype=np.float32)
-        self.assertEqual(
-            _peak_warning_discharge_bonus_vnd(
-                observation,
-                self._transition(100.0, 100.0),
-                power_scale_kw=1000.0,
-                demand_charge_vnd_per_kw=250_000.0,
-            ),
-            0.0,
-        )
-
-    def test_bonus_caps_credit_at_warning_line(self):
-        observation = np.asarray([0.0, 1.0, 1.10, 0.8, 0.5, 1.00, 1.0], dtype=np.float32)
-        bonus = _peak_warning_discharge_bonus_vnd(
-            observation,
-            self._transition(500.0, 500.0),
-            power_scale_kw=1000.0,
-            demand_charge_vnd_per_kw=250_000.0,
-        )
-        self.assertAlmostEqual(bonus, 0.05 * 150.0 * 250_000.0, delta=2.0)
-
-    def test_charge_and_idle_never_receive_peak_warning_bonus(self):
-        observation = np.asarray([0.0, 1.0, 0.99, 0.8, 0.5, 1.00, 1.0], dtype=np.float32)
-        self.assertEqual(
-            _peak_warning_discharge_bonus_vnd(
-                observation,
-                self._transition(-200.0, 0.0),
-                power_scale_kw=1000.0,
-                demand_charge_vnd_per_kw=250_000.0,
-            ),
-            0.0,
-        )
-
-    def test_bonus_uses_mean_executed_discharge_across_held_native_steps(self):
-        observation = np.asarray([0.0, 1.0, 1.00, 0.8, 0.5, 1.00, 1.0], dtype=np.float32)
-        bonus = _peak_warning_discharge_bonus_vnd(
-            observation,
-            self._transition(100.0, 0.0),
-            power_scale_kw=1000.0,
-            demand_charge_vnd_per_kw=250_000.0,
-        )
-        self.assertAlmostEqual(bonus, 0.05 * 50.0 * 250_000.0, delta=1.0)
-
-    def test_zero_seen_peak_does_not_create_an_everywhere_bonus(self):
-        observation = np.asarray([0.0, 1.0, 0.50, 0.8, 0.5, 0.00, 1.0], dtype=np.float32)
-        self.assertEqual(
-            _peak_warning_discharge_bonus_vnd(
-                observation,
-                self._transition(100.0),
-                power_scale_kw=1000.0,
-                demand_charge_vnd_per_kw=250_000.0,
-            ),
-            0.0,
-        )
-
-    def test_invalid_warning_configuration_is_rejected(self):
-        observation = np.asarray([0.0, 1.0, 0.99, 0.8, 0.5, 1.00, 1.0], dtype=np.float32)
-        transition = self._transition(100.0)
-        invalid_kwargs = (
-            {"power_scale_kw": 0.0, "demand_charge_vnd_per_kw": 250_000.0},
-            {"power_scale_kw": 1000.0, "demand_charge_vnd_per_kw": -1.0},
-            {"power_scale_kw": 1000.0, "demand_charge_vnd_per_kw": 250_000.0, "warning_ratio": 1.0},
-            {"power_scale_kw": 1000.0, "demand_charge_vnd_per_kw": 250_000.0, "shaping_fraction": 1.01},
-        )
-        for kwargs in invalid_kwargs:
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
-                _peak_warning_discharge_bonus_vnd(observation, transition, **kwargs)
 
 
 class PPOActionMismatchPenaltyTests(unittest.TestCase):

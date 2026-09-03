@@ -99,49 +99,6 @@ def _action_mismatch_penalty_vnd(transition, *, timestep_hours: float, wear_vnd_
     return mismatch_kwh * wear_vnd_per_kwh
 
 
-def _peak_warning_discharge_bonus_vnd(
-    observation,
-    transition,
-    *,
-    power_scale_kw: float,
-    demand_charge_vnd_per_kw: float,
-    warning_ratio: float = 0.95,
-    shaping_fraction: float = 0.05,
-) -> float:
-    """Reward executed discharge when load approaches the already-seen peak.
-
-    The warning band starts at 95% of eye 6's running monthly peak. Credit is
-    capped at the discharge needed to return to that warning line, preventing
-    ordinary below-band discharge from collecting a fake demand-charge reward.
-    """
-    if power_scale_kw <= 0.0:
-        raise ValueError("power_scale_kw must be greater than 0")
-    if demand_charge_vnd_per_kw < 0.0:
-        raise ValueError("demand_charge_vnd_per_kw must be non-negative")
-    if not 0.0 < warning_ratio < 1.0:
-        raise ValueError("warning_ratio must be between 0 and 1")
-    if not 0.0 <= shaping_fraction <= 1.0:
-        raise ValueError("shaping_fraction must be between 0 and 1")
-
-    running_peak_kw = max(0.0, float(observation[5]) * power_scale_kw)
-    if running_peak_kw <= 0.0:
-        return 0.0
-    warning_line_kw = warning_ratio * running_peak_kw
-    danger_band_kw = max(0.0, float(observation[2]) * power_scale_kw - warning_line_kw)
-    if danger_band_kw <= 0.0:
-        return 0.0
-
-    executed_discharge_kw = max(
-        0.0,
-        sum(max(0.0, float(result.bess.physics.final_battery_kw)) for result in transition.native_results)
-        / max(1, len(transition.native_results)),
-    )
-    useful_warning_discharge_kw = min(danger_band_kw, executed_discharge_kw)
-    # TODO(IQ-59): verify the 95% warning band on the unseen bucket; narrow or
-    # remove it if PPO wastes energy below peaks that never threaten the record.
-    return shaping_fraction * useful_warning_discharge_kw * demand_charge_vnd_per_kw
-
-
 def _load_ui_wear_cost(training_config_path: str | Path) -> float:
     config = json.loads(Path(training_config_path).read_text(encoding="utf-8"))
     if "battery_wear_cost" not in config:
@@ -1201,7 +1158,7 @@ def main() -> None:
         "battery_wear_cost": battery_wear_cost,
         "charge_only_during_cheap_tariff": PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
         "reward_mode": "brain_savings_vnd_v1",
-        "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2+peak_warning_discharge_hint_iq59",
+        "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2",
         "training_reward_shaping_scale": args.action_mismatch_shaping_scale,
         "initial_soc": float(cfg.SOC_min),
         "gamma": gamma,
@@ -1337,10 +1294,8 @@ def main() -> None:
             "battery_wear_cost": battery_wear_cost,
             "charge_only_during_cheap_tariff": PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
             "reward_mode": "brain_savings_vnd_v1",
-            "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2+peak_warning_discharge_hint_iq59",
+            "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2",
             "training_reward_shaping_scale": args.action_mismatch_shaping_scale,
-            "peak_warning_ratio": 0.95,
-            "peak_warning_discharge_shaping_fraction": 0.05,
             "champion_scoring_uses_shaping": False,
         },
         "training": {
@@ -1812,15 +1767,11 @@ def main() -> None:
         # Keep the PPO action/log-prob pair exact. We shape only the learning
         # reward so repeatedly requesting battery power that physics rejects is
         # no longer free. Champion/test evaluation never includes this penalty.
-        peak_warning_bonus_vnd = _peak_warning_discharge_bonus_vnd(
-            obs,
-            transition,
-            power_scale_kw=p_ref,
-            demand_charge_vnd_per_kw=float(cfg.T_cap),
-        )
         reward = transition.reward_million_vnd - (
             args.action_mismatch_shaping_scale * mismatch_penalty_vnd / REWARD_SCALE_VND
-        ) + peak_warning_bonus_vnd / REWARD_SCALE_VND
+        )
+        # TODO(IQ-60): keep hand-authored peak cookies out unless an unseen-bucket
+        # result proves they beat this real-money-only learning reward.
         actor_hidden, critic_hidden = agent.recurrent_rollout_inputs()
         buffer.add(
             obs,
