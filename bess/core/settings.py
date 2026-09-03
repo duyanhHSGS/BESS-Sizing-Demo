@@ -99,9 +99,9 @@ PPO_CRITIC_GRAD_CLIP = 0.5
 # fixed so the only new experimental variable is the larger validation jury.
 PPO_HIDDEN_SIZE = 128
 PPO_DECOMPOSED_CRITIC = False
-# IQ-63: spend one formerly-training 30-day bucket on a second validation jury
-# bucket. TODO(IQ-63): keep 2 validation buckets only if the untouched test
-# bucket generalizes better than IQ-62 despite training on one fewer bucket.
+# IQ-63's two-bucket validation jury beat IQ-62 on the untouched test bucket;
+# IQ-65 restores that measured split unchanged after rejecting IQ-64 weighting.
+# TODO(IQ-65): keep the 8/2/1 geometry as the clean restoration baseline.
 PPO_VALIDATION_BUCKETS = 2
 PPO_TEST_BUCKETS = 1
 PPO_INITIAL_LOG_STD = -0.5
@@ -121,9 +121,8 @@ PPO_ORACLE_BC_MAX_EPOCHS = 100
 PPO_ORACLE_BC_LEARNING_RATE = 1e-3
 PPO_ORACLE_BC_MINIBATCH = 256
 PPO_ORACLE_BC_TARGET_MSE = 1e-4
-# IQ-64: peak-changing Oracle actor lessons are rare but economically enormous.
-# TODO(IQ-64): keep this demand weighting only if unseen-bucket peak shaving improves.
-PPO_ORACLE_BC_DEMAND_MAX_WEIGHT = 8.0
+# IQ-65: restore IQ-63's plain Oracle actor MSE after IQ-64 demand weighting regressed.
+# TODO(IQ-65): keep Oracle actor BC unweighted unless a future experiment beats IQ-63 unseen economics.
 PPO_LOG_EVERY_UPDATES = 1
 PPO_TORCH_THREADS = 6
 PPO_FIT_CONTROL_DT_MINUTES = 30.0
@@ -162,7 +161,6 @@ PPO_TUNABLE_DEFAULTS = {
     "oracle_bc_learning_rate": PPO_ORACLE_BC_LEARNING_RATE,
     "oracle_bc_minibatch": PPO_ORACLE_BC_MINIBATCH,
     "oracle_bc_target_mse": PPO_ORACLE_BC_TARGET_MSE,
-    "oracle_bc_demand_max_weight": PPO_ORACLE_BC_DEMAND_MAX_WEIGHT,
     "log_every_updates": PPO_LOG_EVERY_UPDATES,
     "torch_threads": PPO_TORCH_THREADS,
 }

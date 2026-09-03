@@ -25,7 +25,6 @@ from bess.training.runners.train_ppo_dataset import (
     _dispatch_month_bucket_blocks,
     _initialize_champion,
     _midpoint_challenger_state,
-    _oracle_actor_bc_sample_weights,
     _oracle_dispatch_wear_cost_vnd,
     _oracle_teacher_action,
     _resolve_challenger,
@@ -575,63 +574,6 @@ class PPOOracleTeacherTests(unittest.TestCase):
         )
         self.assertAlmostEqual(wear, 25_000.0)
 
-    def test_oracle_actor_bc_weights_leave_non_demand_lessons_at_one(self):
-        rewards = np.asarray(
-            [[1.0, 0.0, 0.2], [-0.5, 0.0, 0.1], [0.0, 0.0, 0.0]],
-            dtype=np.float32,
-        )
-        weights = _oracle_actor_bc_sample_weights(rewards, max_weight=8.0)
-        np.testing.assert_allclose(weights, np.ones(3, dtype=np.float32))
-
-    def test_oracle_actor_bc_weights_make_pure_demand_lesson_max_weight(self):
-        rewards = np.asarray([[0.0, 5.0, 0.0]], dtype=np.float32)
-        weights = _oracle_actor_bc_sample_weights(rewards, max_weight=8.0)
-        np.testing.assert_allclose(weights, np.asarray([8.0], dtype=np.float32))
-
-    def test_oracle_actor_bc_weights_interpolate_by_real_economic_share(self):
-        rewards = np.asarray([[1.0, 1.0, 0.0]], dtype=np.float32)
-        weights = _oracle_actor_bc_sample_weights(rewards, max_weight=9.0)
-        np.testing.assert_allclose(weights, np.asarray([5.0], dtype=np.float32))
-
-    def test_oracle_actor_bc_weights_treat_demand_damage_as_important_too(self):
-        rewards = np.asarray([[0.0, -2.0, 0.0]], dtype=np.float32)
-        weights = _oracle_actor_bc_sample_weights(rewards, max_weight=6.0)
-        np.testing.assert_allclose(weights, np.asarray([6.0], dtype=np.float32))
-
-    def test_oracle_actor_bc_weights_reject_invalid_inputs(self):
-        with self.assertRaises(ValueError):
-            _oracle_actor_bc_sample_weights(np.asarray([1.0, 2.0, 3.0]))
-        with self.assertRaises(ValueError):
-            _oracle_actor_bc_sample_weights(
-                np.asarray([[0.0, np.nan, 0.0]], dtype=np.float32)
-            )
-        with self.assertRaises(ValueError):
-            _oracle_actor_bc_sample_weights(
-                np.zeros((1, 3), dtype=np.float32),
-                max_weight=0.99,
-            )
-
-    def test_behavior_clone_actor_rejects_invalid_sample_weights(self):
-        agent = PPOAgent(7, seed=0, device="cpu")
-        observations = np.zeros((2, 7), dtype=np.float32)
-        targets = np.zeros(2, dtype=np.float32)
-        with self.assertRaises(ValueError):
-            _behavior_clone_actor(
-                agent,
-                observations,
-                targets,
-                seed=0,
-                sample_weights=np.ones(1, dtype=np.float32),
-            )
-        with self.assertRaises(ValueError):
-            _behavior_clone_actor(
-                agent,
-                observations,
-                targets,
-                seed=0,
-                sample_weights=np.asarray([1.0, 0.0], dtype=np.float32),
-            )
-
     def test_behavior_clone_actor_reduces_teacher_mse(self):
         agent = PPOAgent(7, seed=0, device="cpu")
         rng = np.random.default_rng(123)
@@ -640,6 +582,10 @@ class PPOOracleTeacherTests(unittest.TestCase):
         stats = _behavior_clone_actor(agent, observations, targets, seed=0)
         self.assertLess(stats["final_mse"], stats["initial_mse"])
         self.assertEqual(stats["samples"], 64)
+        # IQ-65 regression guard: Oracle actor school is IQ-63 plain MSE again.
+        # TODO(IQ-65): remove this guard only for a separately measured replacement experiment.
+        self.assertNotIn("initial_weighted_mse", stats)
+        self.assertNotIn("sample_weight_max", stats)
 
     def test_behavior_clone_critic_reduces_oracle_return_mse(self):
         agent = PPOAgent(7, seed=0, device="cpu")
