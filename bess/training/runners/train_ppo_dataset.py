@@ -49,6 +49,7 @@ from bess.core.settings import (
     PPO_LOG_EVERY_UPDATES,
     PPO_MINIBATCH,
     PPO_ORACLE_ACTOR_BC_MAX_EPOCHS,
+    PPO_ORACLE_BC_DEMAND_MAX_WEIGHT,
     PPO_ORACLE_BC_ENABLED,
     PPO_ORACLE_BC_LEARNING_RATE,
     PPO_ORACLE_BC_MAX_EPOCHS,
@@ -291,6 +292,44 @@ def _collect_oracle_teacher_samples(
     )
 
 
+def _oracle_actor_bc_sample_weights(
+    reward_components: np.ndarray,
+    *,
+    max_weight: float = PPO_ORACLE_BC_DEMAND_MAX_WEIGHT,
+) -> np.ndarray:
+    """Weight rare demand-charge Oracle lessons without changing real rewards.
+
+    Demand savings only appear when a completed 30-minute meter block changes
+    the monthly peak economics. The weight is based on demand's share of the
+    absolute real economic consequence for that control decision, so ordinary
+    energy/wear-only lessons stay at 1x while demand-dominated lessons approach
+    ``max_weight``. This affects Oracle actor imitation only; BrainEnv, PPO
+    rewards, Brain7 observations, and deployed policy inference are untouched.
+    """
+    components = np.asarray(reward_components, dtype=np.float64)
+    if components.ndim != 2 or components.shape[1] != 3:
+        raise ValueError("Oracle BC reward components must have shape (N, 3)")
+    if not np.all(np.isfinite(components)):
+        raise ValueError("Oracle BC reward components must be finite")
+    if not math.isfinite(max_weight) or max_weight < 1.0:
+        raise ValueError("Oracle BC demand max weight must be finite and >= 1")
+    if len(components) == 0:
+        return np.empty(0, dtype=np.float32)
+
+    absolute = np.abs(components)
+    economic_magnitude = np.sum(absolute, axis=1)
+    demand_share = np.divide(
+        absolute[:, 1],
+        economic_magnitude,
+        out=np.zeros(len(components), dtype=np.float64),
+        where=economic_magnitude > 0.0,
+    )
+    weights = 1.0 + (float(max_weight) - 1.0) * demand_share
+    # TODO(IQ-64): audit unseen peak blocks before making demand-weighted Oracle
+    # imitation a permanent generic-PPO training rule.
+    return weights.astype(np.float32, copy=False)
+
+
 def _behavior_clone_actor(
     agent: PPOAgent,
     observations: np.ndarray,
@@ -303,12 +342,21 @@ def _behavior_clone_actor(
     target_mse: float = PPO_ORACLE_BC_TARGET_MSE,
     score_policy_cost=None,
     episode_lengths: list[int] | None = None,
+    sample_weights: np.ndarray | None = None,
 ) -> dict[str, float | int]:
     """Supervised-fit the existing generic PPO actor to Oracle teacher actions."""
     if observations.ndim != 2 or observations.shape[1] != OBSERVATION_DIM:
         raise ValueError("Oracle BC observations must have shape (N, OBSERVATION_DIM)")
     if targets.ndim != 1 or len(targets) != len(observations) or len(targets) == 0:
         raise ValueError("Oracle BC targets must be one non-empty action per observation")
+    if sample_weights is None:
+        sample_weights = np.ones(len(observations), dtype=np.float32)
+    else:
+        sample_weights = np.asarray(sample_weights, dtype=np.float32)
+        if sample_weights.ndim != 1 or len(sample_weights) != len(observations):
+            raise ValueError("Oracle BC sample weights must have shape (N,)")
+        if not np.all(np.isfinite(sample_weights)) or np.any(sample_weights <= 0.0):
+            raise ValueError("Oracle BC sample weights must be finite and > 0")
     if episode_lengths is None:
         episode_lengths = [len(observations)]
     if any(length <= 0 for length in episode_lengths) or sum(episode_lengths) != len(observations):
@@ -322,6 +370,7 @@ def _behavior_clone_actor(
 
     obs_t = torch.as_tensor(observations, dtype=torch.float32, device=agent.device)
     target_t = torch.as_tensor(targets, dtype=torch.float32, device=agent.device)
+    weight_t = torch.as_tensor(sample_weights, dtype=torch.float32, device=agent.device)
     if agent.recurrent_enabled:
         actor_parameters = [
             *agent.net.actor_encoder.parameters(),
@@ -333,8 +382,16 @@ def _behavior_clone_actor(
     optimizer = torch.optim.Adam(actor_parameters, lr=learning_rate)
     rng = np.random.default_rng(seed)
 
+    def weighted_mse(
+        prediction: torch.Tensor,
+        expected: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> torch.Tensor:
+        squared_error = (prediction - expected) ** 2
+        return torch.sum(squared_error * weights) / torch.sum(weights)
+
     @torch.inference_mode()
-    def full_mse() -> float:
+    def full_mse(*, weighted: bool = False) -> float:
         if agent.recurrent_enabled:
             prediction = torch.cat([
                 torch.tanh(
@@ -344,9 +401,15 @@ def _behavior_clone_actor(
             ])
         else:
             prediction = torch.tanh(agent.net.actor(obs_t)).squeeze(-1)
-        return float(torch.mean((prediction - target_t) ** 2).cpu())
+        loss = (
+            weighted_mse(prediction, target_t, weight_t)
+            if weighted
+            else torch.mean((prediction - target_t) ** 2)
+        )
+        return float(loss.cpu())
 
     initial_mse = full_mse()
+    initial_weighted_mse = full_mse(weighted=True)
     epochs_completed = 0
     best_validation_cost = float("inf")
     best_validation_epoch = 0
@@ -369,7 +432,11 @@ def _behavior_clone_actor(
                         hidden,
                     )
                     prediction = torch.tanh(mean.squeeze(0)).squeeze(-1)
-                    loss = torch.mean((prediction - target_t[start:stop]) ** 2)
+                    loss = weighted_mse(
+                        prediction,
+                        target_t[start:stop],
+                        weight_t[start:stop],
+                    )
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
@@ -383,12 +450,13 @@ def _behavior_clone_actor(
                     device=agent.device,
                 )
                 prediction = torch.tanh(agent.net.actor(obs_t[mb])).squeeze(-1)
-                loss = torch.mean((prediction - target_t[mb]) ** 2)
+                loss = weighted_mse(prediction, target_t[mb], weight_t[mb])
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
         epochs_completed = epoch + 1
         epoch_mse = full_mse()
+        epoch_weighted_mse = full_mse(weighted=True)
         if score_policy_cost is not None:
             # Teacher-forced MSE is not the deployment objective. Re-score the
             # actual closed-loop policy every epoch and remember the cheapest one.
@@ -402,13 +470,15 @@ def _behavior_clone_actor(
                     key: value.detach().clone()
                     for key, value in agent.net.state_dict().items()
                 }
-        if epoch_mse <= target_mse:
+        if epoch_weighted_mse <= target_mse:
             break
 
     last_epoch_mse = full_mse()
+    last_epoch_weighted_mse = full_mse(weighted=True)
     if best_actor_state is not None:
         agent.net.load_state_dict(best_actor_state)
     final_mse = full_mse()
+    final_weighted_mse = full_mse(weighted=True)
     agent._sync_collector()
     stats = {
         "samples": len(observations),
@@ -419,6 +489,11 @@ def _behavior_clone_actor(
         "initial_mse": initial_mse,
         "final_mse": final_mse,
         "last_epoch_mse": last_epoch_mse,
+        "initial_weighted_mse": initial_weighted_mse,
+        "final_weighted_mse": final_weighted_mse,
+        "last_epoch_weighted_mse": last_epoch_weighted_mse,
+        "sample_weight_mean": float(np.mean(sample_weights)),
+        "sample_weight_max": float(np.max(sample_weights)),
     }
     if best_actor_state is not None:
         stats.update(
@@ -992,6 +1067,11 @@ def main() -> None:
         type=float,
         default=PPO_ORACLE_BC_TARGET_MSE,
     )
+    parser.add_argument(
+        "--oracle-bc-demand-max-weight",
+        type=float,
+        default=PPO_ORACLE_BC_DEMAND_MAX_WEIGHT,
+    )
     parser.add_argument("--log-every-updates", type=int, default=PPO_LOG_EVERY_UPDATES)
     parser.add_argument("--torch-threads", type=int, default=PPO_TORCH_THREADS)
     parser.add_argument("--control-dt-minutes", type=float, required=True)
@@ -1116,6 +1196,12 @@ def main() -> None:
         args.oracle_bc_target_mse,
         minimum=0.0,
         maximum=1e9,
+    )
+    require_float(
+        "oracle-bc-demand-max-weight",
+        args.oracle_bc_demand_max_weight,
+        minimum=1.0,
+        maximum=100.0,
     )
     if not math.isclose(
         args.control_dt_minutes,
@@ -1292,6 +1378,7 @@ def main() -> None:
         "oracle_behavior_cloning_learning_rate": args.oracle_bc_learning_rate,
         "oracle_behavior_cloning_minibatch": args.oracle_bc_minibatch,
         "oracle_behavior_cloning_target_mse": args.oracle_bc_target_mse,
+        "oracle_behavior_cloning_demand_max_weight": args.oracle_bc_demand_max_weight,
         "ppo_start_log_std_configured": args.ppo_start_log_std,
         "log_every_updates": args.log_every_updates,
         "torch_threads": args.torch_threads,
@@ -1424,6 +1511,7 @@ def main() -> None:
             "oracle_behavior_cloning_learning_rate": args.oracle_bc_learning_rate,
             "oracle_behavior_cloning_minibatch": args.oracle_bc_minibatch,
             "oracle_behavior_cloning_target_mse": args.oracle_bc_target_mse,
+            "oracle_behavior_cloning_demand_max_weight": args.oracle_bc_demand_max_weight,
             "ppo_start_log_std_configured": args.ppo_start_log_std,
             "log_every_updates": args.log_every_updates,
             "torch_threads": args.torch_threads,
@@ -1570,6 +1658,10 @@ def main() -> None:
         teacher_observations = np.concatenate(observation_parts, axis=0)
         teacher_targets = np.concatenate(target_parts, axis=0)
         teacher_rewards = np.concatenate(reward_parts, axis=0)
+        teacher_actor_weights = _oracle_actor_bc_sample_weights(
+            teacher_rewards,
+            max_weight=args.oracle_bc_demand_max_weight,
+        )
         bc_started = time.perf_counter()
         bc_stats.update(
             _behavior_clone_actor(
@@ -1583,6 +1675,7 @@ def main() -> None:
                 target_mse=args.oracle_bc_target_mse,
                 score_policy_cost=validate_policy_cost if agent.recurrent_enabled else None,
                 episode_lengths=teacher_episode_lengths,
+                sample_weights=teacher_actor_weights,
             )
         )
         bc_stats.update(
@@ -1603,6 +1696,12 @@ def main() -> None:
         bc_stats["teacher_mean_abs_action"] = float(np.mean(np.abs(teacher_targets)))
         bc_stats["teacher_nonzero_action_pct"] = float(
             np.mean(np.abs(teacher_targets) > 1e-6) * 100.0
+        )
+        bc_stats["teacher_demand_event_pct"] = float(
+            np.mean(np.abs(teacher_rewards[:, 1]) > 1e-12) * 100.0
+        )
+        bc_stats["teacher_demand_weighted_sample_pct"] = float(
+            np.mean(teacher_actor_weights > 1.0 + 1e-6) * 100.0
         )
         post_bc_cost = validate_policy_cost()
         use_bc = post_bc_cost < raw_initial_cost
@@ -1634,6 +1733,8 @@ def main() -> None:
         print(
             f"[train-ds] ORACLE TEACHER | {bc_stats['samples']} lessons | "
             f"actor MSE {bc_stats['initial_mse']:.5f}->{bc_stats['final_mse']:.5f} | "
+            f"weighted {bc_stats['initial_weighted_mse']:.5f}->{bc_stats['final_weighted_mse']:.5f} | "
+            f"peak-weight max {bc_stats['sample_weight_max']:.2f}x | "
             f"critic MSE {bc_stats['critic_initial_mse']:.3f}->{bc_stats['critic_final_mse']:.3f} | "
             f"raw {raw_initial_cost/1e6:.1f}M -> BC {post_bc_cost/1e6:.1f}M | "
             f"{'USE BC' if use_bc else 'KEEP RAW'}",

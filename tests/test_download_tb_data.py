@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from scripts.download_tb_data import BASE_DIR, _sensor_quality_issue
+from scripts.download_tb_data import BASE_DIR, _day_type_for_date, _sensor_quality_issue
 
 INTERVAL_MINUTES = 15
 SAMPLES_PER_DAY = 24 * 60 // INTERVAL_MINUTES
@@ -11,6 +11,14 @@ SAMPLES_PER_DAY = 24 * 60 // INTERVAL_MINUTES
 
 def test_downloader_resolves_repo_root_without_bess_import() -> None:
     assert BASE_DIR == Path(__file__).resolve().parents[1]
+
+
+def test_downloader_calendar_treats_saturday_as_working_and_sunday_as_weekend() -> None:
+    from datetime import date
+
+    assert _day_type_for_date(date(2026, 8, 29)) == "working"
+    assert _day_type_for_date(date(2026, 8, 30)) == "weekend"
+    assert _day_type_for_date(date(2026, 8, 31)) == "working"
 
 
 def test_sensor_quality_accepts_normal_factory_day() -> None:

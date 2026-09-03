@@ -69,6 +69,11 @@ _token: str | None = None
 _token_expires_at = 0.0
 
 
+def _day_type_for_date(calendar_day: date) -> str:
+    """Youngone production calendar: Sunday alone is weekend."""
+    return "weekend" if calendar_day.weekday() == 6 else "working"
+
+
 def _error_message(error: urllib.error.HTTPError) -> str:
     try:
         body = json.loads(error.read().decode("utf-8"))
@@ -558,7 +563,8 @@ def _build_days(
         days.append(
             {
                 "date": calendar_day,
-                "day_type": ("weekend" if calendar_day.weekday() >= 5 else "working"),
+                # TODO(DAY-TYPE): Youngone works on Saturday; Sunday alone is weekend.
+                "day_type": _day_type_for_date(calendar_day),
                 "load": load,
                 "pv": pv,
             }
