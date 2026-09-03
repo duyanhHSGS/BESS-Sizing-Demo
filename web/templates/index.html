@@ -3241,13 +3241,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           else dispatchSelectedPolicies.delete(policyName);
           await loadDispatchTraces();
           const selectedPolicy = dispatchPolicies.find((policy) => policy.name === policyName);
-          const selectedDays = dispatchPolicyTraces[policyName]?.days || [];
-          const hasEye6Trace = selectedDays.some(
-            (day) => Array.isArray(day.ppo_eye6_running_peak_kw),
-          );
-          if (checkbox.checked && selectedPolicy?.algo === "ppo" && !hasEye6Trace) {
-            // TODO(DISPATCH-EYE6): old saved traces predate Eye 6; refresh only the
-            // newly selected PPO instead of rerunning every selected fighter.
+          if (checkbox.checked && selectedPolicy?.algo === "ppo") {
+            // TODO(DISPATCH-EYE6): a saved trace may contain the old broken Eye 6
+            // carry-over. Always refresh the newly selected PPO under current
+            // billing-boundary semantics instead of trusting stale trace shape.
             await createDispatchRunFor([policyName]);
           }
         });

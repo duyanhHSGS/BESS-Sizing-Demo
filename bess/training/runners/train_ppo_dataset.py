@@ -99,6 +99,33 @@ def _action_mismatch_penalty_vnd(transition, *, timestep_hours: float, wear_vnd_
     return mismatch_kwh * wear_vnd_per_kwh
 
 
+def _control_reward_components_million_vnd(
+    transition,
+    *,
+    mismatch_penalty_vnd: float = 0.0,
+    mismatch_shaping_scale: float = 0.0,
+) -> tuple[float, float, float]:
+    """Return energy, demand, wear costs for one held PPO control decision.
+
+    The old IQ-60 mismatch penalty is folded into the wear-side learning target,
+    so E + D - W exactly reproduces the existing scalar PPO learning reward.
+    BrainEnv accounting itself remains untouched.
+    """
+    energy_vnd = sum(
+        result.electricity_energy_savings_vnd for result in transition.native_results
+    )
+    demand_vnd = sum(result.demand_savings_vnd for result in transition.native_results)
+    wear_vnd = sum(result.battery_wear_cost_vnd for result in transition.native_results)
+    wear_vnd += float(mismatch_shaping_scale) * float(mismatch_penalty_vnd)
+    # TODO(IQ-61): keep the mismatch term exactly at the pre-IQ-61 setting while
+    # testing critic decomposition; changing it would confound the experiment.
+    return (
+        energy_vnd / REWARD_SCALE_VND,
+        demand_vnd / REWARD_SCALE_VND,
+        wear_vnd / REWARD_SCALE_VND,
+    )
+
+
 def _load_ui_wear_cost(training_config_path: str | Path) -> float:
     config = json.loads(Path(training_config_path).read_text(encoding="utf-8"))
     if "battery_wear_cost" not in config:
@@ -203,7 +230,7 @@ def _collect_oracle_teacher_samples(
     battery_wear_cost: float,
     native_steps: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Replay Oracle dispatch and collect brain7 actions plus real rewards."""
+    """Replay Oracle dispatch and collect Brain7 actions plus real reward components."""
     if len(oracle_dispatch) != len(month.days):
         raise ValueError("Oracle dispatch day count must match the teacher month")
     env = make_brain_env(
@@ -215,7 +242,7 @@ def _collect_oracle_teacher_samples(
     observation = env.reset()
     observations: list[np.ndarray] = []
     targets: list[float] = []
-    rewards: list[float] = []
+    rewards: list[tuple[float, float, float]] = []
     cheap_steps = frozenset(int(step) for step in cfg.OFF)
 
     for day, dispatch in zip(month.days, oracle_dispatch, strict=True):
@@ -250,7 +277,7 @@ def _collect_oracle_teacher_samples(
                 charge_only_during_cheap_tariff=PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
                 cheap_tariff_steps=cheap_steps,
             )
-            rewards.append(transition.reward_million_vnd)
+            rewards.append(_control_reward_components_million_vnd(transition))
             if transition.next_observation is not None:
                 observation = transition.next_observation
 
@@ -417,8 +444,12 @@ def _behavior_clone_critic(
     """Warm-start the critic on Oracle-path returns and restore its best epoch."""
     if observations.ndim != 2 or observations.shape[1] != OBSERVATION_DIM:
         raise ValueError("Oracle critic observations must have shape (N, OBSERVATION_DIM)")
-    if rewards.ndim != 1 or len(rewards) != len(observations) or len(rewards) == 0:
-        raise ValueError("Oracle critic rewards must be one non-empty reward per observation")
+    expected_reward_shape = (len(observations), 3) if agent.decomposed_critic else (len(observations),)
+    if rewards.shape != expected_reward_shape or len(rewards) == 0:
+        raise ValueError(
+            "Oracle critic rewards must match the critic architecture: "
+            "(N, 3) energy/demand/wear for decomposed critics or (N,) for scalar critics"
+        )
     if not 0.0 <= gamma <= 1.0:
         raise ValueError("Oracle critic gamma must be in [0, 1]")
     if episode_lengths is None:
@@ -434,44 +465,46 @@ def _behavior_clone_critic(
 
     returns = np.empty_like(rewards, dtype=np.float32)
     for episode_start, episode_stop in episode_ranges:
-        running_return = 0.0
+        running_return = np.zeros(3, dtype=np.float32) if agent.decomposed_critic else 0.0
         for index in range(episode_stop - 1, episode_start - 1, -1):
-            running_return = float(rewards[index]) + gamma * running_return
+            running_return = rewards[index] + gamma * running_return
             returns[index] = running_return
 
     obs_t = torch.as_tensor(observations, dtype=torch.float32, device=agent.device)
     return_t = torch.as_tensor(returns, dtype=torch.float32, device=agent.device)
-    if agent.recurrent_enabled:
-        critic_parameters = [
-            *agent.net.critic_encoder.parameters(),
-            *agent.net.critic_gru.parameters(),
-            *agent.net.critic.parameters(),
-        ]
-    else:
-        critic_parameters = list(agent.net.critic.parameters())
+    critic_parameters = agent._critic_parameters()
     optimizer = torch.optim.Adam(critic_parameters, lr=learning_rate)
     rng = np.random.default_rng(seed)
 
     @torch.inference_mode()
-    def full_mse() -> float:
+    def full_prediction():
         if agent.recurrent_enabled:
-            prediction = torch.cat([
-                agent.net.value_sequence(obs_t[start:stop].unsqueeze(0), None)[0].squeeze(0)
-                for start, stop in episode_ranges
-            ])
-        else:
-            prediction = agent.net.value(obs_t)
-        return float(torch.mean((prediction - return_t) ** 2).cpu())
+            predictions = []
+            for start, stop in episode_ranges:
+                if agent.decomposed_critic:
+                    components, _ = agent.net.value_components_sequence(
+                        obs_t[start:stop].unsqueeze(0), None
+                    )
+                    predictions.append(torch.stack(components, dim=-1).squeeze(0))
+                else:
+                    prediction, _ = agent.net.value_sequence(
+                        obs_t[start:stop].unsqueeze(0), None
+                    )
+                    predictions.append(prediction.squeeze(0))
+            return torch.cat(predictions)
+        if agent.decomposed_critic:
+            return torch.stack(agent.net.value_components(obs_t), dim=-1)
+        return agent.net.value(obs_t)
+
+    @torch.inference_mode()
+    def full_mse() -> float:
+        return float(torch.mean((full_prediction() - return_t) ** 2).cpu())
 
     initial_mse = full_mse()
     epochs_completed = 0
     best_mse = initial_mse
     best_epoch = 0
-    critic_state_prefixes = (
-        ("critic_encoder.", "critic_gru.", "critic.")
-        if agent.recurrent_enabled
-        else ("critic.",)
-    )
+    critic_state_prefixes = agent.critic_state_prefixes()
     best_critic_state = {
         key: value.detach().clone()
         for key, value in agent.net.state_dict().items()
@@ -488,11 +521,18 @@ def _behavior_clone_critic(
                     agent.recurrent_sequence_length,
                 ):
                     stop = min(start + agent.recurrent_sequence_length, episode_stop)
-                    prediction, hidden = agent.net.value_sequence(
-                        obs_t[start:stop].unsqueeze(0),
-                        hidden,
-                    )
-                    prediction = prediction.squeeze(0)
+                    if agent.decomposed_critic:
+                        components, hidden = agent.net.value_components_sequence(
+                            obs_t[start:stop].unsqueeze(0),
+                            hidden,
+                        )
+                        prediction = torch.stack(components, dim=-1).squeeze(0)
+                    else:
+                        prediction, hidden = agent.net.value_sequence(
+                            obs_t[start:stop].unsqueeze(0),
+                            hidden,
+                        )
+                        prediction = prediction.squeeze(0)
                     loss = torch.mean((prediction - return_t[start:stop]) ** 2)
                     optimizer.zero_grad()
                     loss.backward()
@@ -506,7 +546,10 @@ def _behavior_clone_critic(
                     dtype=torch.long,
                     device=agent.device,
                 )
-                prediction = agent.net.value(obs_t[mb])
+                if agent.decomposed_critic:
+                    prediction = torch.stack(agent.net.value_components(obs_t[mb]), dim=-1)
+                else:
+                    prediction = agent.net.value(obs_t[mb])
                 loss = torch.mean((prediction - return_t[mb]) ** 2)
                 optimizer.zero_grad()
                 loss.backward()
@@ -530,16 +573,30 @@ def _behavior_clone_critic(
     agent.net.load_state_dict(current_state)
     final_mse = full_mse()
     agent._sync_collector()
-    return {
+    aggregate_returns = (
+        returns[:, 0] + returns[:, 1] - returns[:, 2]
+        if agent.decomposed_critic
+        else returns
+    )
+    stats = {
         "critic_epochs_completed": int(epochs_completed),
         "critic_initial_mse": initial_mse,
         "critic_final_mse": final_mse,
         "critic_last_epoch_mse": last_epoch_mse,
         "critic_best_epoch": int(best_epoch),
         "critic_best_mse": best_mse,
-        "critic_target_mean": float(np.mean(returns)),
-        "critic_target_std": float(np.std(returns)),
+        "critic_target_mean": float(np.mean(aggregate_returns)),
+        "critic_target_std": float(np.std(aggregate_returns)),
     }
+    if agent.decomposed_critic:
+        prediction = full_prediction().detach().cpu().numpy()
+        for component_index, name in enumerate(("energy", "demand", "wear")):
+            stats[f"critic_{name}_target_mean"] = float(np.mean(returns[:, component_index]))
+            stats[f"critic_{name}_target_std"] = float(np.std(returns[:, component_index]))
+            stats[f"critic_{name}_final_mse"] = float(
+                np.mean((prediction[:, component_index] - returns[:, component_index]) ** 2)
+            )
+    return stats
 
 
 def _initialize_champion(agent: PPOAgent, validate_cost, checkpoint_path: Path) -> float:
@@ -775,29 +832,18 @@ def _restore_reanchor_state(
 ) -> None:
     """Restore Champion policy while optionally carrying live critic homework forward."""
     live_critic_state = None
-    live_critic_encoder_state = None
-    live_critic_gru_state = None
     if preserve_critic:
+        critic_prefixes = agent.critic_state_prefixes()
         live_critic_state = {
             key: value.detach().clone()
-            for key, value in agent.net.critic.state_dict().items()
+            for key, value in agent.net.state_dict().items()
+            if key.startswith(critic_prefixes)
         }
-        if agent.recurrent_enabled:
-            live_critic_encoder_state = {
-                key: value.detach().clone()
-                for key, value in agent.net.critic_encoder.state_dict().items()
-            }
-            live_critic_gru_state = {
-                key: value.detach().clone()
-                for key, value in agent.net.critic_gru.state_dict().items()
-            }
     agent.restore_training_state(champion_state)
     if live_critic_state is not None:
-        agent.net.critic.load_state_dict(live_critic_state)
-        if live_critic_encoder_state is not None:
-            agent.net.critic_encoder.load_state_dict(live_critic_encoder_state)
-        if live_critic_gru_state is not None:
-            agent.net.critic_gru.load_state_dict(live_critic_gru_state)
+        restored_state = agent.net.state_dict()
+        restored_state.update(live_critic_state)
+        agent.net.load_state_dict(restored_state)
         agent._sync_collector()
     if reset_optimizer:
         agent.opt.state.clear()
@@ -1140,6 +1186,7 @@ def main() -> None:
         exploration_lr_multiplier=args.exploration_lr_multiplier,
         recurrent_enabled=args.recurrent_enabled,
         recurrent_sequence_length=args.recurrent_sequence_length,
+        decomposed_critic=True,
         soc_edge_log_std_penalty=args.soc_edge_log_std_penalty,
         actor_grad_clip=args.actor_grad_clip,
         critic_grad_clip=args.critic_grad_clip,
@@ -1178,11 +1225,9 @@ def main() -> None:
         "hidden_size": agent.hidden_size,
         "recurrent_enabled": agent.recurrent_enabled,
         "recurrent_sequence_length": agent.recurrent_sequence_length,
-        "policy_architecture": (
-            "brain7_separate_actor_critic_gru_v1"
-            if agent.recurrent_enabled
-            else "brain7_feedforward_mlp_v1"
-        ),
+        "decomposed_critic": agent.decomposed_critic,
+        "critic_components": ["energy", "demand", "wear"],
+        "policy_architecture": agent.policy_architecture_name(),
         "initial_log_std": agent.initial_log_std,
         "exploration_mode": "state_dependent_log_std_delta_soc_edge_v2",
         "exploration_hidden_size": agent.net.exploration_hidden_size,
@@ -1231,6 +1276,7 @@ def main() -> None:
         rollout_decisions,
         OBSERVATION_DIM,
         recurrent_hidden_size=agent.hidden_size if agent.recurrent_enabled else 0,
+        decomposed_rewards=True,
     )
 
     val_base = sum(
@@ -1318,11 +1364,9 @@ def main() -> None:
             "hidden_size": agent.hidden_size,
             "recurrent_enabled": agent.recurrent_enabled,
             "recurrent_sequence_length": agent.recurrent_sequence_length,
-            "policy_architecture": (
-                "brain7_separate_actor_critic_gru_v1"
-                if agent.recurrent_enabled
-                else "brain7_feedforward_mlp_v1"
-            ),
+            "decomposed_critic": agent.decomposed_critic,
+            "critic_components": ["energy", "demand", "wear"],
+            "policy_architecture": agent.policy_architecture_name(),
             "initial_log_std": agent.initial_log_std,
             "exploration_mode": "state_dependent_log_std_delta_soc_edge_v2",
             "exploration_hidden_size": agent.net.exploration_hidden_size,
@@ -1764,14 +1808,20 @@ def main() -> None:
             if battery_wear_cost > 0.0
             else 0.0
         )
-        # Keep the PPO action/log-prob pair exact. We shape only the learning
-        # reward so repeatedly requesting battery power that physics rejects is
-        # no longer free. Champion/test evaluation never includes this penalty.
-        reward = transition.reward_million_vnd - (
-            args.action_mismatch_shaping_scale * mismatch_penalty_vnd / REWARD_SCALE_VND
+        # Keep the PPO action/log-prob pair exact. IQ-61 changes only how the
+        # critic explains the same IQ-60 learning objective: energy + demand -
+        # (real wear + the already-established mismatch phantom wear).
+        reward_components = _control_reward_components_million_vnd(
+            transition,
+            mismatch_penalty_vnd=mismatch_penalty_vnd,
+            mismatch_shaping_scale=args.action_mismatch_shaping_scale,
         )
-        # TODO(IQ-60): keep hand-authored peak cookies out unless an unseen-bucket
-        # result proves they beat this real-money-only learning reward.
+        reward = reward_components[0] + reward_components[1] - reward_components[2]
+        # TODO(IQ-61): compare unseen-bucket economics against IQ-60 before
+        # keeping three-head critic decomposition as the generic PPO default.
+        value_components = agent.last_value_components
+        if value_components is None:
+            raise RuntimeError("PPO action collection omitted critic component values")
         actor_hidden, critic_hidden = agent.recurrent_rollout_inputs()
         buffer.add(
             obs,
@@ -1783,6 +1833,8 @@ def main() -> None:
             latent=latent,
             actor_hidden=actor_hidden,
             critic_hidden=critic_hidden,
+            reward_components=reward_components,
+            value_components=value_components,
         )
         steps += 1
         perf["decisions"] += 1
@@ -1827,9 +1879,16 @@ def main() -> None:
 
         perf["rollout"] += time.perf_counter() - rollout_started
         updates += 1
-        last_value = agent.estimate_value(obs)
+        last_value_components = agent.estimate_value_components(obs)
+        last_value = (
+            last_value_components[0] + last_value_components[1] - last_value_components[2]
+        )
         update_started = time.perf_counter()
-        update_stats = agent.update(buffer, 0.0 if done else last_value)
+        update_stats = agent.update(
+            buffer,
+            0.0 if done else last_value,
+            (0.0, 0.0, 0.0) if done else last_value_components,
+        )
         perf["update"] += time.perf_counter() - update_started
         soc_projection_pct = [
             rollout_soc_projected[index] / count * 100.0 if count else 0.0

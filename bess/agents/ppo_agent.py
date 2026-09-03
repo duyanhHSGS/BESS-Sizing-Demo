@@ -105,12 +105,23 @@ class ActorCritic(nn.Module):
         hidden_size: int = PPO_HIDDEN_SIZE,
         initial_log_std: float = PPO_INITIAL_LOG_STD,
         soc_edge_log_std_penalty: float = 0.0,
+        decomposed_critic: bool = False,
     ):
         super().__init__()
         self.obs_dim = int(obs_dim)
+        self.decomposed_critic = bool(decomposed_critic)
         self.soc_edge_log_std_penalty = float(soc_edge_log_std_penalty)
         self.actor = _mlp(obs_dim, 1, hidden=hidden_size)
+        # Keep the historical `critic` key as the energy/scalar head so old
+        # checkpoints stay loadable. Demand/wear heads exist only for the new
+        # generic-PPO decomposed-critic experiment.
         self.critic = _mlp(obs_dim, 1, hidden=hidden_size)
+        if self.decomposed_critic:
+            self.critic_demand = copy.deepcopy(self.critic)
+            self.critic_wear = copy.deepcopy(self.critic)
+            for head in (self.critic_demand, self.critic_wear):
+                nn.init.zeros_(head[-1].weight)
+                nn.init.zeros_(head[-1].bias)
         self.log_std = nn.Parameter(torch.full((1,), float(initial_log_std)))
 
         # IQ-29 adaptive exploration: keep the proven scalar log_std as the
@@ -140,8 +151,18 @@ class ActorCritic(nn.Module):
         mean = self.actor(obs)
         return torch.distributions.Normal(mean, self.effective_log_std(obs).exp())
 
+    def value_components(self, obs):
+        energy = self.critic(obs).squeeze(-1)
+        if not self.decomposed_critic:
+            zero = torch.zeros_like(energy)
+            return energy, zero, zero
+        demand = self.critic_demand(obs).squeeze(-1)
+        wear = self.critic_wear(obs).squeeze(-1)
+        return energy, demand, wear
+
     def value(self, obs):
-        return self.critic(obs).squeeze(-1)
+        energy, demand, wear = self.value_components(obs)
+        return energy + demand - wear
 
 
 class RecurrentActorCritic(nn.Module):
@@ -154,17 +175,29 @@ class RecurrentActorCritic(nn.Module):
         hidden_size: int = PPO_HIDDEN_SIZE,
         initial_log_std: float = PPO_INITIAL_LOG_STD,
         soc_edge_log_std_penalty: float = 0.0,
+        decomposed_critic: bool = False,
     ):
         super().__init__()
         self.obs_dim = int(obs_dim)
         self.hidden_size = int(hidden_size)
+        self.decomposed_critic = bool(decomposed_critic)
         self.soc_edge_log_std_penalty = float(soc_edge_log_std_penalty)
         self.actor_encoder = nn.Sequential(nn.Linear(obs_dim, hidden_size), nn.Tanh())
         self.actor_gru = nn.GRU(hidden_size, hidden_size, batch_first=True)
         self.actor = nn.Linear(hidden_size, 1)
+        # One recurrent critic memory, three economically distinct output heads.
+        # The shared GRU keeps rollout runtime tiny while preventing one scalar
+        # value target from mixing energy, monthly demand, and wear semantics.
         self.critic_encoder = nn.Sequential(nn.Linear(obs_dim, hidden_size), nn.Tanh())
         self.critic_gru = nn.GRU(hidden_size, hidden_size, batch_first=True)
         self.critic = nn.Linear(hidden_size, 1)
+        if self.decomposed_critic:
+            self.critic_demand = copy.deepcopy(self.critic)
+            self.critic_wear = copy.deepcopy(self.critic)
+            nn.init.zeros_(self.critic_demand.weight)
+            nn.init.zeros_(self.critic_demand.bias)
+            nn.init.zeros_(self.critic_wear.weight)
+            nn.init.zeros_(self.critic_wear.bias)
         self.log_std = nn.Parameter(torch.full((1,), float(initial_log_std)))
 
         self.exploration_hidden_size = max(8, int(hidden_size) // 4)
@@ -190,14 +223,24 @@ class RecurrentActorCritic(nn.Module):
         features, next_hidden = self.actor_gru(encoded, hidden)
         return self.actor(features), features, next_hidden
 
-    def critic_sequence(self, obs, hidden=None):
+    def critic_components_sequence(self, obs, hidden=None):
         if obs.ndim != 3:
             raise ValueError("recurrent critic expects observations shaped [batch, time, obs]")
         if hidden is None:
             hidden = self.zero_hidden(obs.shape[0], device=obs.device)
         encoded = self.critic_encoder(obs)
         features, next_hidden = self.critic_gru(encoded, hidden)
-        return self.critic(features).squeeze(-1), next_hidden
+        energy = self.critic(features).squeeze(-1)
+        if not self.decomposed_critic:
+            zero = torch.zeros_like(energy)
+            return (energy, zero, zero), next_hidden
+        demand = self.critic_demand(features).squeeze(-1)
+        wear = self.critic_wear(features).squeeze(-1)
+        return (energy, demand, wear), next_hidden
+
+    def critic_sequence(self, obs, hidden=None):
+        (energy, demand, wear), next_hidden = self.critic_components_sequence(obs, hidden)
+        return energy + demand - wear, next_hidden
 
     def effective_log_std(self, actor_features, obs):
         delta = self.log_std_delta(actor_features)
@@ -212,6 +255,9 @@ class RecurrentActorCritic(nn.Module):
         std = self.effective_log_std(features, obs).exp()
         return torch.distributions.Normal(mean, std), next_hidden
 
+    def value_components_sequence(self, obs, hidden=None):
+        return self.critic_components_sequence(obs, hidden)
+
     def value_sequence(self, obs, hidden=None):
         return self.critic_sequence(obs, hidden)
 
@@ -219,13 +265,24 @@ class RecurrentActorCritic(nn.Module):
         dist, next_hidden = self.dist_sequence(obs.unsqueeze(1), hidden)
         return torch.distributions.Normal(dist.loc[:, 0], dist.scale[:, 0]), next_hidden
 
+    def value_components_step(self, obs, hidden=None):
+        components, next_hidden = self.value_components_sequence(obs.unsqueeze(1), hidden)
+        return tuple(component[:, 0] for component in components), next_hidden
+
     def value_step(self, obs, hidden=None):
         value, next_hidden = self.value_sequence(obs.unsqueeze(1), hidden)
         return value[:, 0], next_hidden
 
 
 class RolloutBuffer:
-    def __init__(self, size: int, obs_dim: int, recurrent_hidden_size: int = 0):
+    def __init__(
+        self,
+        size: int,
+        obs_dim: int,
+        recurrent_hidden_size: int = 0,
+        *,
+        decomposed_rewards: bool = False,
+    ):
         self.obs = np.zeros((size, obs_dim), np.float32)
         self.act = np.zeros((size, 1), np.float32)
         self.latent = np.zeros((size, 1), np.float32)
@@ -233,6 +290,17 @@ class RolloutBuffer:
         self.rew = np.zeros(size, np.float32)
         self.val = np.zeros(size, np.float32)
         self.done = np.zeros(size, np.float32)
+        self.decomposed_rewards = bool(decomposed_rewards)
+        if self.decomposed_rewards:
+            self.rew_energy = np.zeros(size, np.float32)
+            self.rew_demand = np.zeros(size, np.float32)
+            self.rew_wear = np.zeros(size, np.float32)
+            self.val_energy = np.zeros(size, np.float32)
+            self.val_demand = np.zeros(size, np.float32)
+            self.val_wear = np.zeros(size, np.float32)
+        else:
+            self.rew_energy = self.rew_demand = self.rew_wear = None
+            self.val_energy = self.val_demand = self.val_wear = None
         self.recurrent_hidden_size = int(recurrent_hidden_size)
         self.actor_hidden = (
             np.zeros((size, self.recurrent_hidden_size), np.float32)
@@ -245,9 +313,40 @@ class RolloutBuffer:
         self.ptr = 0
         self.size = size
 
-    def add(self, o, a, lp, r, v, d, latent, actor_hidden=None, critic_hidden=None):
+    def add(
+        self,
+        o,
+        a,
+        lp,
+        r,
+        v,
+        d,
+        latent,
+        actor_hidden=None,
+        critic_hidden=None,
+        *,
+        reward_components=None,
+        value_components=None,
+    ):
         i = self.ptr
         self.obs[i], self.act[i], self.latent[i] = o, a, latent
+        if self.decomposed_rewards:
+            if reward_components is None or value_components is None:
+                raise ValueError(
+                    "decomposed rollout transition requires energy/demand/wear reward and value components"
+                )
+            reward_energy, reward_demand, reward_wear = reward_components
+            value_energy, value_demand, value_wear = value_components
+            self.rew_energy[i] = reward_energy
+            self.rew_demand[i] = reward_demand
+            self.rew_wear[i] = reward_wear
+            self.val_energy[i] = value_energy
+            self.val_demand[i] = value_demand
+            self.val_wear[i] = value_wear
+            # Derive the scalar compatibility views from components. This keeps
+            # the actor objective exactly E + D - W without a second arithmetic path.
+            r = reward_energy + reward_demand - reward_wear
+            v = value_energy + value_demand - value_wear
         self.logp[i], self.rew[i], self.val[i], self.done[i] = lp, r, v, d
         if self.recurrent_hidden_size > 0:
             if actor_hidden is None or critic_hidden is None:
@@ -313,6 +412,7 @@ class PPOAgent:
         soc_edge_log_std_penalty=PPO_SOC_EDGE_LOG_STD_PENALTY,
         recurrent_enabled=False,
         recurrent_sequence_length=PPO_RECURRENT_SEQUENCE_LENGTH,
+        decomposed_critic=False,
         actor_grad_clip=PPO_ACTOR_GRAD_CLIP,
         critic_grad_clip=PPO_CRITIC_GRAD_CLIP,
     ):
@@ -330,6 +430,7 @@ class PPOAgent:
         self.soc_edge_log_std_penalty = float(soc_edge_log_std_penalty)
         self.recurrent_enabled = bool(recurrent_enabled)
         self.recurrent_sequence_length = int(recurrent_sequence_length)
+        self.decomposed_critic = bool(decomposed_critic)
         if self.recurrent_sequence_length < 1:
             raise ValueError("recurrent_sequence_length must be >= 1")
         self.actor_grad_clip = float(actor_grad_clip)
@@ -355,6 +456,7 @@ class PPOAgent:
             hidden_size=self.hidden_size,
             initial_log_std=self.initial_log_std,
             soc_edge_log_std_penalty=self.soc_edge_log_std_penalty,
+            decomposed_critic=self.decomposed_critic,
         )
 
     def _actor_parameters(self):
@@ -373,13 +475,37 @@ class PPOAgent:
         ]
 
     def _critic_parameters(self):
-        if not self.recurrent_enabled:
-            return list(self.net.critic.parameters())
-        return [
-            *self.net.critic_encoder.parameters(),
-            *self.net.critic_gru.parameters(),
-            *self.net.critic.parameters(),
-        ]
+        parameters = []
+        if self.recurrent_enabled:
+            parameters.extend(self.net.critic_encoder.parameters())
+            parameters.extend(self.net.critic_gru.parameters())
+        parameters.extend(self.net.critic.parameters())
+        if self.decomposed_critic:
+            parameters.extend(self.net.critic_demand.parameters())
+            parameters.extend(self.net.critic_wear.parameters())
+        return list(parameters)
+
+    def critic_state_prefixes(self) -> tuple[str, ...]:
+        """State-dict prefixes owned by the critic, including all economic heads."""
+        prefixes = ["critic."]
+        if self.decomposed_critic:
+            prefixes.extend(("critic_demand.", "critic_wear."))
+        if self.recurrent_enabled:
+            prefixes.extend(("critic_encoder.", "critic_gru."))
+        return tuple(prefixes)
+
+    def policy_architecture_name(self) -> str:
+        if self.recurrent_enabled:
+            return (
+                "brain7_actor_gru_shared_critic_gru_3head_v2"
+                if self.decomposed_critic
+                else "brain7_separate_actor_critic_gru_v1"
+            )
+        return (
+            "brain7_feedforward_3head_critic_v2"
+            if self.decomposed_critic
+            else "brain7_feedforward_mlp_v1"
+        )
 
     def _build_optimizer(self):
         exploration_params = list(self.net.log_std_delta.parameters())
@@ -412,6 +538,7 @@ class PPOAgent:
         self._critic_hidden = None
         self.last_actor_hidden_input = None
         self.last_critic_hidden_input = None
+        self.last_value_components = None
 
     def _hidden_numpy(self, hidden):
         if hidden is None:
@@ -449,7 +576,7 @@ class PPOAgent:
                 o,
                 self._actor_hidden,
             )
-            value, self._critic_hidden = self.collector_net.value_step(
+            value_components, self._critic_hidden = self.collector_net.value_components_step(
                 o,
                 self._critic_hidden,
             )
@@ -457,7 +584,12 @@ class PPOAgent:
             self._critic_hidden = self._critic_hidden.detach()
         else:
             distribution = self.collector_net.dist(o)
-            value = self.collector_net.value(o)
+            value_components = self.collector_net.value_components(o)
+        energy_value, demand_value, wear_value = value_components
+        value = energy_value + demand_value - wear_value
+        self.last_value_components = tuple(
+            float(component.item()) for component in value_components
+        )
         action, log_probability, latent = _sample_squashed(
             distribution,
             deterministic=deterministic,
@@ -494,53 +626,169 @@ class PPOAgent:
         return float(action.item())
 
     @torch.inference_mode()
-    def estimate_value(self, obs: np.ndarray) -> float:
-        """Bootstrap value without advancing recurrent memory."""
+    def estimate_value_components(self, obs: np.ndarray) -> tuple[float, float, float]:
+        """Bootstrap economic values without advancing recurrent memory."""
         o = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
         if self.recurrent_enabled:
-            value, _ = self.collector_net.value_step(o, self._critic_hidden)
+            components, _ = self.collector_net.value_components_step(o, self._critic_hidden)
         else:
-            value = self.collector_net.value(o)
-        return float(value.item())
+            components = self.collector_net.value_components(o)
+        return tuple(float(component.item()) for component in components)
 
-    def _update_recurrent(self, buf: RolloutBuffer, last_val: float):
+    @torch.inference_mode()
+    def estimate_value(self, obs: np.ndarray) -> float:
+        """Bootstrap aggregate value without advancing recurrent memory."""
+        energy, demand, wear = self.estimate_value_components(obs)
+        return energy + demand - wear
+
+    def _prepare_rollout_targets(
+        self,
+        buf: RolloutBuffer,
+        last_val: float,
+        last_val_components: tuple[float, float, float] | None = None,
+    ):
+        """Build PPO advantages, keeping economic components separate until the actor sum."""
+        n = buf.ptr
+
+        def explained(target, prediction):
+            variance = float(np.var(target))
+            if variance <= 1e-12:
+                return 0.0
+            return 1.0 - float(np.var(target - prediction)) / variance
+
+        if not self.decomposed_critic:
+            adv = _gae_advantages(
+                buf.rew[:n],
+                buf.val[:n],
+                buf.done[:n],
+                last_val=last_val,
+                gamma=self.gamma,
+                lam=self.lam,
+            )
+            ret = adv + buf.val[:n]
+            raw_adv_mean = float(adv.mean())
+            raw_adv_std = float(adv.std())
+            stats = {
+                "advantage_mean_raw": raw_adv_mean,
+                "advantage_std_raw": raw_adv_std,
+                "return_mean": float(ret.mean()),
+                "return_std": float(ret.std()),
+                "reward_mean": float(buf.rew[:n].mean()),
+                "reward_std": float(buf.rew[:n].std()),
+                "explained_variance": explained(ret, buf.val[:n]),
+            }
+            return (
+                (adv - raw_adv_mean) / (raw_adv_std + 1e-8),
+                ret,
+                None,
+                stats,
+            )
+
+        if not buf.decomposed_rewards:
+            raise ValueError("decomposed critic requires a decomposed RolloutBuffer")
+        if last_val_components is None:
+            if abs(float(last_val)) > 1e-12:
+                raise ValueError(
+                    "non-terminal decomposed PPO update requires component bootstrap values"
+                )
+            last_val_components = (0.0, 0.0, 0.0)
+        last_energy, last_demand, last_wear = last_val_components
+        adv_energy = _gae_advantages(
+            buf.rew_energy[:n],
+            buf.val_energy[:n],
+            buf.done[:n],
+            last_val=last_energy,
+            gamma=self.gamma,
+            lam=self.lam,
+        )
+        adv_demand = _gae_advantages(
+            buf.rew_demand[:n],
+            buf.val_demand[:n],
+            buf.done[:n],
+            last_val=last_demand,
+            gamma=self.gamma,
+            lam=self.lam,
+        )
+        adv_wear = _gae_advantages(
+            buf.rew_wear[:n],
+            buf.val_wear[:n],
+            buf.done[:n],
+            last_val=last_wear,
+            gamma=self.gamma,
+            lam=self.lam,
+        )
+        ret_energy = adv_energy + buf.val_energy[:n]
+        ret_demand = adv_demand + buf.val_demand[:n]
+        ret_wear = adv_wear + buf.val_wear[:n]
+
+        # IQ-61: combine in raw million-VND units, normalize exactly once after
+        # the economic signs are applied. Never normalize heads independently.
+        adv = adv_energy + adv_demand - adv_wear
+        ret = ret_energy + ret_demand - ret_wear
+        value = buf.val_energy[:n] + buf.val_demand[:n] - buf.val_wear[:n]
+        raw_adv_mean = float(adv.mean())
+        raw_adv_std = float(adv.std())
+        stats = {
+            "advantage_mean_raw": raw_adv_mean,
+            "advantage_std_raw": raw_adv_std,
+            "return_mean": float(ret.mean()),
+            "return_std": float(ret.std()),
+            "reward_mean": float(buf.rew[:n].mean()),
+            "reward_std": float(buf.rew[:n].std()),
+            "explained_variance": explained(ret, value),
+            "energy_advantage_mean_raw": float(adv_energy.mean()),
+            "energy_advantage_std_raw": float(adv_energy.std()),
+            "demand_advantage_mean_raw": float(adv_demand.mean()),
+            "demand_advantage_std_raw": float(adv_demand.std()),
+            "wear_advantage_mean_raw": float(adv_wear.mean()),
+            "wear_advantage_std_raw": float(adv_wear.std()),
+            "energy_explained_variance": explained(ret_energy, buf.val_energy[:n]),
+            "demand_explained_variance": explained(ret_demand, buf.val_demand[:n]),
+            "wear_explained_variance": explained(ret_wear, buf.val_wear[:n]),
+        }
+        # TODO(IQ-61): keep these heads only if unseen-bucket economics improve;
+        # per-head EV is diagnostic, not a Champion-selection objective.
+        return (
+            (adv - raw_adv_mean) / (raw_adv_std + 1e-8),
+            ret,
+            (ret_energy, ret_demand, ret_wear),
+            stats,
+        )
+
+    def _update_recurrent(
+        self,
+        buf: RolloutBuffer,
+        last_val: float,
+        last_val_components: tuple[float, float, float] | None = None,
+    ):
         n = buf.ptr
         if n <= 0:
             raise ValueError("PPO update requires at least one rollout transition")
         if buf.actor_hidden is None or buf.critic_hidden is None:
             raise ValueError("recurrent PPO requires hidden states in the rollout buffer")
 
-        adv = _gae_advantages(
-            buf.rew[:n],
-            buf.val[:n],
-            buf.done[:n],
-            last_val=last_val,
-            gamma=self.gamma,
-            lam=self.lam,
+        adv, ret, component_returns, rollout_stats = self._prepare_rollout_targets(
+            buf,
+            last_val,
+            last_val_components,
         )
-        ret = adv + buf.val[:n]
-        raw_adv_mean = float(adv.mean())
-        raw_adv_std = float(adv.std())
-        ret_mean = float(ret.mean())
-        ret_std = float(ret.std())
-        reward_mean = float(buf.rew[:n].mean())
-        reward_std = float(buf.rew[:n].std())
-        return_variance = float(np.var(ret))
-        explained_variance = (
-            1.0 - float(np.var(ret - buf.val[:n])) / return_variance
-            if return_variance > 1e-12
-            else 0.0
-        )
-        adv = (adv - raw_adv_mean) / (raw_adv_std + 1e-8)
 
         obs = torch.as_tensor(buf.obs[:n], device=self.device)
         latent = torch.as_tensor(buf.latent[:n], device=self.device)
         logp_old = torch.as_tensor(buf.logp[:n], device=self.device)
         adv_t = torch.as_tensor(adv, device=self.device)
         ret_t = torch.as_tensor(ret, device=self.device)
+        component_ret_t = (
+            tuple(torch.as_tensor(values, device=self.device) for values in component_returns)
+            if component_returns is not None
+            else None
+        )
 
         pi_losses = []
         value_losses = []
+        energy_value_losses = []
+        demand_value_losses = []
+        wear_value_losses = []
         entropies = []
         approx_kls = []
         clip_fractions = []
@@ -591,17 +839,27 @@ class PPOAgent:
                         device=self.device,
                     ).unsqueeze(0)
                     dist_batch, _ = self.net.dist_sequence(obs_batch, actor_hidden)
-                    value_batch, _ = self.net.value_sequence(obs_batch, critic_hidden)
+                    component_batch, _ = self.net.value_components_sequence(
+                        obs_batch,
+                        critic_hidden,
+                    )
                     dist = torch.distributions.Normal(
                         dist_batch.loc.reshape(-1, 1),
                         dist_batch.scale.reshape(-1, 1),
                     )
-                    values = value_batch.reshape(-1)
+                    value_components = tuple(
+                        component.reshape(-1) for component in component_batch
+                    )
+                    values = (
+                        value_components[0]
+                        + value_components[1]
+                        - value_components[2]
+                    )
                 else:
                     # Only the final partial chunk can reach this path.
                     loc_parts = []
                     scale_parts = []
-                    value_parts = []
+                    value_component_parts = [[], [], []]
                     for start, stop in chunk_ranges:
                         obs_chunk = obs[start:stop].unsqueeze(0)
                         actor_hidden = torch.as_tensor(
@@ -615,15 +873,28 @@ class PPOAgent:
                             device=self.device,
                         ).view(1, 1, self.hidden_size)
                         dist_chunk, _ = self.net.dist_sequence(obs_chunk, actor_hidden)
-                        value_chunk, _ = self.net.value_sequence(obs_chunk, critic_hidden)
+                        component_chunk, _ = self.net.value_components_sequence(
+                            obs_chunk,
+                            critic_hidden,
+                        )
                         loc_parts.append(dist_chunk.loc.reshape(-1, 1))
                         scale_parts.append(dist_chunk.scale.reshape(-1, 1))
-                        value_parts.append(value_chunk.reshape(-1))
+                        for component_index, component in enumerate(component_chunk):
+                            value_component_parts[component_index].append(
+                                component.reshape(-1)
+                            )
                     dist = torch.distributions.Normal(
                         torch.cat(loc_parts, dim=0),
                         torch.cat(scale_parts, dim=0),
                     )
-                    values = torch.cat(value_parts, dim=0)
+                    value_components = tuple(
+                        torch.cat(parts, dim=0) for parts in value_component_parts
+                    )
+                    values = (
+                        value_components[0]
+                        + value_components[1]
+                        - value_components[2]
+                    )
 
                 mb = torch.cat(index_parts)
                 logp = _squashed_log_prob_from_latent(dist, latent[mb])
@@ -632,7 +903,26 @@ class PPOAgent:
                 surr1 = ratio * adv_t[mb]
                 surr2 = torch.clamp(ratio, 1 - self.clip, 1 + self.clip) * adv_t[mb]
                 pi_loss = -torch.min(surr1, surr2).mean()
-                v_loss = _critic_value_loss(values, ret_t[mb])
+                if component_ret_t is None:
+                    v_loss_energy = _critic_value_loss(values, ret_t[mb])
+                    v_loss_demand = torch.zeros((), device=self.device)
+                    v_loss_wear = torch.zeros((), device=self.device)
+                    v_loss = v_loss_energy
+                else:
+                    v_loss_energy = _critic_value_loss(
+                        value_components[0],
+                        component_ret_t[0][mb],
+                    )
+                    v_loss_demand = _critic_value_loss(
+                        value_components[1],
+                        component_ret_t[1][mb],
+                    )
+                    v_loss_wear = _critic_value_loss(
+                        value_components[2],
+                        component_ret_t[2][mb],
+                    )
+                    # Keep nominal critic-loss scale close to the scalar baseline.
+                    v_loss = (v_loss_energy + v_loss_demand + v_loss_wear) / 3.0
                 _, entropy_log_probability, _ = _sample_squashed(
                     dist,
                     deterministic=False,
@@ -655,6 +945,9 @@ class PPOAgent:
 
                 pi_losses.append(float(pi_loss.detach().cpu()))
                 value_losses.append(float(v_loss.detach().cpu()))
+                energy_value_losses.append(float(v_loss_energy.detach().cpu()))
+                demand_value_losses.append(float(v_loss_demand.detach().cpu()))
+                wear_value_losses.append(float(v_loss_wear.detach().cpu()))
                 entropies.append(float(ent.detach().cpu()))
                 kl_value = float(approx_kl.detach().cpu())
                 approx_kls.append(kl_value)
@@ -713,19 +1006,16 @@ class PPOAgent:
         self.last_update_stats = {
             "policy_loss": _mean(pi_losses),
             "value_loss": _mean(value_losses),
+            "energy_value_loss": _mean(energy_value_losses),
+            "demand_value_loss": _mean(demand_value_losses),
+            "wear_value_loss": _mean(wear_value_losses),
             "entropy": _mean(entropies),
             "approx_kl": _mean(approx_kls),
             "clip_fraction": _mean(clip_fractions),
             "grad_norm": _mean(grad_norms),
             "actor_grad_norm": _mean(actor_grad_norms),
             "critic_grad_norm": _mean(critic_grad_norms),
-            "advantage_mean_raw": raw_adv_mean,
-            "advantage_std_raw": raw_adv_std,
-            "return_mean": ret_mean,
-            "return_std": ret_std,
-            "reward_mean": reward_mean,
-            "reward_std": reward_std,
-            "explained_variance": explained_variance,
+            **rollout_stats,
             "log_std": float(self.net.log_std.detach().cpu().item()),
             "recurrent_sequence_length": int(sequence_length),
             "recurrent_chunk_count": len(chunk_starts),
@@ -738,59 +1028,50 @@ class PPOAgent:
         return dict(self.last_update_stats)
 
     # ------------------------------------------------------------------
-    def update(self, buf: RolloutBuffer, last_val: float):
+    def update(
+        self,
+        buf: RolloutBuffer,
+        last_val: float,
+        last_val_components: tuple[float, float, float] | None = None,
+    ):
         if self.recurrent_enabled:
-            return self._update_recurrent(buf, last_val)
+            return self._update_recurrent(buf, last_val, last_val_components)
         n = buf.ptr
         if n <= 0:
             raise ValueError("PPO update requires at least one rollout transition")
 
-        # GAE must mask the bootstrap with the *current transition's* done flag.
-        # Using the previous loop iteration's flag leaks value/advantage across
-        # episode boundaries whenever one rollout contains multiple episodes.
-        adv = _gae_advantages(
-            buf.rew[:n],
-            buf.val[:n],
-            buf.done[:n],
-            last_val=last_val,
-            gamma=self.gamma,
-            lam=self.lam,
+        # GAE still masks with each transition's own done flag; decomposed mode
+        # applies the same boundary independently to energy, demand, and wear.
+        adv, ret, component_returns, rollout_stats = self._prepare_rollout_targets(
+            buf,
+            last_val,
+            last_val_components,
         )
-        ret = adv + buf.val[:n]
-        raw_adv_mean = float(adv.mean())
-        raw_adv_std = float(adv.std())
-        ret_mean = float(ret.mean())
-        ret_std = float(ret.std())
-        reward_mean = float(buf.rew[:n].mean())
-        reward_std = float(buf.rew[:n].std())
-        return_variance = float(np.var(ret))
-        explained_variance = (
-            1.0 - float(np.var(ret - buf.val[:n])) / return_variance
-            if return_variance > 1e-12
-            else 0.0
-        )
-        adv = (adv - raw_adv_mean) / (raw_adv_std + 1e-8)
 
         obs = torch.as_tensor(buf.obs[:n], device=self.device)
         latent = torch.as_tensor(buf.latent[:n], device=self.device)
         logp_old = torch.as_tensor(buf.logp[:n], device=self.device)
         adv_t = torch.as_tensor(adv, device=self.device)
         ret_t = torch.as_tensor(ret, device=self.device)
+        component_ret_t = (
+            tuple(torch.as_tensor(values, device=self.device) for values in component_returns)
+            if component_returns is not None
+            else None
+        )
 
         pi_losses = []
         value_losses = []
+        energy_value_losses = []
+        demand_value_losses = []
+        wear_value_losses = []
         entropies = []
         approx_kls = []
         clip_fractions = []
         grad_norms = []
         actor_grad_norms = []
         critic_grad_norms = []
-        actor_params = [
-            *self.net.actor.parameters(),
-            self.net.log_std,
-            *self.net.log_std_delta.parameters(),
-        ]
-        critic_params = list(self.net.critic.parameters())
+        actor_params = self._actor_parameters()
+        critic_params = self._critic_parameters()
         epochs_completed = 0
         early_stopped = False
 
@@ -809,7 +1090,27 @@ class PPOAgent:
                 surr1 = ratio * adv_t[mb]
                 surr2 = torch.clamp(ratio, 1 - self.clip, 1 + self.clip) * adv_t[mb]
                 pi_loss = -torch.min(surr1, surr2).mean()
-                v_loss = _critic_value_loss(self.net.value(obs[mb]), ret_t[mb])
+                value_components = self.net.value_components(obs[mb])
+                values = value_components[0] + value_components[1] - value_components[2]
+                if component_ret_t is None:
+                    v_loss_energy = _critic_value_loss(values, ret_t[mb])
+                    v_loss_demand = torch.zeros((), device=self.device)
+                    v_loss_wear = torch.zeros((), device=self.device)
+                    v_loss = v_loss_energy
+                else:
+                    v_loss_energy = _critic_value_loss(
+                        value_components[0],
+                        component_ret_t[0][mb],
+                    )
+                    v_loss_demand = _critic_value_loss(
+                        value_components[1],
+                        component_ret_t[1][mb],
+                    )
+                    v_loss_wear = _critic_value_loss(
+                        value_components[2],
+                        component_ret_t[2][mb],
+                    )
+                    v_loss = (v_loss_energy + v_loss_demand + v_loss_wear) / 3.0
                 _, entropy_log_probability, _ = _sample_squashed(
                     dist,
                     deterministic=False,
@@ -832,6 +1133,9 @@ class PPOAgent:
 
                 pi_losses.append(float(pi_loss.detach().cpu()))
                 value_losses.append(float(v_loss.detach().cpu()))
+                energy_value_losses.append(float(v_loss_energy.detach().cpu()))
+                demand_value_losses.append(float(v_loss_demand.detach().cpu()))
+                wear_value_losses.append(float(v_loss_wear.detach().cpu()))
                 entropies.append(float(ent.detach().cpu()))
                 kl_value = float(approx_kl.detach().cpu())
                 approx_kls.append(kl_value)
@@ -880,19 +1184,16 @@ class PPOAgent:
         self.last_update_stats = {
             "policy_loss": _mean(pi_losses),
             "value_loss": _mean(value_losses),
+            "energy_value_loss": _mean(energy_value_losses),
+            "demand_value_loss": _mean(demand_value_losses),
+            "wear_value_loss": _mean(wear_value_losses),
             "entropy": _mean(entropies),
             "approx_kl": _mean(approx_kls),
             "clip_fraction": _mean(clip_fractions),
             "grad_norm": _mean(grad_norms),
             "actor_grad_norm": _mean(actor_grad_norms),
             "critic_grad_norm": _mean(critic_grad_norms),
-            "advantage_mean_raw": raw_adv_mean,
-            "advantage_std_raw": raw_adv_std,
-            "return_mean": ret_mean,
-            "return_std": ret_std,
-            "reward_mean": reward_mean,
-            "reward_std": reward_std,
-            "explained_variance": explained_variance,
+            **rollout_stats,
             "log_std": float(self.net.log_std.detach().cpu().item()),
             **exploration_stats,
             "epochs_completed": epochs_completed,
@@ -916,11 +1217,11 @@ class PPOAgent:
             "initial_log_std": self.initial_log_std,
             "recurrent_enabled": self.recurrent_enabled,
             "recurrent_sequence_length": self.recurrent_sequence_length,
-            "policy_architecture": (
-                "brain7_separate_actor_critic_gru_v1"
-                if self.recurrent_enabled
-                else "brain7_feedforward_mlp_v1"
+            "decomposed_critic": self.decomposed_critic,
+            "critic_components": (
+                ["energy", "demand", "wear"] if self.decomposed_critic else ["total"]
             ),
+            "policy_architecture": self.policy_architecture_name(),
             "exploration_mode": "state_dependent_log_std_delta_soc_edge_v2",
             "exploration_hidden_size": self.net.exploration_hidden_size,
             "exploration_lr_multiplier": self.exploration_lr_multiplier,
@@ -936,11 +1237,14 @@ class PPOAgent:
         hidden_size: int,
         *,
         recurrent_enabled: bool | None = None,
+        decomposed_critic: bool | None = None,
     ) -> None:
         """Recreate actor/critic shells before loading a different checkpoint architecture."""
         self.hidden_size = int(hidden_size)
         if recurrent_enabled is not None:
             self.recurrent_enabled = bool(recurrent_enabled)
+        if decomposed_critic is not None:
+            self.decomposed_critic = bool(decomposed_critic)
         self.net = self._make_network().to(self.device)
         self.opt = self._build_optimizer()
         with torch.random.fork_rng(devices=[]):
@@ -960,6 +1264,13 @@ class PPOAgent:
             self.meta = {}
 
         checkpoint_recurrent = bool(self.meta.get("recurrent_enabled", False))
+        inferred_decomposed_critic = any(
+            key.startswith(("critic_demand.", "critic_wear."))
+            for key in state_dict
+        )
+        checkpoint_decomposed_critic = bool(
+            self.meta.get("decomposed_critic", inferred_decomposed_critic)
+        )
         actor_input = state_dict.get("actor.0.weight")
         inferred_hidden_size = (
             int(actor_input.shape[0])
@@ -987,10 +1298,12 @@ class PPOAgent:
         if (
             checkpoint_hidden_size != self.hidden_size
             or checkpoint_recurrent != self.recurrent_enabled
+            or checkpoint_decomposed_critic != self.decomposed_critic
         ):
             self._rebuild_network_for_hidden_size(
                 checkpoint_hidden_size,
                 recurrent_enabled=checkpoint_recurrent,
+                decomposed_critic=checkpoint_decomposed_critic,
             )
 
         # Pre-IQ-29 checkpoints have no adaptive-exploration head.  Seed those

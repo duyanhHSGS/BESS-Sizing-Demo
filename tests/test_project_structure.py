@@ -76,6 +76,8 @@ def test_dispatch_viewer_exposes_selected_ppo_eye6_with_distinct_style() -> None
     assert "series.eye6 ? 4 : 2" in template
     assert "Boolean(series.eye6)" in template
     assert "Number(Boolean(left.eye6)) - Number(Boolean(right.eye6))" in template
+    assert 'if (checkbox.checked && selectedPolicy?.algo === "ppo")' in template
+    assert "old broken Eye 6" in template
     assert "await createDispatchRunFor([policyName]);" in template
     assert "Exact PPO Eye 6 running-peak trace visible" in template
 
