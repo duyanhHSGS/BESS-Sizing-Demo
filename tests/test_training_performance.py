@@ -107,7 +107,7 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
             pv=np.maximum(0.0, 300.0 * np.sin(np.pi * x / steps)),
             day_type="working",
             weather="test",
-            day_index=0,
+            day_index=1,
             date_iso="2026-01-01",
         )
         month = MonthData(days=[day], source="test")
@@ -157,7 +157,7 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
             pv=np.zeros(steps, dtype=np.float64),
             day_type="working",
             weather="test",
-            day_index=0,
+            day_index=1,
             date_iso="2026-01-01",
         )
         month = MonthData(days=[day], source="soc-min-start-test")
@@ -195,7 +195,7 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
             pv=np.zeros(steps, dtype=np.float64),
             day_type="working",
             weather="test",
-            day_index=0,
+            day_index=1,
             date_iso="2026-01-01",
         )
         month = MonthData(days=[day], source="iq57-cheap-charge-test")
@@ -239,7 +239,7 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
             pv=np.zeros(steps, dtype=np.float64),
             day_type="working",
             weather="test",
-            day_index=0,
+            day_index=1,
             date_iso="2026-01-01",
         )
         month = MonthData(days=[day], source="iq57-oracle-filter-test")
@@ -259,7 +259,8 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         )
 
         self.assertEqual(observations.shape, (48, OBSERVATION_DIM))
-        self.assertEqual(rewards.shape, (48,))
+        self.assertEqual(rewards.shape, (48, 3))
+        self.assertTrue(np.isfinite(rewards).all())
         self.assertTrue((targets[:12] < 0.0).all())
         self.assertTrue((targets[12:] == 0.0).all())
 
@@ -273,7 +274,7 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
             pv=np.zeros(steps, dtype=np.float64),
             day_type="working",
             weather="test",
-            day_index=0,
+            day_index=1,
             date_iso="2026-01-01",
         )
         month = MonthData(days=[day], source="legacy-charge-test")
