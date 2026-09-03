@@ -2925,16 +2925,23 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     }
 
     function dispatchSeriesStyles() {
-      const styles = seriesStyles.map((series) => ({ ...series }));
+      // TODO(DISPATCH-METER-VIEW): Keep Dispatch grid curves meter-only; raw/native grid and battery-power traces stay out of this viewer.
+      const dispatchBaseSeriesKeys = new Set([
+        "load", "pv", "rolling_grid", "monthly_peak", "oracle_peak", "oracle_rolling_grid", "oracle_soc",
+      ]);
+      const dispatchMeterLabels = {
+        rolling_grid: "Daily 30-minute meter grid",
+        oracle_rolling_grid: "Oracle 30-minute meter grid",
+      };
+      const styles = seriesStyles
+        .filter((series) => dispatchBaseSeriesKeys.has(series.key))
+        .map((series) => ({ ...series, label: dispatchMeterLabels[series.key] || series.label }));
       selectedPolicyNames().forEach((policyName, policyIndex) => {
         const label = policyPrefix(policyName);
         const colors = dispatchPolicyMetricColors(policyIndex);
         styles.push(
           { key: `policy:${policyName}:peak`, label: `${label} monthly DEADLY peak`, color: colors.peak, policyName, policyReference: true },
-          { key: `policy:${policyName}:grid`, label: `${label} grid after battery`, color: colors.grid, policyName, policyKey: "grid" },
-          { key: `policy:${policyName}:rolling_grid`, label: `${label} 30-minute rolling grid`, color: colors.rolling_grid, policyName, policyKey: "rolling_grid" },
-          { key: `policy:${policyName}:discharge`, label: `${label} battery discharge`, color: colors.discharge, policyName, policyKey: "discharge" },
-          { key: `policy:${policyName}:charge`, label: `${label} battery charge`, color: colors.charge, policyName, policyCharge: true },
+          { key: `policy:${policyName}:rolling_grid`, label: `${label} 30-minute meter grid`, color: colors.rolling_grid, policyName, policyKey: "rolling_grid" },
           { key: `policy:${policyName}:soc`, label: `${label} SOC %`, color: colors.soc, policyName, policySoc: true },
         );
         const policy = dispatchPolicies.find((candidate) => candidate.name === policyName);

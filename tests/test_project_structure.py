@@ -82,6 +82,20 @@ def test_dispatch_viewer_exposes_selected_ppo_eye6_with_distinct_style() -> None
     assert "Exact PPO Eye 6 running-peak trace visible" in template
 
 
+def test_dispatch_viewer_keeps_grid_display_meter_only() -> None:
+    template = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+    block = template.split("function dispatchSeriesStyles() {", 1)[1].split("function policyDay(", 1)[0]
+
+    assert '"load", "pv", "rolling_grid", "monthly_peak", "oracle_peak", "oracle_rolling_grid", "oracle_soc"' in block
+    assert 'rolling_grid: "Daily 30-minute meter grid"' in block
+    assert 'oracle_rolling_grid: "Oracle 30-minute meter grid"' in block
+    assert 'label: `${label} 30-minute meter grid`' in block
+    assert 'policyKey: "grid"' not in block
+    assert 'policyKey: "discharge"' not in block
+    assert "policyCharge: true" not in block
+    assert "DISPATCH-METER-VIEW" in block
+
+
 def test_training_ui_allows_ppo_full_dataset_fit_test() -> None:
     template = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
     assert 'item.style.display = "none";' in template

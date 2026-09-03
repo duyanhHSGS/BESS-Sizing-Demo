@@ -445,12 +445,29 @@ def _behavior_clone_critic(
     """Warm-start the critic on Oracle-path returns and restore its best epoch."""
     if observations.ndim != 2 or observations.shape[1] != OBSERVATION_DIM:
         raise ValueError("Oracle critic observations must have shape (N, OBSERVATION_DIM)")
-    expected_reward_shape = (len(observations), 3) if agent.decomposed_critic else (len(observations),)
-    if rewards.shape != expected_reward_shape or len(rewards) == 0:
-        raise ValueError(
-            "Oracle critic rewards must match the critic architecture: "
-            "(N, 3) energy/demand/wear for decomposed critics or (N,) for scalar critics"
-        )
+    if len(rewards) == 0:
+        raise ValueError("Oracle critic rewards must not be empty")
+    if agent.decomposed_critic:
+        if rewards.shape != (len(observations), 3):
+            raise ValueError(
+                "decomposed Oracle critic rewards must have shape (N, 3) "
+                "for energy/demand/wear"
+            )
+        critic_rewards = rewards
+    else:
+        if rewards.shape == (len(observations), 3):
+            # IQ-62 compatibility: IQ-61 made the Oracle replay return economic
+            # components. The restored scalar critic must consume the exact old
+            # total objective rather than rejecting those richer teacher samples.
+            # TODO(IQ-62): keep this adapter while scalar and decomposed checkpoints coexist.
+            critic_rewards = rewards[:, 0] + rewards[:, 1] - rewards[:, 2]
+        elif rewards.shape == (len(observations),):
+            critic_rewards = rewards
+        else:
+            raise ValueError(
+                "scalar Oracle critic rewards must have shape (N,) or (N, 3) "
+                "energy/demand/wear components"
+            )
     if not 0.0 <= gamma <= 1.0:
         raise ValueError("Oracle critic gamma must be in [0, 1]")
     if episode_lengths is None:
@@ -464,11 +481,11 @@ def _behavior_clone_critic(
         episode_ranges.append((episode_start, episode_stop))
         episode_start = episode_stop
 
-    returns = np.empty_like(rewards, dtype=np.float32)
+    returns = np.empty_like(critic_rewards, dtype=np.float32)
     for episode_start, episode_stop in episode_ranges:
         running_return = np.zeros(3, dtype=np.float32) if agent.decomposed_critic else 0.0
         for index in range(episode_stop - 1, episode_start - 1, -1):
-            running_return = rewards[index] + gamma * running_return
+            running_return = critic_rewards[index] + gamma * running_return
             returns[index] = running_return
 
     obs_t = torch.as_tensor(observations, dtype=torch.float32, device=agent.device)

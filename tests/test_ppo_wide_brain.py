@@ -4,8 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from bess.agents.ppo_agent import PPOAgent
 from bess.core.settings import PPO_DECOMPOSED_CRITIC, PPO_HIDDEN_SIZE
+from bess.training.runners.train_ppo_dataset import _behavior_clone_critic
 
 
 class PPOWideBrainTests(unittest.TestCase):
@@ -85,6 +88,40 @@ class PPOWideBrainTests(unittest.TestCase):
 
         self.assertGreater(wide_count, old_count * 3)
         self.assertLess(wide_count, old_count * 5)
+
+    def test_scalar_oracle_critic_accepts_iq61_component_rewards(self):
+        agent = PPOAgent(
+            obs_dim=7,
+            device="cpu",
+            recurrent_enabled=False,
+            hidden_size=128,
+            decomposed_critic=False,
+        )
+        observations = np.zeros((4, 7), dtype=np.float32)
+        component_rewards = np.asarray(
+            [
+                [1.0, 10.0, 2.0],
+                [2.0, 20.0, 3.0],
+                [4.0, 40.0, 5.0],
+                [8.0, 80.0, 6.0],
+            ],
+            dtype=np.float32,
+        )
+        # Per-step scalar rewards are E + D - W = [9, 19, 39, 82]. With
+        # gamma=1 and two 2-step episodes, returns are [28, 19, 121, 82].
+        stats = _behavior_clone_critic(
+            agent,
+            observations,
+            component_rewards,
+            gamma=1.0,
+            seed=0,
+            max_epochs=0,
+            episode_lengths=[2, 2],
+        )
+
+        expected_returns = np.asarray([28.0, 19.0, 121.0, 82.0], dtype=np.float32)
+        self.assertAlmostEqual(stats["critic_target_mean"], float(expected_returns.mean()), places=6)
+        self.assertAlmostEqual(stats["critic_target_std"], float(expected_returns.std()), places=6)
 
 
 if __name__ == "__main__":
