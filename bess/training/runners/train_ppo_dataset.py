@@ -36,6 +36,7 @@ from bess.core.settings import (
     PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
     PPO_CLIP,
     PPO_CRITIC_GRAD_CLIP,
+    PPO_DECOMPOSED_CRITIC,
     PPO_ENTROPY_COEF,
     PPO_EXPLORATION_LR_MULTIPLIER,
     PPO_FINE_TUNE_EPOCHS,
@@ -1186,7 +1187,9 @@ def main() -> None:
         exploration_lr_multiplier=args.exploration_lr_multiplier,
         recurrent_enabled=args.recurrent_enabled,
         recurrent_sequence_length=args.recurrent_sequence_length,
-        decomposed_critic=True,
+        # IQ-62: return to IQ-60's scalar critic; only hidden width changes.
+        # TODO(IQ-62): do not combine width and critic decomposition in one run.
+        decomposed_critic=PPO_DECOMPOSED_CRITIC,
         soc_edge_log_std_penalty=args.soc_edge_log_std_penalty,
         actor_grad_clip=args.actor_grad_clip,
         critic_grad_clip=args.critic_grad_clip,
@@ -1226,7 +1229,9 @@ def main() -> None:
         "recurrent_enabled": agent.recurrent_enabled,
         "recurrent_sequence_length": agent.recurrent_sequence_length,
         "decomposed_critic": agent.decomposed_critic,
-        "critic_components": ["energy", "demand", "wear"],
+        "critic_components": (
+            ["energy", "demand", "wear"] if agent.decomposed_critic else ["total"]
+        ),
         "policy_architecture": agent.policy_architecture_name(),
         "initial_log_std": agent.initial_log_std,
         "exploration_mode": "state_dependent_log_std_delta_soc_edge_v2",
@@ -1365,7 +1370,9 @@ def main() -> None:
             "recurrent_enabled": agent.recurrent_enabled,
             "recurrent_sequence_length": agent.recurrent_sequence_length,
             "decomposed_critic": agent.decomposed_critic,
-            "critic_components": ["energy", "demand", "wear"],
+            "critic_components": (
+                ["energy", "demand", "wear"] if agent.decomposed_critic else ["total"]
+            ),
             "policy_architecture": agent.policy_architecture_name(),
             "initial_log_std": agent.initial_log_std,
             "exploration_mode": "state_dependent_log_std_delta_soc_edge_v2",

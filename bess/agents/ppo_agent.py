@@ -21,6 +21,7 @@ from torch import nn
 from bess.core.settings import (
     PPO_ACTOR_GRAD_CLIP,
     PPO_CRITIC_GRAD_CLIP,
+    PPO_DECOMPOSED_CRITIC,
     PPO_EXPLORATION_LR_MULTIPLIER,
     PPO_GAMMA,
     PPO_HIDDEN_SIZE,
@@ -412,7 +413,7 @@ class PPOAgent:
         soc_edge_log_std_penalty=PPO_SOC_EDGE_LOG_STD_PENALTY,
         recurrent_enabled=False,
         recurrent_sequence_length=PPO_RECURRENT_SEQUENCE_LENGTH,
-        decomposed_critic=False,
+        decomposed_critic=PPO_DECOMPOSED_CRITIC,
         actor_grad_clip=PPO_ACTOR_GRAD_CLIP,
         critic_grad_clip=PPO_CRITIC_GRAD_CLIP,
     ):

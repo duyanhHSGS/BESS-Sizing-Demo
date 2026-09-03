@@ -94,7 +94,11 @@ PPO_VALUE_COEF = 0.5
 PPO_TARGET_KL = 0.02
 PPO_ACTOR_GRAD_CLIP = 0.5
 PPO_CRITIC_GRAD_CLIP = 0.5
-PPO_HIDDEN_SIZE = 64
+# IQ-62: keep the proven scalar recurrent PPO architecture, but double both
+# actor and critic hidden width. TODO(IQ-62): keep 128 only if the authoritative
+# unseen 30-day bucket beats the 64-wide IQ-60 baseline.
+PPO_HIDDEN_SIZE = 128
+PPO_DECOMPOSED_CRITIC = False
 PPO_INITIAL_LOG_STD = -0.5
 PPO_BC_FINE_TUNE_LOG_STD = -1.5
 PPO_VALIDATE_EVERY_UPDATES = 1
@@ -135,6 +139,7 @@ PPO_TUNABLE_DEFAULTS = {
     "actor_grad_clip": PPO_ACTOR_GRAD_CLIP,
     "critic_grad_clip": PPO_CRITIC_GRAD_CLIP,
     "hidden_size": PPO_HIDDEN_SIZE,
+    "decomposed_critic": PPO_DECOMPOSED_CRITIC,
     "initial_log_std": PPO_INITIAL_LOG_STD,
     "ppo_start_log_std": PPO_BC_FINE_TUNE_LOG_STD,
     "validate_every_updates": PPO_VALIDATE_EVERY_UPDATES,
