@@ -99,43 +99,6 @@ def _action_mismatch_penalty_vnd(transition, *, timestep_hours: float, wear_vnd_
     return mismatch_kwh * wear_vnd_per_kwh
 
 
-def _peak_threat_discharge_bonus_vnd(
-    observation,
-    transition,
-    *,
-    power_scale_kw: float,
-    demand_charge_vnd_per_kw: float,
-    shaping_fraction: float = 0.10,
-) -> float:
-    """Give PPO a trainer-only hint when discharge attacks the current peak threat.
-
-    Brain7 stays unchanged: net load is eye 3 and the running monthly peak is
-    eye 6, normalized by the same power ruler. The bonus is capped by the
-    current threat, so dumping extra battery below the existing peak earns no
-    extra cookie. Champion/test scoring never includes this hint.
-    """
-    if power_scale_kw <= 0.0:
-        raise ValueError("power_scale_kw must be greater than 0")
-    if demand_charge_vnd_per_kw < 0.0:
-        raise ValueError("demand_charge_vnd_per_kw must be non-negative")
-    if not 0.0 <= shaping_fraction <= 1.0:
-        raise ValueError("shaping_fraction must be between 0 and 1")
-
-    peak_threat_kw = max(0.0, float(observation[2] - observation[5]) * power_scale_kw)
-    if peak_threat_kw <= 0.0:
-        return 0.0
-
-    executed_discharge_kw = max(
-        0.0,
-        sum(max(0.0, float(result.bess.physics.final_battery_kw)) for result in transition.native_results)
-        / max(1, len(transition.native_results)),
-    )
-    useful_peak_discharge_kw = min(peak_threat_kw, executed_discharge_kw)
-    # TODO(IQ-58): remove or revise this training wheel if unseen-bucket economics
-    # prove that the policy learned the wrong discharge timing.
-    return shaping_fraction * useful_peak_discharge_kw * demand_charge_vnd_per_kw
-
-
 def _load_ui_wear_cost(training_config_path: str | Path) -> float:
     config = json.loads(Path(training_config_path).read_text(encoding="utf-8"))
     if "battery_wear_cost" not in config:
@@ -1195,7 +1158,7 @@ def main() -> None:
         "battery_wear_cost": battery_wear_cost,
         "charge_only_during_cheap_tariff": PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
         "reward_mode": "brain_savings_vnd_v1",
-        "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2+peak_threat_discharge_hint_iq58",
+        "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2",
         "training_reward_shaping_scale": args.action_mismatch_shaping_scale,
         "initial_soc": float(cfg.SOC_min),
         "gamma": gamma,
@@ -1331,9 +1294,8 @@ def main() -> None:
             "battery_wear_cost": battery_wear_cost,
             "charge_only_during_cheap_tariff": PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
             "reward_mode": "brain_savings_vnd_v1",
-            "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2+peak_threat_discharge_hint_iq58",
+            "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2",
             "training_reward_shaping_scale": args.action_mismatch_shaping_scale,
-            "peak_threat_discharge_shaping_fraction": 0.10,
             "champion_scoring_uses_shaping": False,
         },
         "training": {
@@ -1805,16 +1767,10 @@ def main() -> None:
         # Keep the PPO action/log-prob pair exact. We shape only the learning
         # reward so repeatedly requesting battery power that physics rejects is
         # no longer free. Champion/test evaluation never includes this penalty.
-        peak_threat_bonus_vnd = _peak_threat_discharge_bonus_vnd(
-            obs,
-            transition,
-            power_scale_kw=p_ref,
-            demand_charge_vnd_per_kw=float(cfg.T_cap),
-        )
-        reward = (
-            transition.reward_million_vnd
-            - args.action_mismatch_shaping_scale * mismatch_penalty_vnd / REWARD_SCALE_VND
-            + peak_threat_bonus_vnd / REWARD_SCALE_VND
+        # TODO(IQ-59): keep rollout learning aligned with real BrainEnv savings;
+        # IQ-58's hand-authored peak cookie overfit validation and hurt unseen cost.
+        reward = transition.reward_million_vnd - (
+            args.action_mismatch_shaping_scale * mismatch_penalty_vnd / REWARD_SCALE_VND
         )
         actor_hidden, critic_hidden = agent.recurrent_rollout_inputs()
         buffer.add(
