@@ -54,7 +54,6 @@ from bess.core.settings import (
     PPO_ORACLE_BC_MAX_EPOCHS,
     PPO_ORACLE_BC_MINIBATCH,
     PPO_ORACLE_BC_TARGET_MSE,
-    PPO_ORACLE_PEAK_TRAINING_GATE_ENABLED,
     PPO_PEAK_GUARD_DEADBAND_KW,
     PPO_PEAK_GUARD_ENABLED,
     PPO_PEAK_GUARD_FIRST_DAY_ARM_AT_CHEAP_END,
@@ -213,37 +212,6 @@ def _oracle_dispatch_wear_cost_vnd(
     return throughput_kwh * float(wear_vnd_per_kwh)
 
 
-def _oracle_peaks_for_training_months(
-    oracle_grid_days: list[list[float]],
-    training_months: list[MonthData],
-    cfg,
-) -> tuple[float, ...]:
-    """Return one Oracle peak per training bucket without touching holdout data."""
-    expected_days = sum(len(month.days) for month in training_months)
-    if len(oracle_grid_days) != expected_days:
-        raise ValueError("Oracle training grids must exactly match training bucket days")
-
-    peaks: list[float] = []
-    cursor = 0
-    for month in training_months:
-        stop = cursor + len(month.days)
-        month_grids = oracle_grid_days[cursor:stop]
-        for day, grid in zip(month.days, month_grids, strict=True):
-            if len(grid) != len(day.load):
-                raise ValueError(
-                    f"Oracle training grid length does not match dataset day {day.day_index}"
-                )
-        peak_kw = float(score_month(month_grids, cfg, days=month.days)["pmax_month_kw"])
-        if not math.isfinite(peak_kw) or peak_kw < 0.0:
-            raise ValueError("Oracle training peak must be finite and non-negative")
-        peaks.append(peak_kw)
-        cursor = stop
-
-    if cursor != len(oracle_grid_days):
-        raise RuntimeError("Oracle training grids were not consumed exactly once")
-    return tuple(peaks)
-
-
 def _oracle_teacher_action(
     dispatch: dict[str, list[float]],
     start: int,
@@ -268,7 +236,6 @@ def _collect_oracle_teacher_samples(
     power_scale_kw: float,
     battery_wear_cost: float,
     native_steps: int,
-    oracle_peak_kw: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Replay Oracle dispatch and collect Brain7 actions plus real reward components."""
     if len(oracle_dispatch) != len(month.days):
@@ -294,23 +261,6 @@ def _collect_oracle_teacher_samples(
         for start in range(0, native_rows, native_steps):
             stop = min(start + native_steps, native_rows)
             action = _oracle_teacher_action(dispatch, start, stop, cfg)
-            no_bess_block_kw = float(
-                np.mean(
-                    np.maximum(
-                        0.0,
-                        np.asarray(day.load[start:stop], dtype=np.float64)
-                        - np.asarray(day.pv[start:stop], dtype=np.float64),
-                    )
-                )
-            )
-            if (
-                PPO_ORACLE_PEAK_TRAINING_GATE_ENABLED
-                and action > 0.0
-                and no_bess_block_kw <= float(oracle_peak_kw) + 1e-9
-            ):
-                # The teacher may use energy arbitrage below its own final peak,
-                # but IQ-69 deliberately teaches battery preservation instead.
-                action = 0.0
             if (
                 PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF
                 and action < 0.0
@@ -333,9 +283,6 @@ def _collect_oracle_teacher_samples(
                 native_steps=stop - start,
                 charge_only_during_cheap_tariff=PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
                 cheap_tariff_steps=cheap_steps,
-                training_oracle_peak_kw=(
-                    oracle_peak_kw if PPO_ORACLE_PEAK_TRAINING_GATE_ENABLED else None
-                ),
                 soc_deadline_enabled=PPO_SOC_DEADLINE_ENABLED,
                 soc_deadline_hour=PPO_SOC_DEADLINE_HOUR,
                 soc_deadline_shortfall_penalty_vnd=PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND,
@@ -1293,9 +1240,6 @@ def main() -> None:
             PPO_PEAK_GUARD_FIRST_DAY_ARM_AT_CHEAP_END
         ),
         "peak_guard_deadband_kw": PPO_PEAK_GUARD_DEADBAND_KW,
-        "oracle_peak_training_gate": "train_bucket_only_meter_budget_v1",
-        "oracle_peak_training_gate_enabled": PPO_ORACLE_PEAK_TRAINING_GATE_ENABLED,
-        "oracle_peak_runtime_input": False,
         "soc_deadline_enabled": PPO_SOC_DEADLINE_ENABLED,
         "soc_deadline_mode": "daily_even_minimum_charge_v1",
         "soc_deadline_hour": PPO_SOC_DEADLINE_HOUR,
@@ -1388,21 +1332,15 @@ def main() -> None:
     )
     val_day_indexes = [day.day_index for day in val_days]
     train_day_indexes = [day.day_index for day in train_days]
-    val_oracle_grids = load_cached_training_grids(args.oracle_cache, val_day_indexes)
-    train_oracle_grids = load_cached_training_grids(args.oracle_cache, train_day_indexes)
+    oracle_grids = load_cached_training_grids(args.oracle_cache, val_day_indexes)
     oracle_dispatch = load_cached_training_dispatch(args.oracle_cache, train_day_indexes)
-    training_oracle_peaks = _oracle_peaks_for_training_months(
-        train_oracle_grids,
-        train_months,
-        cfg,
-    )
     val_oracle_dispatch = (
         oracle_dispatch
         if train_day_indexes == val_day_indexes
         else load_cached_training_dispatch(args.oracle_cache, val_day_indexes)
     )
     val_oracle_utility = _score_grid_dispatch_buckets(
-        val_oracle_grids,
+        oracle_grids,
         validation_months,
         cfg,
     )
@@ -1452,10 +1390,6 @@ def main() -> None:
             ),
             "peak_guard_first_day_arm_step": int(cfg.OFF_PEAK_END_STEP),
             "peak_guard_deadband_kw": PPO_PEAK_GUARD_DEADBAND_KW,
-            "oracle_peak_training_gate": "train_bucket_only_meter_budget_v1",
-            "oracle_peak_training_gate_enabled": PPO_ORACLE_PEAK_TRAINING_GATE_ENABLED,
-            "oracle_peak_source": "training_bucket_cached_oracle_grid_only",
-            "oracle_peak_available_to_validation_test_or_dispatch": False,
             "soc_deadline_enabled": PPO_SOC_DEADLINE_ENABLED,
             "soc_deadline_mode": "daily_even_minimum_charge_v1",
             "soc_deadline_hour": PPO_SOC_DEADLINE_HOUR,
@@ -1645,7 +1579,7 @@ def main() -> None:
         reward_parts = []
         teacher_episode_lengths = []
         dispatch_cursor = 0
-        for train_month_index, train_month in enumerate(train_months):
+        for train_month in train_months:
             month_day_count = len(train_month.days)
             month_dispatch = oracle_dispatch[
                 dispatch_cursor:dispatch_cursor + month_day_count
@@ -1658,7 +1592,6 @@ def main() -> None:
                 power_scale_kw=p_ref,
                 battery_wear_cost=battery_wear_cost,
                 native_steps=native_steps,
-                oracle_peak_kw=training_oracle_peaks[train_month_index],
             )
             observation_parts.append(month_observations)
             target_parts.append(month_targets)
@@ -1785,9 +1718,6 @@ def main() -> None:
     rollout_peak_guard_trigger_steps = 0
     rollout_peak_guard_override_steps = 0
     rollout_peak_guard_unmet_steps = 0
-    rollout_oracle_peak_training_trigger_decisions = 0
-    rollout_oracle_peak_training_trigger_steps = 0
-    rollout_oracle_peak_training_override_steps = 0
     rollout_soc_deadline_trigger_steps = 0
     rollout_soc_deadline_override_steps = 0
     rollout_soc_deadline_unmet_count = 0
@@ -1940,11 +1870,6 @@ def main() -> None:
                 else None
             ),
             peak_guard_deadband_kw=PPO_PEAK_GUARD_DEADBAND_KW,
-            training_oracle_peak_kw=(
-                training_oracle_peaks[train_month_cursor]
-                if PPO_ORACLE_PEAK_TRAINING_GATE_ENABLED
-                else None
-            ),
             soc_deadline_enabled=PPO_SOC_DEADLINE_ENABLED,
             soc_deadline_hour=PPO_SOC_DEADLINE_HOUR,
             soc_deadline_shortfall_penalty_vnd=PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND,
@@ -2013,15 +1938,6 @@ def main() -> None:
         rollout_peak_guard_trigger_steps += transition.peak_guard_trigger_steps
         rollout_peak_guard_override_steps += transition.peak_guard_override_steps
         rollout_peak_guard_unmet_steps += transition.peak_guard_unmet_steps
-        rollout_oracle_peak_training_trigger_decisions += int(
-            transition.oracle_peak_training_trigger_steps > 0
-        )
-        rollout_oracle_peak_training_trigger_steps += (
-            transition.oracle_peak_training_trigger_steps
-        )
-        rollout_oracle_peak_training_override_steps += (
-            transition.oracle_peak_training_override_steps
-        )
         rollout_soc_deadline_trigger_steps += transition.soc_deadline_trigger_steps
         rollout_soc_deadline_override_steps += transition.soc_deadline_override_steps
         rollout_soc_deadline_unmet_count += transition.soc_deadline_unmet_count
@@ -2083,15 +1999,6 @@ def main() -> None:
             "peak_guard_trigger_steps": rollout_peak_guard_trigger_steps,
             "peak_guard_override_steps": rollout_peak_guard_override_steps,
             "peak_guard_unmet_steps": rollout_peak_guard_unmet_steps,
-            "oracle_peak_training_trigger_decision_pct": (
-                rollout_oracle_peak_training_trigger_decisions / rollout_count * 100.0
-            ),
-            "oracle_peak_training_trigger_steps": (
-                rollout_oracle_peak_training_trigger_steps
-            ),
-            "oracle_peak_training_override_steps": (
-                rollout_oracle_peak_training_override_steps
-            ),
             "soc_deadline_trigger_steps": rollout_soc_deadline_trigger_steps,
             "soc_deadline_override_steps": rollout_soc_deadline_override_steps,
             "soc_deadline_unmet_count": rollout_soc_deadline_unmet_count,
@@ -2164,9 +2071,6 @@ def main() -> None:
         rollout_peak_guard_trigger_steps = 0
         rollout_peak_guard_override_steps = 0
         rollout_peak_guard_unmet_steps = 0
-        rollout_oracle_peak_training_trigger_decisions = 0
-        rollout_oracle_peak_training_trigger_steps = 0
-        rollout_oracle_peak_training_override_steps = 0
         rollout_soc_deadline_trigger_steps = 0
         rollout_soc_deadline_override_steps = 0
         rollout_soc_deadline_unmet_count = 0

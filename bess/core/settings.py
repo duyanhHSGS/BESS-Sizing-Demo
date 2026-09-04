@@ -122,10 +122,6 @@ PPO_PEAK_GUARD_ENABLED = True
 PPO_PEAK_GUARD_MIN_COMPLETED_DAYS = 1
 PPO_PEAK_GUARD_FIRST_DAY_ARM_AT_CHEAP_END = True
 PPO_PEAK_GUARD_DEADBAND_KW = 1.0
-# IQ-69 gives only each training bucket its own Oracle-final peak. The value is
-# never an observation, checkpoint runtime input, validation input, or test input.
-PPO_ORACLE_PEAK_TRAINING_GATE_ENABLED = True
-# TODO(IQ-69): keep this training-only foresight only if unseen economics improve.
 # TODO(IQ-68): verify Day 31 peak protection and 06:00 SOC on the remote Viewer.
 # IQ-67 makes the operator's daily 06:00 full-SOC requirement a deterministic
 # controller invariant.  The penalty is normally zero because the guard is

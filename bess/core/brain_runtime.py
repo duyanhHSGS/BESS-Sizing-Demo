@@ -188,8 +188,6 @@ class BrainControlTransition:
     peak_guard_trigger_steps: int
     peak_guard_override_steps: int
     peak_guard_unmet_steps: int
-    oracle_peak_training_trigger_steps: int
-    oracle_peak_training_override_steps: int
     soc_deadline_trigger_steps: int
     soc_deadline_override_steps: int
     soc_deadline_unmet_count: int
@@ -209,16 +207,6 @@ class PeakGuardDecision:
 
 
 @dataclass(frozen=True, slots=True)
-class OraclePeakTrainingDecision:
-    """Training-only discharge gate using one month-local Oracle peak."""
-
-    action: float
-    triggered: bool
-    adjusted: bool
-    allowed_grid_kw: float | None
-
-
-@dataclass(frozen=True, slots=True)
 class SocDeadlineDecision:
     """One native-step maximum-action clamp that fills SOC by a clock deadline."""
 
@@ -227,65 +215,6 @@ class SocDeadlineDecision:
     adjusted: bool
     required_charge_kw: float
     physically_feasible: bool
-
-
-def constrain_training_discharge_below_oracle_peak(
-    action: float,
-    *,
-    net_load_kw: float,
-    oracle_peak_kw: float,
-    block_energy_kwh: float,
-    block_elapsed_hours: float,
-    timestep_hours: float,
-) -> OraclePeakTrainingDecision:
-    """Suppress needless training discharge below the month-local Oracle peak.
-
-    The Oracle peak is deliberate training foresight. It is converted into the
-    remaining fixed-meter-block grid budget, so the gate uses no future native
-    load sample. Callers must never provide validation/test or inference data.
-    """
-    values = (
-        action,
-        net_load_kw,
-        oracle_peak_kw,
-        block_energy_kwh,
-        block_elapsed_hours,
-        timestep_hours,
-    )
-    if not all(math.isfinite(float(value)) for value in values):
-        raise ValueError("Oracle peak training gate inputs must all be finite")
-
-    action_value = float(action)
-    net_load = max(0.0, float(net_load_kw))
-    oracle_peak = float(oracle_peak_kw)
-    open_energy = float(block_energy_kwh)
-    open_elapsed = float(block_elapsed_hours)
-    dt_hours = float(timestep_hours)
-    if not ACTION_MIN <= action_value <= ACTION_MAX:
-        raise ValueError("Oracle peak training gate action must be inside [-1, 1]")
-    if oracle_peak < 0.0 or open_energy < 0.0:
-        raise ValueError("Oracle peak training gate meter values must not be negative")
-    if dt_hours <= 0.0 or dt_hours > DEMAND_BLOCK_HOURS:
-        raise ValueError("Oracle peak training gate timestep must be inside (0, 0.5]")
-    if open_elapsed < 0.0 or open_elapsed >= DEMAND_BLOCK_HOURS:
-        raise ValueError(
-            "Oracle peak training gate open-block elapsed time must be inside [0, 0.5)"
-        )
-    if open_elapsed + dt_hours > DEMAND_BLOCK_HOURS + 1e-12:
-        raise ValueError("Oracle peak training gate timestep would overrun the meter block")
-
-    if action_value <= 0.0:
-        return OraclePeakTrainingDecision(action_value, False, False, None)
-
-    remaining_time_hours = DEMAND_BLOCK_HOURS - open_elapsed
-    remaining_energy_budget_kwh = oracle_peak * DEMAND_BLOCK_HOURS - open_energy
-    allowed_grid_kw = max(0.0, remaining_energy_budget_kwh / remaining_time_hours)
-    if net_load > allowed_grid_kw + 1e-9:
-        return OraclePeakTrainingDecision(action_value, False, False, allowed_grid_kw)
-
-    # TODO(IQ-69): keep this training-only gate only if the untouched test bucket
-    # improves; never pass an Oracle peak into validation, test, or Dispatch.
-    return OraclePeakTrainingDecision(0.0, True, True, allowed_grid_kw)
 
 
 def enforce_soc_deadline_guard(
@@ -497,7 +426,6 @@ def step_brain_control(
     peak_guard_min_completed_days: int = 1,
     peak_guard_first_day_arm_step: int | None = None,
     peak_guard_deadband_kw: float = 1.0,
-    training_oracle_peak_kw: float | None = None,
     soc_deadline_enabled: bool = False,
     soc_deadline_hour: float = 6.0,
     soc_deadline_shortfall_penalty_vnd: float = 0.0,
@@ -511,8 +439,6 @@ def step_brain_control(
         raise ValueError("cheap-only charging requires an episode-backed BrainEnv")
     if peak_guard_enabled and env.episode is None:
         raise ValueError("Peak Guard requires an episode-backed BrainEnv")
-    if training_oracle_peak_kw is not None and env.episode is None:
-        raise ValueError("Oracle peak training gate requires an episode-backed BrainEnv")
     if soc_deadline_enabled and env.episode is None:
         raise ValueError("SOC Deadline Guard requires an episode-backed BrainEnv")
     if isinstance(peak_guard_min_completed_days, bool) or peak_guard_min_completed_days < 0:
@@ -527,10 +453,6 @@ def step_brain_control(
         assert env.episode is not None
         if not 0 <= int(peak_guard_first_day_arm_step) < env.episode.steps_per_day:
             raise ValueError("Peak Guard first-day arm step must be inside the day")
-    if training_oracle_peak_kw is not None:
-        training_oracle_peak_kw = float(training_oracle_peak_kw)
-        if not math.isfinite(training_oracle_peak_kw) or training_oracle_peak_kw < 0.0:
-            raise ValueError("training Oracle peak must be finite and non-negative")
 
     results: list[BrainEnvironmentStepResult] = []
     reward_vnd = 0.0
@@ -541,8 +463,6 @@ def step_brain_control(
     peak_guard_trigger_steps = 0
     peak_guard_override_steps = 0
     peak_guard_unmet_steps = 0
-    oracle_peak_training_trigger_steps = 0
-    oracle_peak_training_override_steps = 0
     soc_deadline_trigger_steps = 0
     soc_deadline_override_steps = 0
     soc_deadline_unmet_count = 0
@@ -569,23 +489,6 @@ def step_brain_control(
             if not math.isclose(step_action, float(action), rel_tol=0.0, abs_tol=1e-12):
                 adjusted = True
                 tariff_blocked_charge_steps += 1
-        if training_oracle_peak_kw is not None:
-            assert env.episode is not None
-            timestep_index = env.bess_world.timestep_index
-            timestep = env.episode.timesteps[timestep_index]
-            meter = env.bess_world.meter_state
-            oracle_gate = constrain_training_discharge_below_oracle_peak(
-                step_action,
-                net_load_kw=timestep.net_load_kw,
-                oracle_peak_kw=training_oracle_peak_kw,
-                block_energy_kwh=meter.block_energy_kwh,
-                block_elapsed_hours=meter.block_elapsed_hours,
-                timestep_hours=env.bess_world.timestep_hours,
-            )
-            step_action = oracle_gate.action
-            oracle_peak_training_trigger_steps += int(oracle_gate.triggered)
-            oracle_peak_training_override_steps += int(oracle_gate.adjusted)
-            adjusted = adjusted or oracle_gate.adjusted
         peak_guard = PeakGuardDecision(step_action, False, False, None)
         if peak_guard_enabled:
             assert env.episode is not None
@@ -605,10 +508,7 @@ def step_brain_control(
             peak_guard = enforce_seen_peak_guard(
                 step_action,
                 net_load_kw=timestep.net_load_kw,
-                monthly_peak_kw=max(
-                    meter.monthly_peak_kw,
-                    training_oracle_peak_kw or 0.0,
-                ),
+                monthly_peak_kw=meter.monthly_peak_kw,
                 block_energy_kwh=meter.block_energy_kwh,
                 block_elapsed_hours=meter.block_elapsed_hours,
                 timestep_hours=env.bess_world.timestep_hours,
@@ -616,11 +516,7 @@ def step_brain_control(
                 charge_efficiency=env.bess_world.charge_efficiency,
                 discharge_efficiency=env.bess_world.discharge_efficiency,
                 enabled=True,
-                armed=(
-                    armed_after_completed_days
-                    or armed_on_first_day
-                    or training_oracle_peak_kw is not None
-                ),
+                armed=armed_after_completed_days or armed_on_first_day,
                 deadband_kw=peak_guard_deadband_kw,
             )
             step_action = peak_guard.action
@@ -703,8 +599,6 @@ def step_brain_control(
         peak_guard_trigger_steps=peak_guard_trigger_steps,
         peak_guard_override_steps=peak_guard_override_steps,
         peak_guard_unmet_steps=peak_guard_unmet_steps,
-        oracle_peak_training_trigger_steps=oracle_peak_training_trigger_steps,
-        oracle_peak_training_override_steps=oracle_peak_training_override_steps,
         soc_deadline_trigger_steps=soc_deadline_trigger_steps,
         soc_deadline_override_steps=soc_deadline_override_steps,
         soc_deadline_unmet_count=soc_deadline_unmet_count,
