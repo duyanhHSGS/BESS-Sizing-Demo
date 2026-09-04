@@ -13,6 +13,7 @@ from bess.core.bess_env import OBSERVATION_DIM
 from bess.core.brain_runtime import (
     BrainTrajectoryRecorder,
     constrain_charge_to_cheap_window,
+    constrain_training_discharge_below_oracle_peak,
     enforce_seen_peak_guard,
     enforce_soc_deadline_guard,
     make_brain_env,
@@ -23,7 +24,10 @@ from bess.core.common import load_system_config, make_bess_config
 from bess.core.scenario_gen import DayData, MonthData
 from bess.evaluation.baselines import run_drl_policy
 from bess.evaluation.benchmark import _rolling_30_minute_average
-from bess.training.runners.train_ppo_dataset import _collect_oracle_teacher_samples
+from bess.training.runners.train_ppo_dataset import (
+    _collect_oracle_teacher_samples,
+    _oracle_peaks_for_training_months,
+)
 
 
 def _reference_fixed_30_minute_meter(values, dt):
@@ -81,6 +85,128 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         self.assertTrue(decision.adjusted)
         self.assertAlmostEqual(decision.allowed_grid_kw, 120.0)
         self.assertAlmostEqual(decision.action, 0.25)
+
+    def test_iq69_training_gate_blocks_discharge_below_oracle_peak_budget(self):
+        decision = constrain_training_discharge_below_oracle_peak(
+            0.75,
+            net_load_kw=80.0,
+            oracle_peak_kw=100.0,
+            block_energy_kwh=0.0,
+            block_elapsed_hours=0.0,
+            timestep_hours=0.25,
+        )
+
+        self.assertTrue(decision.triggered)
+        self.assertTrue(decision.adjusted)
+        self.assertEqual(decision.action, 0.0)
+        self.assertAlmostEqual(decision.allowed_grid_kw, 100.0)
+
+    def test_iq69_training_gate_allows_needed_discharge_and_all_charging(self):
+        danger = constrain_training_discharge_below_oracle_peak(
+            0.75,
+            net_load_kw=140.0,
+            oracle_peak_kw=100.0,
+            block_energy_kwh=20.0,
+            block_elapsed_hours=0.25,
+            timestep_hours=0.25,
+        )
+        charge = constrain_training_discharge_below_oracle_peak(
+            -0.50,
+            net_load_kw=80.0,
+            oracle_peak_kw=100.0,
+            block_energy_kwh=0.0,
+            block_elapsed_hours=0.0,
+            timestep_hours=0.25,
+        )
+
+        self.assertFalse(danger.triggered)
+        self.assertEqual(danger.action, 0.75)
+        self.assertAlmostEqual(danger.allowed_grid_kw, 120.0)
+        self.assertFalse(charge.triggered)
+        self.assertEqual(charge.action, -0.50)
+
+    def test_iq69_oracle_peak_is_training_only_and_arms_first_month_block(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 500.0, base.P_target_user)
+        cfg.dt = 0.25
+        day = DayData(
+            load=np.concatenate((np.full(2, 80.0), np.full(2, 140.0), np.full(92, 80.0))),
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        month = MonthData(days=[day], source="iq69-training-only-peak-test")
+        training_env = make_brain_env(
+            month,
+            cfg,
+            power_scale_kw=1000.0,
+            initial_state_of_charge=cfg.SOC_max,
+        )
+        training_env.reset()
+
+        safe = step_brain_control(
+            training_env,
+            1.0,
+            native_steps=2,
+            peak_guard_enabled=True,
+            training_oracle_peak_kw=100.0,
+        )
+        danger = step_brain_control(
+            training_env,
+            0.0,
+            native_steps=2,
+            peak_guard_enabled=True,
+            training_oracle_peak_kw=100.0,
+        )
+
+        self.assertEqual(safe.applied_native_actions, (0.0, 0.0))
+        self.assertEqual(safe.oracle_peak_training_override_steps, 2)
+        self.assertEqual(danger.oracle_peak_training_override_steps, 0)
+        self.assertEqual(danger.peak_guard_override_steps, 2)
+        for result in danger.native_results:
+            self.assertLessEqual(result.bess.physics.grid_import_kw, 101.0 + 1e-9)
+
+        inference_env = make_brain_env(
+            month,
+            cfg,
+            power_scale_kw=1000.0,
+            initial_state_of_charge=cfg.SOC_max,
+        )
+        inference_env.reset()
+        inference = step_brain_control(inference_env, 1.0, native_steps=1)
+        self.assertEqual(inference.oracle_peak_training_override_steps, 0)
+        self.assertEqual(inference.applied_native_actions, (1.0,))
+
+    def test_iq69_training_bucket_peaks_are_month_local(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 500.0, base.P_target_user)
+        cfg.set_dt(0.25)
+
+        def month(day_index, load_kw):
+            return MonthData(
+                days=[DayData(
+                    load=np.full(96, load_kw, dtype=np.float64),
+                    pv=np.zeros(96, dtype=np.float64),
+                    day_type="working",
+                    weather="test",
+                    day_index=day_index,
+                    date_iso=f"2026-01-{day_index:02d}",
+                )],
+                source=f"bucket-{day_index}",
+            )
+
+        months = [month(1, 80.0), month(31, 160.0)]
+        peaks = _oracle_peaks_for_training_months(
+            [[80.0] * 96, [160.0] * 96],
+            months,
+            cfg,
+        )
+
+        self.assertEqual(peaks, (80.0, 160.0))
+        with self.assertRaisesRegex(ValueError, "exactly match training bucket days"):
+            _oracle_peaks_for_training_months([[999.0] * 96], months, cfg)
 
     def test_iq66_peak_guard_leaves_stronger_and_safe_discharge_alone(self):
         stronger = self._peak_guard(0.50)
@@ -729,6 +855,7 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
             power_scale_kw=1000.0,
             battery_wear_cost=0.0,
             native_steps=2,
+            oracle_peak_kw=1000.0,
         )
 
         self.assertEqual(observations.shape, (48, OBSERVATION_DIM))
@@ -736,6 +863,37 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         self.assertTrue(np.isfinite(rewards).all())
         self.assertTrue((targets[:12] < 0.0).all())
         self.assertTrue((targets[12:] == 0.0).all())
+
+    def test_iq69_oracle_teacher_suppresses_below_peak_discharge_lessons(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 20.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        steps = 96
+        day = DayData(
+            load=np.full(steps, 100.0, dtype=np.float64),
+            pv=np.zeros(steps, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        month = MonthData(days=[day], source="iq69-oracle-teacher-gate-test")
+        oracle_dispatch = [{
+            "discharge": [10.0] * steps,
+            "grid_charge": [0.0] * steps,
+        }]
+
+        _observations, targets, _rewards = _collect_oracle_teacher_samples(
+            month,
+            oracle_dispatch,
+            cfg,
+            power_scale_kw=1000.0,
+            battery_wear_cost=0.0,
+            native_steps=2,
+            oracle_peak_kw=120.0,
+        )
+
+        self.assertTrue((targets == 0.0).all())
 
     def test_pre_iq57_checkpoint_keeps_legacy_anytime_charging(self):
         base = load_system_config()
