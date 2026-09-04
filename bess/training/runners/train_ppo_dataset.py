@@ -276,7 +276,6 @@ def _collect_oracle_teacher_samples(
             ):
                 action = 0.0
             observations.append(observation_array(observation))
-            targets.append(action)
             transition = step_brain_control(
                 env,
                 action,
@@ -287,6 +286,9 @@ def _collect_oracle_teacher_samples(
                 soc_deadline_hour=PPO_SOC_DEADLINE_HOUR,
                 soc_deadline_shortfall_penalty_vnd=PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND,
             )
+            # TODO(IQ-68-SMOOTH): teach the action that the controller actually
+            # schedules, not a spiky Oracle request rejected by the deadline guard.
+            targets.append(float(np.mean(transition.applied_native_actions)))
             rewards.append(_control_reward_components_million_vnd(transition))
             if transition.next_observation is not None:
                 observation = transition.next_observation
@@ -1241,7 +1243,7 @@ def main() -> None:
         ),
         "peak_guard_deadband_kw": PPO_PEAK_GUARD_DEADBAND_KW,
         "soc_deadline_enabled": PPO_SOC_DEADLINE_ENABLED,
-        "soc_deadline_mode": "daily_even_minimum_charge_v1",
+        "soc_deadline_mode": "daily_exact_smooth_charge_v2",
         "soc_deadline_hour": PPO_SOC_DEADLINE_HOUR,
         "soc_deadline_target": "soc_max",
         "soc_deadline_shortfall_penalty_vnd": PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND,
@@ -1391,7 +1393,7 @@ def main() -> None:
             "peak_guard_first_day_arm_step": int(cfg.OFF_PEAK_END_STEP),
             "peak_guard_deadband_kw": PPO_PEAK_GUARD_DEADBAND_KW,
             "soc_deadline_enabled": PPO_SOC_DEADLINE_ENABLED,
-            "soc_deadline_mode": "daily_even_minimum_charge_v1",
+            "soc_deadline_mode": "daily_exact_smooth_charge_v2",
             "soc_deadline_hour": PPO_SOC_DEADLINE_HOUR,
             "soc_deadline_target": "soc_max",
             "soc_deadline_shortfall_penalty_vnd": PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND,

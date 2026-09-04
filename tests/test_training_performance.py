@@ -169,7 +169,7 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         self.assertAlmostEqual(decision.required_charge_kw, 145.0 / 6.0)
         self.assertAlmostEqual(decision.action, -(145.0 / 6.0) / 450.0)
 
-    def test_iq67_soc_deadline_leaves_stronger_charge_and_post_deadline_action(self):
+    def test_iq68_soc_deadline_replaces_stronger_charge_and_keeps_post_deadline_action(self):
         arguments = {
             "state_of_charge": 0.50,
             "maximum_state_of_charge": 0.90,
@@ -183,10 +183,87 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         stronger = enforce_soc_deadline_guard(-1.0, native_step_in_day=0, **arguments)
         after = enforce_soc_deadline_guard(0.75, native_step_in_day=24, **arguments)
 
-        self.assertEqual(stronger.action, -1.0)
-        self.assertFalse(stronger.adjusted)
+        expected_action = -((0.90 - 0.50) * 1250.0 / 6.0) / 450.0
+        self.assertAlmostEqual(stronger.action, expected_action)
+        self.assertTrue(stronger.adjusted)
         self.assertEqual(after.action, 0.75)
         self.assertFalse(after.triggered)
+
+    def test_iq68_soc_deadline_replaces_weaker_charge_with_same_smooth_action(self):
+        arguments = {
+            "state_of_charge": 0.50,
+            "maximum_state_of_charge": 0.90,
+            "battery_capacity_kwh": 1250.0,
+            "battery_power_kw": 450.0,
+            "native_step_in_day": 0,
+            "steps_per_day": 96,
+            "timestep_hours": 0.25,
+            "deadline_hour": 6.0,
+            "enabled": True,
+        }
+
+        weaker = enforce_soc_deadline_guard(0.75, **arguments)
+        stronger = enforce_soc_deadline_guard(-1.0, **arguments)
+
+        self.assertAlmostEqual(weaker.action, stronger.action)
+        self.assertTrue(weaker.adjusted)
+        self.assertTrue(stronger.adjusted)
+
+    def test_iq68_soc_deadline_holds_full_battery_idle_until_deadline(self):
+        decision = enforce_soc_deadline_guard(
+            1.0,
+            state_of_charge=0.90,
+            maximum_state_of_charge=0.90,
+            battery_capacity_kwh=1250.0,
+            battery_power_kw=450.0,
+            native_step_in_day=8,
+            steps_per_day=96,
+            timestep_hours=0.25,
+            deadline_hour=6.0,
+            enabled=True,
+        )
+
+        self.assertEqual(decision.action, 0.0)
+        self.assertEqual(decision.required_charge_kw, 0.0)
+        self.assertTrue(decision.triggered)
+        self.assertTrue(decision.adjusted)
+
+    def test_iq68_soc_deadline_constant_grid_charge_hits_90_percent_at_0600(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        day = DayData(
+            load=np.zeros(96, dtype=np.float64),
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        env = make_brain_env(
+            MonthData(days=[day], source="iq68-smooth-grid-charge-test"),
+            cfg,
+            power_scale_kw=1000.0,
+        )
+        env.reset()
+        grid_charge_kw = []
+
+        for _ in range(12):
+            transition = step_brain_control(
+                env,
+                -1.0,
+                native_steps=2,
+                soc_deadline_enabled=True,
+                soc_deadline_hour=6.0,
+            )
+            grid_charge_kw.extend(
+                result.bess.physics.grid_to_battery_kw
+                for result in transition.native_results
+            )
+
+        expected_grid_kw = ((0.90 - 0.20) * 1250.0 / 6.0) / cfg.eta_ch
+        np.testing.assert_allclose(grid_charge_kw, expected_grid_kw, rtol=0.0, atol=1e-9)
+        self.assertAlmostEqual(expected_grid_kw, 162.03703703703704)
+        self.assertAlmostEqual(env.bess_world.state_of_charge, cfg.SOC_max, places=10)
 
     def test_iq67_soc_deadline_hits_90_percent_at_0600_every_day(self):
         base = load_system_config()
@@ -735,6 +812,40 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         self.assertEqual(rewards.shape, (48, 3))
         self.assertTrue(np.isfinite(rewards).all())
         self.assertTrue((targets[:12] < 0.0).all())
+        self.assertTrue((targets[12:] == 0.0).all())
+
+    def test_iq68_oracle_teacher_learns_smooth_applied_charge_not_spiky_request(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        steps = 96
+        day = DayData(
+            load=np.full(steps, 700.0, dtype=np.float64),
+            pv=np.zeros(steps, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        month = MonthData(days=[day], source="iq68-smooth-oracle-teacher-test")
+        oracle_dispatch = [{
+            "discharge": [0.0] * steps,
+            "grid_charge": [438.1] * 24 + [0.0] * (steps - 24),
+        }]
+
+        _observations, targets, _rewards = _collect_oracle_teacher_samples(
+            month,
+            oracle_dispatch,
+            cfg,
+            power_scale_kw=1000.0,
+            battery_wear_cost=0.0,
+            native_steps=2,
+        )
+
+        expected_action = -((0.90 - 0.20) * 1250.0 / 6.0) / 450.0
+        raw_oracle_action = -(438.1 * cfg.eta_ch) / cfg.P_rated_nominal
+        np.testing.assert_allclose(targets[:12], expected_action, rtol=0.0, atol=1e-7)
+        self.assertFalse(np.isclose(expected_action, raw_oracle_action))
         self.assertTrue((targets[12:] == 0.0).all())
 
     def test_pre_iq57_checkpoint_keeps_legacy_anytime_charging(self):

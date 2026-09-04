@@ -208,7 +208,7 @@ class PeakGuardDecision:
 
 @dataclass(frozen=True, slots=True)
 class SocDeadlineDecision:
-    """One native-step maximum-action clamp that fills SOC by a clock deadline."""
+    """One native-step exact charging schedule that fills SOC by a clock deadline."""
 
     action: float
     triggered: bool
@@ -230,11 +230,12 @@ def enforce_soc_deadline_guard(
     deadline_hour: float,
     enabled: bool,
 ) -> SocDeadlineDecision:
-    """Spread the minimum required charging evenly from midnight to a daily deadline.
+    """Spread the required charging evenly from midnight to a daily deadline.
 
     Positive action is discharge and negative action is charge.  Recomputing the
-    required average every native step both blocks deadline-breaking discharge
-    and avoids a last-minute full-power charging spike.
+    required average every native step replaces both weaker and stronger policy
+    requests, so the battery follows one smooth line to the target without an
+    early charging spike.
     """
     values = (
         action,
@@ -279,14 +280,27 @@ def enforce_soc_deadline_guard(
 
     missing_energy_kwh = max(0.0, soc_max - soc) * capacity
     if missing_energy_kwh <= 1e-9:
-        return SocDeadlineDecision(action_value, False, False, 0.0, True)
+        guarded_action = 0.0
+        adjusted = not math.isclose(
+            guarded_action,
+            action_value,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        return SocDeadlineDecision(
+            guarded_action,
+            adjusted,
+            adjusted,
+            0.0,
+            True,
+        )
     remaining_hours = (deadline_step - native_step_in_day) * dt_hours
     required_charge_kw = missing_energy_kwh / remaining_hours
     required_action = -min(rated_power, required_charge_kw) / rated_power
-    guarded_action = min(action_value, required_action)
+    guarded_action = required_action
     adjusted = not math.isclose(guarded_action, action_value, rel_tol=0.0, abs_tol=1e-12)
-    # TODO(IQ-67): preserve this final-authority ordering after Peak Guard; the
-    # operator explicitly chose 06:00 SOC over an overnight peak conflict.
+    # TODO(IQ-68-SMOOTH): keep this O(1) exact schedule authoritative over PPO
+    # and Oracle-BC requests; both weaker and stronger requests break smoothness.
     return SocDeadlineDecision(
         guarded_action,
         True,
@@ -430,7 +444,7 @@ def step_brain_control(
     soc_deadline_hour: float = 6.0,
     soc_deadline_shortfall_penalty_vnd: float = 0.0,
 ) -> BrainControlTransition:
-    """Hold one requested action over native env steps with optional cheap-only charging."""
+    """Hold one request while native guards derive each physically scheduled action."""
     if native_steps <= 0:
         raise ValueError("native_steps must be greater than 0")
     if charge_only_during_cheap_tariff and cheap_tariff_steps is None:
