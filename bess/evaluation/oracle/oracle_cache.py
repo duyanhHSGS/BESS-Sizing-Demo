@@ -13,10 +13,10 @@ from bess.paths import PROJECT_ROOT
 
 BASE_DIR = PROJECT_ROOT
 CACHE_DIR = BASE_DIR / "user_data" / "oracle_lp_cache"
-# IQ-67 changes Oracle feasibility with daily 06:00 SOC equalities.  Bumping the
-# version prevents an old unconstrained teacher cache from silently surviving.
-# TODO(IQ-67): retain cache-version bumps for every future Oracle constraint change.
-CACHE_VERSION = 5
+# Version 6 removes the generic Oracle's fictional solar-charge decision and
+# limits discharge to current factory demand. Old teacher traces are incompatible.
+# TODO(ORACLE-CACHE): retain cache-version bumps for every future Oracle constraint change.
+CACHE_VERSION = 6
 
 ORACLE_PARAMETER_KEYS = (
     "selected_data_csv",
@@ -166,7 +166,7 @@ def load_cached_training_dispatch(
     if not isinstance(days, list):
         raise OracleCacheRequired("Oracle LP cache is missing or invalid.")
 
-    required_fields = ("discharge", "grid_charge", "solar_charge")
+    required_fields = ("discharge", "grid_charge")
     by_index = {
         int(day["day_index"]): day
         for day in days

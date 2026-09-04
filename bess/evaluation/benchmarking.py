@@ -258,7 +258,7 @@ def _oracle_contestant(oracle, cfg, parameters):
     for day in days:
         throughput = cfg.dt * sum(
             sum(float(value) for value in day.get(key, []))
-            for key in ("discharge", "grid_charge", "solar_charge")
+            for key in ("discharge", "grid_charge")
         )
         day.setdefault("safety_violation", False)
         day["throughput_kwh"] = round(throughput, 2)

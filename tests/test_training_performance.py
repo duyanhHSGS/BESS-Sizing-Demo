@@ -720,7 +720,6 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         oracle_dispatch = [{
             "discharge": [0.0] * steps,
             "grid_charge": [10.0] * steps,
-            "solar_charge": [0.0] * steps,
         }]
 
         observations, targets, rewards = _collect_oracle_teacher_samples(

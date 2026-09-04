@@ -200,11 +200,10 @@ def _oracle_dispatch_wear_cost_vnd(
     """Score Oracle charge/discharge throughput with the same LP wear convention."""
     throughput_kwh = float(timestep_hours) * sum(
         sum(
-            discharge + grid_charge + solar_charge
-            for discharge, grid_charge, solar_charge in zip(
+            discharge + grid_charge
+            for discharge, grid_charge in zip(
                 day["discharge"],
                 day["grid_charge"],
-                day["solar_charge"],
                 strict=True,
             )
         )
@@ -223,10 +222,7 @@ def _oracle_teacher_action(
     battery_side_kw = []
     for step in range(start, stop):
         discharge_kw = float(dispatch["discharge"][step]) / float(cfg.eta_dis)
-        charge_kw = (
-            float(dispatch["grid_charge"][step])
-            + float(dispatch["solar_charge"][step])
-        ) * float(cfg.eta_ch)
+        charge_kw = float(dispatch["grid_charge"][step]) * float(cfg.eta_ch)
         battery_side_kw.append(discharge_kw - charge_kw)
     mean_battery_kw = float(np.mean(battery_side_kw)) if battery_side_kw else 0.0
     return float(np.clip(mean_battery_kw / float(cfg.P_rated_nominal), -1.0, 1.0))

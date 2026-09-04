@@ -546,13 +546,13 @@ class PPOOracleTeacherTests(unittest.TestCase):
     def test_oracle_teacher_action_converts_outside_power_to_battery_side(self):
         cfg = SimpleNamespace(eta_dis=0.9, eta_ch=0.9, P_rated_nominal=450.0)
         discharge = _oracle_teacher_action(
-            {"discharge": [90.0], "grid_charge": [0.0], "solar_charge": [0.0]},
+            {"discharge": [90.0], "grid_charge": [0.0]},
             0,
             1,
             cfg,
         )
         charge = _oracle_teacher_action(
-            {"discharge": [0.0], "grid_charge": [100.0], "solar_charge": [0.0]},
+            {"discharge": [0.0], "grid_charge": [100.0]},
             0,
             1,
             cfg,
@@ -566,13 +566,12 @@ class PPOOracleTeacherTests(unittest.TestCase):
                 {
                     "discharge": [100.0, 0.0],
                     "grid_charge": [0.0, 80.0],
-                    "solar_charge": [0.0, 20.0],
                 }
             ],
             timestep_hours=0.25,
             wear_vnd_per_kwh=500.0,
         )
-        self.assertAlmostEqual(wear, 25_000.0)
+        self.assertAlmostEqual(wear, 22_500.0)
 
     def test_behavior_clone_actor_reduces_teacher_mse(self):
         agent = PPOAgent(7, seed=0, device="cpu")

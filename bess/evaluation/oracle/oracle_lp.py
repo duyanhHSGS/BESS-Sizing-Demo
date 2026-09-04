@@ -108,8 +108,11 @@ def _solve_month(
 ):
     load = _flatten(days, "load")
     pv = _flatten(days, "pv")
+    # PV only reduces factory demand. The Oracle cannot treat excess PV as a
+    # separate battery-charging source.
     effective_load = [max(0.0, load_kw - pv_kw) for load_kw, pv_kw in zip(load, pv)]
-    solar_surplus = [max(0.0, pv_kw - load_kw) for load_kw, pv_kw in zip(load, pv)]
+    # TODO(PV-SURPLUS): model curtailment or export explicitly if the site later
+    # needs behavior for PV production above factory load.
     prices = [price for day in days for price in _prices_for_day(day, parameters, dt)]
     steps = len(effective_load)
     if steps == 0:
@@ -124,10 +127,9 @@ def _solve_month(
     for step, price in enumerate(prices):
         objective[idx.grid_charge(step)] = price * dt + wear_cost * dt
         objective[idx.discharge(step)] = -price * dt + wear_cost * dt
-        objective[idx.solar_charge(step)] = wear_cost * dt
     objective[idx.peak] = demand_rate
 
-    bounds = _variable_bounds(steps, power_limit, solar_surplus, minimum_soc, maximum_soc)
+    bounds = _variable_bounds(steps, power_limit, effective_load, minimum_soc, maximum_soc)
     a_eq, b_eq = _build_equalities(
         lil_matrix,
         steps,
@@ -147,7 +149,6 @@ def _solve_month(
         steps,
         variable_count,
         idx,
-        power_limit,
         dt,
     )
 
@@ -166,14 +167,12 @@ def _solve_month(
     return _slice_days(days, result.x, idx, parameters, dt)
 
 
-def _variable_bounds(steps, power_limit, solar_surplus, minimum_soc, maximum_soc):
+def _variable_bounds(steps, power_limit, effective_load, minimum_soc, maximum_soc):
     bounds = []
-    for _ in range(steps):
-        bounds.append((0.0, power_limit))
-    for _ in range(steps):
-        bounds.append((0.0, power_limit))
     for step in range(steps):
-        bounds.append((0.0, min(power_limit, solar_surplus[step])))
+        bounds.append((0.0, min(power_limit, effective_load[step])))
+    for _ in range(steps):
+        bounds.append((0.0, power_limit))
     for _ in range(steps):
         bounds.append((0.0, None))
     for _ in range(steps + 1):
@@ -224,7 +223,6 @@ def _build_equalities(
         a_eq[row, idx.soc(step + 1)] = 1.0
         a_eq[row, idx.soc(step)] = -1.0
         a_eq[row, idx.grid_charge(step)] = -charge_soc_gain
-        a_eq[row, idx.solar_charge(step)] = -charge_soc_gain
         a_eq[row, idx.discharge(step)] = discharge_soc_loss
         row += 1
 
@@ -259,20 +257,13 @@ def _build_inequalities(
     steps,
     variable_count,
     idx,
-    power_limit,
     dt,
 ):
     demand_windows = _demand_windows(steps, dt)
-    a_ub = lil_matrix((steps + len(demand_windows), variable_count))
-    b_ub = [0.0] * (steps + len(demand_windows))
+    a_ub = lil_matrix((len(demand_windows), variable_count))
+    b_ub = [0.0] * len(demand_windows)
 
     row = 0
-    for step in range(steps):
-        a_ub[row, idx.grid_charge(step)] = 1.0
-        a_ub[row, idx.solar_charge(step)] = 1.0
-        b_ub[row] = power_limit
-        row += 1
-
     for window in demand_windows:
         for window_step, weight in window:
             a_ub[row, idx.grid_import(window_step)] = weight
@@ -290,14 +281,13 @@ def _slice_days(days, solution, idx, parameters, dt):
         span = range(offset, offset + count)
         discharge = [solution[idx.discharge(step)] for step in span]
         grid_charge = [solution[idx.grid_charge(step)] for step in span]
-        solar_charge = [solution[idx.solar_charge(step)] for step in span]
         grid_import = [solution[idx.grid_import(step)] for step in span]
         soc = [solution[idx.soc(step)] for step in range(offset, offset + count + 1)]
         rolling_grid = _rolling_30_minute_average(grid_import, dt)
         before_cost = _day_energy_cost(day, parameters, dt)
         after_cost = sum(power * price * dt for power, price in zip(grid_import, _prices_for_day(day, parameters, dt)))
         wear_cost = _to_float(parameters.get("battery_wear_cost"), 0.0) * dt * sum(
-            d + gc + sc for d, gc, sc in zip(discharge, grid_charge, solar_charge)
+            d + gc for d, gc in zip(discharge, grid_charge)
         )
 
         output.append(
@@ -310,11 +300,10 @@ def _slice_days(days, solution, idx, parameters, dt):
                 "rolling_grid": _rounded_series(rolling_grid),
                 "discharge": _rounded_series(discharge),
                 "grid_charge": _rounded_series(grid_charge),
-                "solar_charge": _rounded_series(solar_charge),
                 "soc": [round(value * 100, 1) for value in soc[:-1]],
                 "final_soc": round(soc[-1] * 100, 1),
                 "grid_kWh": round(sum(grid_import) * dt, 2),
-                "charged_kWh": round((sum(grid_charge) + sum(solar_charge)) * dt, 2),
+                "charged_kWh": round(sum(grid_charge) * dt, 2),
                 "discharged_kWh": round(sum(discharge) * dt, 2),
                 "peak_grid_kW": round(max(rolling_grid, default=0.0), 2),
                 "energy_cost_vnd": round(after_cost),
@@ -453,7 +442,6 @@ def _no_battery_result(days, parameters, dt):
                 "rolling_grid": _rounded_series(rolling_grid),
                 "discharge": zeros,
                 "grid_charge": zeros,
-                "solar_charge": zeros,
                 "soc": zeros,
                 "final_soc": 0.0,
                 "grid_kWh": day["grid_kWh"],
@@ -484,7 +472,6 @@ def _failed_day(day, message):
         "rolling_grid": day["rolling_grid"],
         "discharge": [0.0] * count,
         "grid_charge": [0.0] * count,
-        "solar_charge": [0.0] * count,
         "soc": [0.0] * count,
         "final_soc": 0.0,
         "grid_kWh": day["grid_kWh"],
@@ -556,9 +543,8 @@ class _Indexes:
         self.steps = steps
         self.discharge_start = 0
         self.grid_charge_start = steps
-        self.solar_charge_start = steps * 2
-        self.grid_import_start = steps * 3
-        self.soc_start = steps * 4
+        self.grid_import_start = steps * 2
+        self.soc_start = steps * 3
         self.peak = self.soc_start + steps + 1
 
     def discharge(self, step):
@@ -566,9 +552,6 @@ class _Indexes:
 
     def grid_charge(self, step):
         return self.grid_charge_start + step
-
-    def solar_charge(self, step):
-        return self.solar_charge_start + step
 
     def grid_import(self, step):
         return self.grid_import_start + step
