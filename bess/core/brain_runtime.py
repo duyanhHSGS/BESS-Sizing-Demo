@@ -188,10 +188,6 @@ class BrainControlTransition:
     peak_guard_trigger_steps: int
     peak_guard_override_steps: int
     peak_guard_unmet_steps: int
-    soc_deadline_trigger_steps: int
-    soc_deadline_override_steps: int
-    soc_deadline_unmet_count: int
-    soc_deadline_shortfall_penalty_vnd: float
     requested_policy_action: float
     applied_native_actions: tuple[float, ...]
 
@@ -204,96 +200,6 @@ class PeakGuardDecision:
     triggered: bool
     adjusted: bool
     allowed_grid_kw: float | None
-
-
-@dataclass(frozen=True, slots=True)
-class SocDeadlineDecision:
-    """One native-step maximum-action clamp that fills SOC by a clock deadline."""
-
-    action: float
-    triggered: bool
-    adjusted: bool
-    required_charge_kw: float
-    physically_feasible: bool
-
-
-def enforce_soc_deadline_guard(
-    action: float,
-    *,
-    state_of_charge: float,
-    maximum_state_of_charge: float,
-    battery_capacity_kwh: float,
-    battery_power_kw: float,
-    native_step_in_day: int,
-    steps_per_day: int,
-    timestep_hours: float,
-    deadline_hour: float,
-    enabled: bool,
-) -> SocDeadlineDecision:
-    """Spread the minimum required charging evenly from midnight to a daily deadline.
-
-    Positive action is discharge and negative action is charge.  Recomputing the
-    required average every native step both blocks deadline-breaking discharge
-    and avoids a last-minute full-power charging spike.
-    """
-    values = (
-        action,
-        state_of_charge,
-        maximum_state_of_charge,
-        battery_capacity_kwh,
-        battery_power_kw,
-        timestep_hours,
-        deadline_hour,
-    )
-    if not all(math.isfinite(float(value)) for value in values):
-        raise ValueError("SOC Deadline Guard inputs must all be finite")
-    if not isinstance(native_step_in_day, int) or not isinstance(steps_per_day, int):
-        raise TypeError("SOC Deadline Guard step indexes must be integers")
-    if steps_per_day <= 0 or not 0 <= native_step_in_day < steps_per_day:
-        raise ValueError("SOC Deadline Guard native step must be inside the day")
-
-    action_value = float(action)
-    soc = float(state_of_charge)
-    soc_max = float(maximum_state_of_charge)
-    capacity = float(battery_capacity_kwh)
-    rated_power = float(battery_power_kw)
-    dt_hours = float(timestep_hours)
-    deadline = float(deadline_hour)
-    if not ACTION_MIN <= action_value <= ACTION_MAX:
-        raise ValueError("SOC Deadline Guard action must be inside [-1, 1]")
-    if capacity <= 0.0 or rated_power <= 0.0 or dt_hours <= 0.0:
-        raise ValueError("SOC Deadline Guard battery and timestep values must be positive")
-    if not 0.0 < deadline < 24.0:
-        raise ValueError("SOC Deadline Guard hour must be inside (0, 24)")
-    if soc > soc_max + 1e-9:
-        raise ValueError("SOC Deadline Guard state of charge exceeds its maximum")
-
-    exact_deadline_step = deadline / dt_hours
-    deadline_step = round(exact_deadline_step)
-    if abs(exact_deadline_step - deadline_step) > 1e-9:
-        raise ValueError("SOC Deadline Guard hour must align with the native timestep")
-    if deadline_step <= 0 or deadline_step >= steps_per_day:
-        raise ValueError("SOC Deadline Guard deadline step must be inside the day")
-    if not enabled or native_step_in_day >= deadline_step:
-        return SocDeadlineDecision(action_value, False, False, 0.0, True)
-
-    missing_energy_kwh = max(0.0, soc_max - soc) * capacity
-    if missing_energy_kwh <= 1e-9:
-        return SocDeadlineDecision(action_value, False, False, 0.0, True)
-    remaining_hours = (deadline_step - native_step_in_day) * dt_hours
-    required_charge_kw = missing_energy_kwh / remaining_hours
-    required_action = -min(rated_power, required_charge_kw) / rated_power
-    guarded_action = min(action_value, required_action)
-    adjusted = not math.isclose(guarded_action, action_value, rel_tol=0.0, abs_tol=1e-12)
-    # TODO(IQ-67): preserve this final-authority ordering after Peak Guard; the
-    # operator explicitly chose 06:00 SOC over an overnight peak conflict.
-    return SocDeadlineDecision(
-        guarded_action,
-        True,
-        adjusted,
-        required_charge_kw,
-        required_charge_kw <= rated_power + 1e-9,
-    )
 
 
 def enforce_seen_peak_guard(
@@ -425,9 +331,6 @@ def step_brain_control(
     peak_guard_enabled: bool = False,
     peak_guard_min_completed_days: int = 1,
     peak_guard_deadband_kw: float = 1.0,
-    soc_deadline_enabled: bool = False,
-    soc_deadline_hour: float = 6.0,
-    soc_deadline_shortfall_penalty_vnd: float = 0.0,
 ) -> BrainControlTransition:
     """Hold one requested action over native env steps with optional cheap-only charging."""
     if native_steps <= 0:
@@ -438,8 +341,6 @@ def step_brain_control(
         raise ValueError("cheap-only charging requires an episode-backed BrainEnv")
     if peak_guard_enabled and env.episode is None:
         raise ValueError("Peak Guard requires an episode-backed BrainEnv")
-    if soc_deadline_enabled and env.episode is None:
-        raise ValueError("SOC Deadline Guard requires an episode-backed BrainEnv")
     if isinstance(peak_guard_min_completed_days, bool) or peak_guard_min_completed_days < 0:
         raise ValueError("Peak Guard minimum completed days must be a non-negative integer")
     if int(peak_guard_min_completed_days) != peak_guard_min_completed_days:
@@ -454,16 +355,6 @@ def step_brain_control(
     peak_guard_trigger_steps = 0
     peak_guard_override_steps = 0
     peak_guard_unmet_steps = 0
-    soc_deadline_trigger_steps = 0
-    soc_deadline_override_steps = 0
-    soc_deadline_unmet_count = 0
-    soc_deadline_shortfall_penalty_vnd = float(soc_deadline_shortfall_penalty_vnd)
-    if (
-        not math.isfinite(soc_deadline_shortfall_penalty_vnd)
-        or soc_deadline_shortfall_penalty_vnd < 0.0
-    ):
-        raise ValueError("SOC deadline shortfall penalty must be finite and non-negative")
-    applied_shortfall_penalty_vnd = 0.0
     applied_native_actions: list[float] = []
 
     for _ in range(native_steps):
@@ -505,49 +396,12 @@ def step_brain_control(
             peak_guard_trigger_steps += int(peak_guard.triggered)
             peak_guard_override_steps += int(peak_guard.adjusted)
             adjusted = adjusted or peak_guard.adjusted
-        deadline_step = None
-        native_step_in_day = None
-        if soc_deadline_enabled:
-            assert env.episode is not None
-            deadline_step = round(float(soc_deadline_hour) / env.bess_world.timestep_hours)
-            native_step_in_day = env.bess_world.timestep_index % env.episode.steps_per_day
-            deadline = enforce_soc_deadline_guard(
-                step_action,
-                state_of_charge=env.bess_world.state_of_charge,
-                maximum_state_of_charge=env.bess_world.maximum_state_of_charge,
-                battery_capacity_kwh=env.bess_world.battery_capacity_kwh,
-                battery_power_kw=env.bess_world.battery_power_kw,
-                native_step_in_day=native_step_in_day,
-                steps_per_day=env.episode.steps_per_day,
-                timestep_hours=env.bess_world.timestep_hours,
-                deadline_hour=soc_deadline_hour,
-                enabled=True,
-            )
-            step_action = deadline.action
-            soc_deadline_trigger_steps += int(deadline.triggered)
-            soc_deadline_override_steps += int(deadline.adjusted)
-            adjusted = adjusted or deadline.adjusted
         applied_native_actions.append(step_action)
         result = env.step(step_action)
         if not isinstance(result, BrainEnvironmentStepResult):
             raise TypeError("owned BrainEnv episode returned a non-episode step result")
         results.append(result)
         reward_vnd += result.reward.timestep_savings_vnd
-        if (
-            soc_deadline_enabled
-            and native_step_in_day is not None
-            and deadline_step is not None
-            and native_step_in_day + 1 == deadline_step
-        ):
-            shortfall = max(
-                0.0,
-                env.bess_world.maximum_state_of_charge - result.bess.physics.next_soc,
-            )
-            if shortfall > 1e-9:
-                soc_deadline_unmet_count += 1
-                penalty = soc_deadline_shortfall_penalty_vnd * shortfall * shortfall
-                reward_vnd -= penalty
-                applied_shortfall_penalty_vnd += penalty
         next_observation = result.next_observation
         done = result.done
         physics = result.bess.physics
@@ -579,10 +433,6 @@ def step_brain_control(
         peak_guard_trigger_steps=peak_guard_trigger_steps,
         peak_guard_override_steps=peak_guard_override_steps,
         peak_guard_unmet_steps=peak_guard_unmet_steps,
-        soc_deadline_trigger_steps=soc_deadline_trigger_steps,
-        soc_deadline_override_steps=soc_deadline_override_steps,
-        soc_deadline_unmet_count=soc_deadline_unmet_count,
-        soc_deadline_shortfall_penalty_vnd=applied_shortfall_penalty_vnd,
         requested_policy_action=float(action),
         applied_native_actions=tuple(applied_native_actions),
     )

@@ -266,12 +266,6 @@ def run_policy_dispatch(
             "peak_guard_trigger_steps": rollout.get("peak_guard_trigger_steps", 0),
             "peak_guard_override_steps": rollout.get("peak_guard_override_steps", 0),
             "peak_guard_unmet_steps": rollout.get("peak_guard_unmet_steps", 0),
-            "soc_deadline_trigger_steps": rollout.get("soc_deadline_trigger_steps", 0),
-            "soc_deadline_override_steps": rollout.get("soc_deadline_override_steps", 0),
-            "soc_deadline_unmet_count": rollout.get("soc_deadline_unmet_count", 0),
-            "soc_deadline_shortfall_penalty_vnd": rollout.get(
-                "soc_deadline_shortfall_penalty_vnd", 0.0
-            ),
         },
     }
 

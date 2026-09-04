@@ -13,10 +13,7 @@ from bess.paths import PROJECT_ROOT
 
 BASE_DIR = PROJECT_ROOT
 CACHE_DIR = BASE_DIR / "user_data" / "oracle_lp_cache"
-# IQ-67 changes Oracle feasibility with daily 06:00 SOC equalities.  Bumping the
-# version prevents an old unconstrained teacher cache from silently surviving.
-# TODO(IQ-67): retain cache-version bumps for every future Oracle constraint change.
-CACHE_VERSION = 5
+CACHE_VERSION = 4
 
 ORACLE_PARAMETER_KEYS = (
     "selected_data_csv",

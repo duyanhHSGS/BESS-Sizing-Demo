@@ -1,7 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
 
-from bess.core.settings import PPO_SOC_DEADLINE_ENABLED, PPO_SOC_DEADLINE_HOUR
 from bess.evaluation.benchmark import (
     _annotate_day_billing,
     _day_energy_cost,
@@ -139,8 +138,6 @@ def _solve_month(
         charge_efficiency,
         discharge_efficiency,
         minimum_soc,
-        soc_deadline_steps=_soc_deadline_steps(days, dt) if PPO_SOC_DEADLINE_ENABLED else (),
-        soc_deadline_target=maximum_soc,
     )
     a_ub, b_ub = _build_inequalities(
         lil_matrix,
@@ -193,19 +190,9 @@ def _build_equalities(
     charge_efficiency,
     discharge_efficiency,
     initial_soc,
-    *,
-    soc_deadline_steps=(),
-    soc_deadline_target=None,
 ):
-    deadline_steps = tuple(int(step) for step in soc_deadline_steps)
-    if len(set(deadline_steps)) != len(deadline_steps):
-        raise ValueError("Oracle SOC deadline steps must be unique")
-    if any(step <= 0 or step > steps for step in deadline_steps):
-        raise ValueError("Oracle SOC deadline step must be inside the episode")
-    if deadline_steps and soc_deadline_target is None:
-        raise ValueError("Oracle SOC deadline target is required")
-    a_eq = lil_matrix((1 + steps * 2 + len(deadline_steps), variable_count))
-    b_eq = [0.0] * (1 + steps * 2 + len(deadline_steps))
+    a_eq = lil_matrix((1 + steps * 2, variable_count))
+    b_eq = [0.0] * (1 + steps * 2)
 
     row = 0
     a_eq[row, idx.soc(0)] = 1.0
@@ -228,30 +215,7 @@ def _build_equalities(
         a_eq[row, idx.discharge(step)] = discharge_soc_loss
         row += 1
 
-    for deadline_step in deadline_steps:
-        a_eq[row, idx.soc(deadline_step)] = 1.0
-        b_eq[row] = float(soc_deadline_target)
-        row += 1
-
     return a_eq, b_eq
-
-
-def _soc_deadline_steps(days, dt):
-    """Return each day's global SOC index at the configured 06:00 deadline."""
-    exact_step = float(PPO_SOC_DEADLINE_HOUR) / float(dt)
-    deadline_step = round(exact_step)
-    if abs(exact_step - deadline_step) > 1e-9:
-        raise ValueError("SOC deadline hour must align with Oracle data resolution")
-    offsets = []
-    cursor = 0
-    for day in days:
-        day_steps = len(day["load"])
-        if deadline_step <= 0 or deadline_step >= day_steps:
-            raise ValueError("SOC deadline must fall inside every Oracle day")
-        offsets.append(cursor + deadline_step)
-        cursor += day_steps
-    # TODO(IQ-67): Oracle and runtime must keep identical start-of-06:00 SOC semantics.
-    return tuple(offsets)
 
 
 def _build_inequalities(

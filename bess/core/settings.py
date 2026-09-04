@@ -121,15 +121,6 @@ PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF = True
 PPO_PEAK_GUARD_ENABLED = True
 PPO_PEAK_GUARD_MIN_COMPLETED_DAYS = 1
 PPO_PEAK_GUARD_DEADBAND_KW = 1.0
-# IQ-67 makes the operator's daily 06:00 full-SOC requirement a deterministic
-# controller invariant.  The penalty is normally zero because the guard is
-# physically able to meet the deadline; it teaches PPO that an impossible or
-# externally interrupted deadline miss is still bad.
-PPO_SOC_DEADLINE_ENABLED = True
-PPO_SOC_DEADLINE_HOUR = 6.0
-PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND = 128_250_000.0
-# TODO(IQ-67): compare every 30-day bucket against IQ-65/IQ-66 and audit the
-# overnight grid peak before promoting the 06:00 SOC Deadline Guard.
 PPO_ACTION_MISMATCH_SHAPING_SCALE = 0.10
 PPO_ORACLE_BC_ENABLED = True
 PPO_ORACLE_ACTOR_BC_MAX_EPOCHS = 300
