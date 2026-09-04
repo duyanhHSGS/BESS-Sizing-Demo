@@ -537,8 +537,8 @@ def step_brain_control(
             peak_guard_trigger_steps += int(peak_guard.triggered)
             peak_guard_override_steps += int(peak_guard.adjusted)
             adjusted = adjusted or peak_guard.adjusted
-            # TODO(IQ-68): keep the first-day wake-up tied to the configured
-            # cheap-window boundary; never replace it with a hardcoded clock hour.
+            # TODO(IQ-71): keep this primitive step-based and let checkpoint/trainer
+            # metadata choose the experiment wake clock; old cheap-end checkpoints stay valid.
         deadline_step = None
         native_step_in_day = None
         if soc_deadline_enabled:

@@ -243,9 +243,26 @@ def run_drl_policy(
     )
     peak_guard_enabled = bool(meta.get("peak_guard_enabled", False))
     peak_guard_min_completed_days = int(meta.get("peak_guard_min_completed_days", 1))
-    peak_guard_first_day_arm_at_cheap_end = bool(
-        meta.get("peak_guard_first_day_arm_at_cheap_end", False)
-    )
+    peak_guard_first_day_arm_hour_meta = meta.get("peak_guard_first_day_arm_hour")
+    if peak_guard_first_day_arm_hour_meta is not None:
+        peak_guard_first_day_arm_hour = float(peak_guard_first_day_arm_hour_meta)
+        if not np.isfinite(peak_guard_first_day_arm_hour) or not (
+            0.0 <= peak_guard_first_day_arm_hour < 24.0
+        ):
+            raise ValueError("Peak Guard first-day arm hour must be finite and inside [0, 24)")
+        exact_arm_step = peak_guard_first_day_arm_hour / float(cfg.dt)
+        rounded_arm_step = round(exact_arm_step)
+        if abs(exact_arm_step - rounded_arm_step) > 1e-9:
+            raise ValueError("Peak Guard first-day arm hour must align with the native timestep")
+        peak_guard_first_day_arm_step = int(rounded_arm_step)
+    else:
+        # Legacy IQ-68/69/70 checkpoints woke Peak Police at the configured cheap-window end.
+        # TODO(IQ-71): keep this fallback forever unless old checkpoint support is deliberately dropped.
+        peak_guard_first_day_arm_step = (
+            int(cfg.OFF_PEAK_END_STEP)
+            if bool(meta.get("peak_guard_first_day_arm_at_cheap_end", False))
+            else None
+        )
     peak_guard_deadband_kw = float(meta.get("peak_guard_deadband_kw", 1.0))
     soc_deadline_enabled = bool(meta.get("soc_deadline_enabled", False))
     soc_deadline_hour = float(meta.get("soc_deadline_hour", 6.0))
@@ -291,11 +308,7 @@ def run_drl_policy(
             cheap_tariff_steps=cheap_tariff_steps,
             peak_guard_enabled=peak_guard_enabled,
             peak_guard_min_completed_days=peak_guard_min_completed_days,
-            peak_guard_first_day_arm_step=(
-                int(cfg.OFF_PEAK_END_STEP)
-                if peak_guard_first_day_arm_at_cheap_end
-                else None
-            ),
+            peak_guard_first_day_arm_step=peak_guard_first_day_arm_step,
             peak_guard_deadband_kw=peak_guard_deadband_kw,
             soc_deadline_enabled=soc_deadline_enabled,
             soc_deadline_hour=soc_deadline_hour,

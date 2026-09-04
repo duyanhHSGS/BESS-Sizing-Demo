@@ -7,7 +7,7 @@ import numpy as np
 
 from bess.core.common import load_system_config, make_bess_config
 from bess.core.scenario_gen import DayData, MonthData
-from bess.core.settings import DEFAULT_PARAMETERS
+from bess.core.settings import DEFAULT_PARAMETERS, PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR
 from bess.dispatch.dispatch_runner import DispatchRunWarning, run_policy_dispatch
 from bess.evaluation.baselines import run_drl_policy, validate_dispatch_sampling
 
@@ -242,6 +242,147 @@ class CrossResolutionDispatchTests(unittest.TestCase):
         self.assertEqual(cfg.OFF_PEAK_END_STEP, 20)
         self.assertGreater(result["peak_guard_trigger_steps"], 0)
         self.assertLessEqual(danger_block, cheap_peak + 1.0 + 1e-9)
+
+    def test_iq71_checkpoint_sleeps_before_noon_and_wakes_exactly_at_noon(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        load = np.full(96, 100.0, dtype=np.float64)
+        load[40:42] = 350.0  # 10:00: police must still sleep.
+        load[48:50] = 450.0  # 12:00: police must wake immediately.
+        month = MonthData(
+            days=[DayData(
+                load=load,
+                pv=np.zeros(96, dtype=np.float64),
+                day_type="working",
+                weather="test",
+                day_index=1,
+                date_iso="2026-01-01",
+            )],
+            source="iq71-noon-wake-test",
+        )
+        policy = IdlePolicy()
+        policy.meta.update({
+            "peak_guard_enabled": True,
+            "peak_guard_min_completed_days": 1,
+            "peak_guard_first_day_arm_hour": PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR,
+            "peak_guard_deadband_kw": 1.0,
+            "soc_deadline_enabled": True,
+            "soc_deadline_hour": 6.0,
+            "soc_deadline_shortfall_penalty_vnd": 128_250_000.0,
+        })
+
+        result = run_drl_policy(month, cfg, policy, p_ref_kw=1500.0)
+        ten_am_block = float(np.mean(result["p_grid_days"][0][40:42]))
+        noon_block = float(np.mean(result["p_grid_days"][0][48:50]))
+
+        self.assertEqual(PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR, 12.0)
+        self.assertAlmostEqual(ten_am_block, 350.0)
+        self.assertLessEqual(noon_block, 351.0 + 1e-9)
+        self.assertGreater(result["peak_guard_trigger_steps"], 0)
+        self.assertGreater(result["peak_guard_override_steps"], 0)
+
+    def test_iq71_noon_metadata_overrides_legacy_cheap_end_wake_flag(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        load = np.full(96, 100.0, dtype=np.float64)
+        load[24:26] = 350.0  # 06:00 would be guarded if the legacy flag won.
+        load[48:50] = 450.0
+        month = MonthData(
+            days=[DayData(
+                load=load,
+                pv=np.zeros(96, dtype=np.float64),
+                day_type="working",
+                weather="test",
+                day_index=1,
+                date_iso="2026-01-01",
+            )],
+            source="iq71-metadata-priority-test",
+        )
+        policy = IdlePolicy()
+        policy.meta.update({
+            "peak_guard_enabled": True,
+            "peak_guard_min_completed_days": 1,
+            "peak_guard_first_day_arm_hour": 12.0,
+            "peak_guard_first_day_arm_at_cheap_end": True,
+            "peak_guard_deadband_kw": 1.0,
+            "soc_deadline_enabled": True,
+            "soc_deadline_hour": 6.0,
+            "soc_deadline_shortfall_penalty_vnd": 128_250_000.0,
+        })
+
+        result = run_drl_policy(month, cfg, policy, p_ref_kw=1500.0)
+
+        self.assertAlmostEqual(float(np.mean(result["p_grid_days"][0][24:26])), 350.0)
+        self.assertLessEqual(float(np.mean(result["p_grid_days"][0][48:50])), 351.0 + 1e-9)
+
+    def test_iq71_noon_wake_restarts_on_each_fixed_30_day_bucket(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        cfg.set_dt(0.25)
+
+        def bucket_day(day_index: int, date_iso: str) -> DayData:
+            load = np.full(96, 100.0, dtype=np.float64)
+            load[40:42] = 350.0
+            load[48:50] = 450.0
+            return DayData(
+                load=load,
+                pv=np.zeros(96, dtype=np.float64),
+                day_type="working",
+                weather="test",
+                day_index=day_index,
+                date_iso=date_iso,
+            )
+
+        month = MonthData(
+            days=[bucket_day(1, "2026-01-01"), bucket_day(31, "2026-01-31")],
+            source="iq71-fixed-bucket-reset-test",
+        )
+        policy = IdlePolicy()
+        policy.meta.update({
+            "peak_guard_enabled": True,
+            "peak_guard_min_completed_days": 1,
+            "peak_guard_first_day_arm_hour": 12.0,
+            "peak_guard_deadband_kw": 1.0,
+            "soc_deadline_enabled": True,
+            "soc_deadline_hour": 6.0,
+            "soc_deadline_shortfall_penalty_vnd": 128_250_000.0,
+        })
+
+        result = run_drl_policy(month, cfg, policy, p_ref_kw=1500.0)
+
+        self.assertEqual(len(result["p_grid_days"]), 2)
+        for day_grid in result["p_grid_days"]:
+            self.assertAlmostEqual(float(np.mean(day_grid[40:42])), 350.0)
+            self.assertLessEqual(float(np.mean(day_grid[48:50])), 351.0 + 1e-9)
+        self.assertGreaterEqual(result["peak_guard_trigger_steps"], 2)
+
+    def test_iq71_rejects_invalid_checkpoint_wake_hours(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        month = MonthData(
+            days=[DayData(
+                load=np.full(96, 100.0, dtype=np.float64),
+                pv=np.zeros(96, dtype=np.float64),
+                day_type="working",
+                weather="test",
+                day_index=1,
+                date_iso="2026-01-01",
+            )],
+            source="iq71-invalid-hour-test",
+        )
+
+        for bad_hour in (-1.0, 24.0, float("nan"), 12.1):
+            with self.subTest(bad_hour=bad_hour):
+                policy = IdlePolicy()
+                policy.meta.update({
+                    "peak_guard_enabled": True,
+                    "peak_guard_first_day_arm_hour": bad_hour,
+                })
+                with self.assertRaises(ValueError):
+                    run_drl_policy(month, cfg, policy, p_ref_kw=1500.0)
 
     def test_legacy_policy_uses_96_decisions_and_1440_native_updates(self):
         policy = CountingPolicy()
