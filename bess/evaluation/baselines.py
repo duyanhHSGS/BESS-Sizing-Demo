@@ -243,6 +243,9 @@ def run_drl_policy(
     )
     peak_guard_enabled = bool(meta.get("peak_guard_enabled", False))
     peak_guard_min_completed_days = int(meta.get("peak_guard_min_completed_days", 1))
+    peak_guard_first_day_arm_at_cheap_end = bool(
+        meta.get("peak_guard_first_day_arm_at_cheap_end", False)
+    )
     peak_guard_deadband_kw = float(meta.get("peak_guard_deadband_kw", 1.0))
     soc_deadline_enabled = bool(meta.get("soc_deadline_enabled", False))
     soc_deadline_hour = float(meta.get("soc_deadline_hour", 6.0))
@@ -288,6 +291,11 @@ def run_drl_policy(
             cheap_tariff_steps=cheap_tariff_steps,
             peak_guard_enabled=peak_guard_enabled,
             peak_guard_min_completed_days=peak_guard_min_completed_days,
+            peak_guard_first_day_arm_step=(
+                int(cfg.OFF_PEAK_END_STEP)
+                if peak_guard_first_day_arm_at_cheap_end
+                else None
+            ),
             peak_guard_deadband_kw=peak_guard_deadband_kw,
             soc_deadline_enabled=soc_deadline_enabled,
             soc_deadline_hour=soc_deadline_hour,

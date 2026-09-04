@@ -120,7 +120,9 @@ PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF = True
 # TODO(IQ-66): promote Peak Guard only if unseen economics and human peak review beat IQ-65.
 PPO_PEAK_GUARD_ENABLED = True
 PPO_PEAK_GUARD_MIN_COMPLETED_DAYS = 1
+PPO_PEAK_GUARD_FIRST_DAY_ARM_AT_CHEAP_END = True
 PPO_PEAK_GUARD_DEADBAND_KW = 1.0
+# TODO(IQ-68): verify Day 31 peak protection and 06:00 SOC on the remote Viewer.
 # IQ-67 makes the operator's daily 06:00 full-SOC requirement a deterministic
 # controller invariant.  The penalty is normally zero because the guard is
 # physically able to meet the deadline; it teaches PPO that an impossible or

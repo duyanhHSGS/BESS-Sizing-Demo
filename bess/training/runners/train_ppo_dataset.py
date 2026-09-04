@@ -56,6 +56,7 @@ from bess.core.settings import (
     PPO_ORACLE_BC_TARGET_MSE,
     PPO_PEAK_GUARD_DEADBAND_KW,
     PPO_PEAK_GUARD_ENABLED,
+    PPO_PEAK_GUARD_FIRST_DAY_ARM_AT_CHEAP_END,
     PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
     PPO_PRESERVE_CRITIC_ON_REANCHOR,
     PPO_RECURRENT_ENABLED,
@@ -1237,8 +1238,11 @@ def main() -> None:
         "battery_wear_cost": battery_wear_cost,
         "charge_only_during_cheap_tariff": PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
         "peak_guard_enabled": PPO_PEAK_GUARD_ENABLED,
-        "peak_guard_mode": "seen_peak_meter_budget_minimum_action_v1",
+        "peak_guard_mode": "seen_peak_meter_budget_first_day_after_cheap_v2",
         "peak_guard_min_completed_days": PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
+        "peak_guard_first_day_arm_at_cheap_end": (
+            PPO_PEAK_GUARD_FIRST_DAY_ARM_AT_CHEAP_END
+        ),
         "peak_guard_deadband_kw": PPO_PEAK_GUARD_DEADBAND_KW,
         "soc_deadline_enabled": PPO_SOC_DEADLINE_ENABLED,
         "soc_deadline_mode": "daily_even_minimum_charge_v1",
@@ -1383,8 +1387,12 @@ def main() -> None:
             "battery_wear_cost": battery_wear_cost,
             "charge_only_during_cheap_tariff": PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
             "peak_guard_enabled": PPO_PEAK_GUARD_ENABLED,
-            "peak_guard_mode": "seen_peak_meter_budget_minimum_action_v1",
+            "peak_guard_mode": "seen_peak_meter_budget_first_day_after_cheap_v2",
             "peak_guard_min_completed_days": PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
+            "peak_guard_first_day_arm_at_cheap_end": (
+                PPO_PEAK_GUARD_FIRST_DAY_ARM_AT_CHEAP_END
+            ),
+            "peak_guard_first_day_arm_step": int(cfg.OFF_PEAK_END_STEP),
             "peak_guard_deadband_kw": PPO_PEAK_GUARD_DEADBAND_KW,
             "soc_deadline_enabled": PPO_SOC_DEADLINE_ENABLED,
             "soc_deadline_mode": "daily_even_minimum_charge_v1",
@@ -1860,6 +1868,11 @@ def main() -> None:
             cheap_tariff_steps=cheap_tariff_steps,
             peak_guard_enabled=PPO_PEAK_GUARD_ENABLED,
             peak_guard_min_completed_days=PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
+            peak_guard_first_day_arm_step=(
+                int(cfg.OFF_PEAK_END_STEP)
+                if PPO_PEAK_GUARD_FIRST_DAY_ARM_AT_CHEAP_END
+                else None
+            ),
             peak_guard_deadband_kw=PPO_PEAK_GUARD_DEADBAND_KW,
             soc_deadline_enabled=PPO_SOC_DEADLINE_ENABLED,
             soc_deadline_hour=PPO_SOC_DEADLINE_HOUR,

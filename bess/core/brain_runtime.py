@@ -424,6 +424,7 @@ def step_brain_control(
     cheap_tariff_steps: set[int] | frozenset[int] | None = None,
     peak_guard_enabled: bool = False,
     peak_guard_min_completed_days: int = 1,
+    peak_guard_first_day_arm_step: int | None = None,
     peak_guard_deadband_kw: float = 1.0,
     soc_deadline_enabled: bool = False,
     soc_deadline_hour: float = 6.0,
@@ -444,6 +445,14 @@ def step_brain_control(
         raise ValueError("Peak Guard minimum completed days must be a non-negative integer")
     if int(peak_guard_min_completed_days) != peak_guard_min_completed_days:
         raise ValueError("Peak Guard minimum completed days must be a non-negative integer")
+    if peak_guard_first_day_arm_step is not None:
+        if isinstance(peak_guard_first_day_arm_step, bool):
+            raise ValueError("Peak Guard first-day arm step must be an integer step index")
+        if int(peak_guard_first_day_arm_step) != peak_guard_first_day_arm_step:
+            raise ValueError("Peak Guard first-day arm step must be an integer step index")
+        assert env.episode is not None
+        if not 0 <= int(peak_guard_first_day_arm_step) < env.episode.steps_per_day:
+            raise ValueError("Peak Guard first-day arm step must be inside the day")
 
     results: list[BrainEnvironmentStepResult] = []
     reward_vnd = 0.0
@@ -487,6 +496,15 @@ def step_brain_control(
             timestep = env.episode.timesteps[timestep_index]
             meter = env.bess_world.meter_state
             completed_days = timestep_index // env.episode.steps_per_day
+            native_step_in_day = timestep_index % env.episode.steps_per_day
+            armed_after_completed_days = (
+                completed_days >= int(peak_guard_min_completed_days)
+            )
+            armed_on_first_day = (
+                completed_days == 0
+                and peak_guard_first_day_arm_step is not None
+                and native_step_in_day >= int(peak_guard_first_day_arm_step)
+            )
             peak_guard = enforce_seen_peak_guard(
                 step_action,
                 net_load_kw=timestep.net_load_kw,
@@ -498,13 +516,15 @@ def step_brain_control(
                 charge_efficiency=env.bess_world.charge_efficiency,
                 discharge_efficiency=env.bess_world.discharge_efficiency,
                 enabled=True,
-                armed=completed_days >= int(peak_guard_min_completed_days),
+                armed=armed_after_completed_days or armed_on_first_day,
                 deadband_kw=peak_guard_deadband_kw,
             )
             step_action = peak_guard.action
             peak_guard_trigger_steps += int(peak_guard.triggered)
             peak_guard_override_steps += int(peak_guard.adjusted)
             adjusted = adjusted or peak_guard.adjusted
+            # TODO(IQ-68): keep the first-day wake-up tied to the configured
+            # cheap-window boundary; never replace it with a hardcoded clock hour.
         deadline_step = None
         native_step_in_day = None
         if soc_deadline_enabled:

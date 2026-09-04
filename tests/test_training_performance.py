@@ -265,6 +265,117 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         self.assertGreater(transition.soc_deadline_shortfall_penalty_vnd, 0.0)
         self.assertLess(env.bess_world.state_of_charge, cfg.SOC_max)
 
+    def test_iq68_peak_guard_wakes_exactly_at_first_day_cheap_window_end(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 500.0, base.P_target_user)
+        cfg.dt = 0.25
+        load = np.full(96, 100.0, dtype=np.float64)
+        load[24:26] = 300.0
+        day = DayData(
+            load=load,
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=31,
+            date_iso="2026-02-01",
+        )
+        env = make_brain_env(
+            MonthData(days=[day], source="iq68-first-day-wake-test"),
+            cfg,
+            power_scale_kw=1000.0,
+            initial_state_of_charge=cfg.SOC_max,
+        )
+        env.reset()
+
+        sleeping = step_brain_control(
+            env,
+            0.0,
+            native_steps=cfg.OFF_PEAK_END_STEP,
+            peak_guard_enabled=True,
+            peak_guard_min_completed_days=1,
+            peak_guard_first_day_arm_step=cfg.OFF_PEAK_END_STEP,
+        )
+        awake = step_brain_control(
+            env,
+            0.0,
+            native_steps=2,
+            peak_guard_enabled=True,
+            peak_guard_min_completed_days=1,
+            peak_guard_first_day_arm_step=cfg.OFF_PEAK_END_STEP,
+        )
+
+        self.assertEqual(cfg.OFF_PEAK_END_STEP, 24)
+        self.assertEqual(sleeping.peak_guard_trigger_steps, 0)
+        self.assertAlmostEqual(env.bess_world.meter_state.monthly_peak_kw, 100.0)
+        self.assertEqual(awake.peak_guard_trigger_steps, 2)
+        self.assertEqual(awake.peak_guard_override_steps, 2)
+        for result in awake.native_results:
+            self.assertLessEqual(result.bess.physics.grid_import_kw, 101.0 + 1e-9)
+
+    def test_iq68_missing_first_day_arm_step_preserves_iq67_sleep(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 500.0, base.P_target_user)
+        cfg.dt = 0.25
+        load = np.full(96, 100.0, dtype=np.float64)
+        load[24:26] = 300.0
+        day = DayData(
+            load=load,
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=31,
+            date_iso="2026-02-01",
+        )
+        env = make_brain_env(
+            MonthData(days=[day], source="iq67-legacy-first-day-sleep-test"),
+            cfg,
+            power_scale_kw=1000.0,
+            initial_state_of_charge=cfg.SOC_max,
+        )
+        env.reset()
+
+        transition = step_brain_control(
+            env,
+            0.0,
+            native_steps=26,
+            peak_guard_enabled=True,
+            peak_guard_min_completed_days=1,
+        )
+
+        self.assertEqual(transition.peak_guard_trigger_steps, 0)
+        self.assertAlmostEqual(env.bess_world.meter_state.monthly_peak_kw, 300.0)
+
+    def test_iq68_rejects_invalid_first_day_arm_steps(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 500.0, base.P_target_user)
+        cfg.dt = 0.25
+        day = DayData(
+            load=np.full(96, 100.0, dtype=np.float64),
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        env = make_brain_env(
+            MonthData(days=[day], source="iq68-bad-arm-step-test"),
+            cfg,
+            power_scale_kw=1000.0,
+        )
+        env.reset()
+
+        for bad_step in (True, -1, 1.5, 96):
+            with self.subTest(bad_step=bad_step), self.assertRaisesRegex(
+                ValueError, "first-day arm step"
+            ):
+                step_brain_control(
+                    env,
+                    0.0,
+                    native_steps=1,
+                    peak_guard_enabled=True,
+                    peak_guard_first_day_arm_step=bad_step,
+                )
+
     def test_iq66_native_guard_rescues_second_half_of_held_action(self):
         base = load_system_config()
         cfg = make_bess_config(base, 1000.0, 500.0, base.P_target_user)

@@ -43,6 +43,12 @@ class AlwaysDischargePolicy(CountingPolicy):
         return 1.0
 
 
+class IdlePolicy(CountingPolicy):
+    def predict_action(self, _obs):
+        self.calls += 1
+        return 0.0
+
+
 def dense_month(load_kw=0.0, pv_kw=1000.0):
     steps = 1440
     return MonthData(
@@ -147,6 +153,95 @@ class CrossResolutionDispatchTests(unittest.TestCase):
         self.assertGreater(guarded_result["peak_guard_trigger_steps"], 0)
         self.assertGreater(guarded_result["peak_guard_override_steps"], 0)
         self.assertEqual(guarded_result["peak_guard_unmet_steps"], 0)
+
+    def test_iq68_checkpoint_wakes_peak_guard_at_configured_cheap_window_end(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        cfg.dt = 0.25
+        load = np.full(96, 100.0, dtype=np.float64)
+        load[24:26] = 400.0
+        month = MonthData(
+            days=[
+                DayData(
+                    load=load,
+                    pv=np.zeros(96, dtype=np.float64),
+                    day_type="working",
+                    weather="test",
+                    day_index=31,
+                    date_iso="2026-02-01",
+                )
+            ],
+            source="iq68-first-day-meta-test",
+        )
+        common_meta = {
+            "peak_guard_enabled": True,
+            "peak_guard_min_completed_days": 1,
+            "peak_guard_deadband_kw": 1.0,
+            "soc_deadline_enabled": True,
+            "soc_deadline_hour": 6.0,
+            "soc_deadline_shortfall_penalty_vnd": 128_250_000.0,
+        }
+        iq67 = IdlePolicy()
+        iq67.meta.update(common_meta)
+        iq68 = IdlePolicy()
+        iq68.meta.update(common_meta)
+        iq68.meta["peak_guard_first_day_arm_at_cheap_end"] = True
+
+        iq67_result = run_drl_policy(month, cfg, iq67, p_ref_kw=1500.0)
+        iq68_result = run_drl_policy(month, cfg, iq68, p_ref_kw=1500.0)
+
+        iq67_danger_block = np.mean(iq67_result["p_grid_days"][0][24:26])
+        iq68_danger_block = np.mean(iq68_result["p_grid_days"][0][24:26])
+        iq68_cheap_peak = np.max(
+            iq68_result["p_grid_days"][0][:24].reshape(-1, 2).mean(axis=1)
+        )
+        self.assertAlmostEqual(iq67_danger_block, 400.0)
+        self.assertLessEqual(iq68_danger_block, iq68_cheap_peak + 1.0 + 1e-9)
+        self.assertEqual(iq67_result["peak_guard_trigger_steps"], 0)
+        self.assertGreater(iq68_result["peak_guard_trigger_steps"], 0)
+        self.assertAlmostEqual(iq68_result["soc_days"][0][24], cfg.SOC_max, places=10)
+
+    def test_iq68_wake_time_follows_a_nonstandard_cheap_window(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        cfg.off_windows = "00:00-05:00"
+        cfg.SOC_min = 0.89
+        cfg.set_dt(0.25)
+        load = np.full(96, 100.0, dtype=np.float64)
+        load[20:22] = 110.0
+        month = MonthData(
+            days=[
+                DayData(
+                    load=load,
+                    pv=np.zeros(96, dtype=np.float64),
+                    day_type="working",
+                    weather="test",
+                    day_index=31,
+                    date_iso="2026-02-01",
+                )
+            ],
+            source="iq68-custom-cheap-window-test",
+        )
+        policy = IdlePolicy()
+        policy.meta.update({
+            "peak_guard_enabled": True,
+            "peak_guard_min_completed_days": 1,
+            "peak_guard_first_day_arm_at_cheap_end": True,
+            "peak_guard_deadband_kw": 1.0,
+            "soc_deadline_enabled": True,
+            "soc_deadline_hour": cfg.OFF_PEAK_END_STEP * cfg.dt,
+            "soc_deadline_shortfall_penalty_vnd": 128_250_000.0,
+        })
+
+        result = run_drl_policy(month, cfg, policy, p_ref_kw=1500.0)
+        danger_block = np.mean(result["p_grid_days"][0][20:22])
+        cheap_peak = np.max(
+            result["p_grid_days"][0][:20].reshape(-1, 2).mean(axis=1)
+        )
+
+        self.assertEqual(cfg.OFF_PEAK_END_STEP, 20)
+        self.assertGreater(result["peak_guard_trigger_steps"], 0)
+        self.assertLessEqual(danger_block, cheap_peak + 1.0 + 1e-9)
 
     def test_legacy_policy_uses_96_decisions_and_1440_native_updates(self):
         policy = CountingPolicy()
