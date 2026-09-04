@@ -14,6 +14,7 @@ from bess.core.brain_runtime import (
     BrainTrajectoryRecorder,
     constrain_charge_to_cheap_window,
     enforce_seen_peak_guard,
+    enforce_soc_deadline_guard,
     make_brain_env,
     observation_array,
     step_brain_control,
@@ -147,6 +148,122 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         for overrides in bad_cases:
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
                 self._peak_guard(0.0, **overrides)
+
+    def test_iq67_soc_deadline_spreads_day3_shortfall_evenly(self):
+        decision = enforce_soc_deadline_guard(
+            0.25,
+            state_of_charge=0.784,
+            maximum_state_of_charge=0.90,
+            battery_capacity_kwh=1250.0,
+            battery_power_kw=450.0,
+            native_step_in_day=0,
+            steps_per_day=96,
+            timestep_hours=0.25,
+            deadline_hour=6.0,
+            enabled=True,
+        )
+
+        self.assertTrue(decision.triggered)
+        self.assertTrue(decision.adjusted)
+        self.assertTrue(decision.physically_feasible)
+        self.assertAlmostEqual(decision.required_charge_kw, 145.0 / 6.0)
+        self.assertAlmostEqual(decision.action, -(145.0 / 6.0) / 450.0)
+
+    def test_iq67_soc_deadline_leaves_stronger_charge_and_post_deadline_action(self):
+        arguments = {
+            "state_of_charge": 0.50,
+            "maximum_state_of_charge": 0.90,
+            "battery_capacity_kwh": 1250.0,
+            "battery_power_kw": 450.0,
+            "steps_per_day": 96,
+            "timestep_hours": 0.25,
+            "deadline_hour": 6.0,
+            "enabled": True,
+        }
+        stronger = enforce_soc_deadline_guard(-1.0, native_step_in_day=0, **arguments)
+        after = enforce_soc_deadline_guard(0.75, native_step_in_day=24, **arguments)
+
+        self.assertEqual(stronger.action, -1.0)
+        self.assertFalse(stronger.adjusted)
+        self.assertEqual(after.action, 0.75)
+        self.assertFalse(after.triggered)
+
+    def test_iq67_soc_deadline_hits_90_percent_at_0600_every_day(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        days = [
+            DayData(
+                load=np.full(96, 40.0),
+                pv=np.zeros(96),
+                day_type="working",
+                weather="test",
+                day_index=day_index,
+                date_iso=f"2026-01-0{day_index}",
+            )
+            for day_index in range(1, 4)
+        ]
+        env = make_brain_env(
+            MonthData(days=days, source="iq67-deadline-test"), cfg, power_scale_kw=1000.0
+        )
+        env.reset()
+        transition = None
+        deadline_socs = []
+        total_overrides = 0
+        total_unmet = 0
+        total_penalty = 0.0
+        for _ in range(48 * len(days)):
+            transition = step_brain_control(
+                env,
+                1.0,
+                native_steps=2,
+                soc_deadline_enabled=True,
+                soc_deadline_hour=6.0,
+                soc_deadline_shortfall_penalty_vnd=128_250_000.0,
+            )
+            total_overrides += transition.soc_deadline_override_steps
+            total_unmet += transition.soc_deadline_unmet_count
+            total_penalty += transition.soc_deadline_shortfall_penalty_vnd
+            if env.bess_world.timestep_index % 96 == 24:
+                deadline_socs.append(env.bess_world.state_of_charge)
+
+        assert transition is not None
+        self.assertEqual(len(deadline_socs), 3)
+        for soc in deadline_socs:
+            self.assertAlmostEqual(soc, cfg.SOC_max, places=10)
+        self.assertGreater(total_overrides, 0)
+        self.assertEqual(total_unmet, 0)
+        self.assertEqual(total_penalty, 0.0)
+
+    def test_iq67_impossible_last_step_reports_shortfall_and_penalty(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        day = DayData(
+            load=np.full(96, 40.0),
+            pv=np.zeros(96),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        env = make_brain_env(
+            MonthData(days=[day], source="iq67-unmet-test"), cfg, power_scale_kw=1000.0
+        )
+        env.reset()
+        for _ in range(23):
+            env.step(0.0)
+        transition = step_brain_control(
+            env,
+            1.0,
+            native_steps=1,
+            soc_deadline_enabled=True,
+            soc_deadline_hour=6.0,
+            soc_deadline_shortfall_penalty_vnd=1000.0,
+        )
+
+        self.assertEqual(transition.applied_native_actions, (-1.0,))
+        self.assertEqual(transition.soc_deadline_unmet_count, 1)
+        self.assertGreater(transition.soc_deadline_shortfall_penalty_vnd, 0.0)
+        self.assertLess(env.bess_world.state_of_charge, cfg.SOC_max)
 
     def test_iq66_native_guard_rescues_second_half_of_held_action(self):
         base = load_system_config()

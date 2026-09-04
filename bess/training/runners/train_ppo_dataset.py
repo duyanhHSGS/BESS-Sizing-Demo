@@ -63,6 +63,9 @@ from bess.core.settings import (
     PPO_RESET_OPTIMIZER_ON_REANCHOR,
     PPO_SEED,
     PPO_SOC_EDGE_LOG_STD_PENALTY,
+    PPO_SOC_DEADLINE_ENABLED,
+    PPO_SOC_DEADLINE_HOUR,
+    PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND,
     PPO_STEPS,
     PPO_TARGET_KL,
     PPO_TEST_BUCKETS,
@@ -123,6 +126,7 @@ def _control_reward_components_million_vnd(
     demand_vnd = sum(result.demand_savings_vnd for result in transition.native_results)
     wear_vnd = sum(result.battery_wear_cost_vnd for result in transition.native_results)
     wear_vnd += float(mismatch_shaping_scale) * float(mismatch_penalty_vnd)
+    wear_vnd += float(getattr(transition, "soc_deadline_shortfall_penalty_vnd", 0.0))
     # TODO(IQ-61): keep the mismatch term exactly at the pre-IQ-61 setting while
     # testing critic decomposition; changing it would confound the experiment.
     return (
@@ -282,6 +286,9 @@ def _collect_oracle_teacher_samples(
                 native_steps=stop - start,
                 charge_only_during_cheap_tariff=PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
                 cheap_tariff_steps=cheap_steps,
+                soc_deadline_enabled=PPO_SOC_DEADLINE_ENABLED,
+                soc_deadline_hour=PPO_SOC_DEADLINE_HOUR,
+                soc_deadline_shortfall_penalty_vnd=PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND,
             )
             rewards.append(_control_reward_components_million_vnd(transition))
             if transition.next_observation is not None:
@@ -1233,8 +1240,13 @@ def main() -> None:
         "peak_guard_mode": "seen_peak_meter_budget_minimum_action_v1",
         "peak_guard_min_completed_days": PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
         "peak_guard_deadband_kw": PPO_PEAK_GUARD_DEADBAND_KW,
+        "soc_deadline_enabled": PPO_SOC_DEADLINE_ENABLED,
+        "soc_deadline_mode": "daily_even_minimum_charge_v1",
+        "soc_deadline_hour": PPO_SOC_DEADLINE_HOUR,
+        "soc_deadline_target": "soc_max",
+        "soc_deadline_shortfall_penalty_vnd": PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND,
         "reward_mode": "brain_savings_vnd_v1",
-        "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2",
+        "training_reward_shaping": "phantom_wear_plus_soc_deadline_shortfall_v3",
         "training_reward_shaping_scale": args.action_mismatch_shaping_scale,
         "initial_soc": float(cfg.SOC_min),
         "gamma": gamma,
@@ -1374,8 +1386,13 @@ def main() -> None:
             "peak_guard_mode": "seen_peak_meter_budget_minimum_action_v1",
             "peak_guard_min_completed_days": PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
             "peak_guard_deadband_kw": PPO_PEAK_GUARD_DEADBAND_KW,
+            "soc_deadline_enabled": PPO_SOC_DEADLINE_ENABLED,
+            "soc_deadline_mode": "daily_even_minimum_charge_v1",
+            "soc_deadline_hour": PPO_SOC_DEADLINE_HOUR,
+            "soc_deadline_target": "soc_max",
+            "soc_deadline_shortfall_penalty_vnd": PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND,
             "reward_mode": "brain_savings_vnd_v1",
-            "training_reward_shaping": "infeasible_request_phantom_wear_scaled_v2",
+            "training_reward_shaping": "phantom_wear_plus_soc_deadline_shortfall_v3",
             "training_reward_shaping_scale": args.action_mismatch_shaping_scale,
             "champion_scoring_uses_shaping": False,
         },
@@ -1697,6 +1714,10 @@ def main() -> None:
     rollout_peak_guard_trigger_steps = 0
     rollout_peak_guard_override_steps = 0
     rollout_peak_guard_unmet_steps = 0
+    rollout_soc_deadline_trigger_steps = 0
+    rollout_soc_deadline_override_steps = 0
+    rollout_soc_deadline_unmet_count = 0
+    rollout_soc_deadline_shortfall_penalty_vnd = 0.0
     rollout_soc_counts = [0, 0, 0]
     rollout_soc_projected = [0, 0, 0]
     rollout_mismatch_penalty_vnd = 0.0
@@ -1840,6 +1861,9 @@ def main() -> None:
             peak_guard_enabled=PPO_PEAK_GUARD_ENABLED,
             peak_guard_min_completed_days=PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
             peak_guard_deadband_kw=PPO_PEAK_GUARD_DEADBAND_KW,
+            soc_deadline_enabled=PPO_SOC_DEADLINE_ENABLED,
+            soc_deadline_hour=PPO_SOC_DEADLINE_HOUR,
+            soc_deadline_shortfall_penalty_vnd=PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND,
         )
         done = transition.done
         mismatch_penalty_vnd = _action_mismatch_penalty_vnd(
@@ -1905,6 +1929,12 @@ def main() -> None:
         rollout_peak_guard_trigger_steps += transition.peak_guard_trigger_steps
         rollout_peak_guard_override_steps += transition.peak_guard_override_steps
         rollout_peak_guard_unmet_steps += transition.peak_guard_unmet_steps
+        rollout_soc_deadline_trigger_steps += transition.soc_deadline_trigger_steps
+        rollout_soc_deadline_override_steps += transition.soc_deadline_override_steps
+        rollout_soc_deadline_unmet_count += transition.soc_deadline_unmet_count
+        rollout_soc_deadline_shortfall_penalty_vnd += (
+            transition.soc_deadline_shortfall_penalty_vnd
+        )
         soc_bin = 0 if obs[3] < (1.0 / 3.0) else (2 if obs[3] > (2.0 / 3.0) else 1)
         rollout_soc_counts[soc_bin] += 1
         rollout_soc_projected[soc_bin] += projected
@@ -1960,6 +1990,12 @@ def main() -> None:
             "peak_guard_trigger_steps": rollout_peak_guard_trigger_steps,
             "peak_guard_override_steps": rollout_peak_guard_override_steps,
             "peak_guard_unmet_steps": rollout_peak_guard_unmet_steps,
+            "soc_deadline_trigger_steps": rollout_soc_deadline_trigger_steps,
+            "soc_deadline_override_steps": rollout_soc_deadline_override_steps,
+            "soc_deadline_unmet_count": rollout_soc_deadline_unmet_count,
+            "soc_deadline_shortfall_penalty_vnd": (
+                rollout_soc_deadline_shortfall_penalty_vnd
+            ),
             "action_mismatch_kwh": rollout_mismatch_kwh,
             "action_mismatch_penalty_vnd": rollout_mismatch_penalty_vnd,
             "action_mismatch_shaping_penalty_vnd": (
@@ -2026,6 +2062,10 @@ def main() -> None:
         rollout_peak_guard_trigger_steps = 0
         rollout_peak_guard_override_steps = 0
         rollout_peak_guard_unmet_steps = 0
+        rollout_soc_deadline_trigger_steps = 0
+        rollout_soc_deadline_override_steps = 0
+        rollout_soc_deadline_unmet_count = 0
+        rollout_soc_deadline_shortfall_penalty_vnd = 0.0
         rollout_soc_counts = [0, 0, 0]
         rollout_soc_projected = [0, 0, 0]
         rollout_mismatch_penalty_vnd = 0.0

@@ -37,6 +37,12 @@ class ChargeFirstDayPolicy(CountingPolicy):
         return action
 
 
+class AlwaysDischargePolicy(CountingPolicy):
+    def predict_action(self, _obs):
+        self.calls += 1
+        return 1.0
+
+
 def dense_month(load_kw=0.0, pv_kw=1000.0):
     steps = 1440
     return MonthData(
@@ -62,6 +68,40 @@ def dense_config():
 
 
 class CrossResolutionDispatchTests(unittest.TestCase):
+    def test_iq67_checkpoint_metadata_enforces_0600_full_soc_and_keeps_legacy_off(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        cfg.dt = 0.25
+        month = MonthData(
+            days=[
+                DayData(
+                    load=np.full(96, 40.0, dtype=np.float64),
+                    pv=np.zeros(96, dtype=np.float64),
+                    day_type="working",
+                    weather="test",
+                    day_index=1,
+                    date_iso="2026-01-01",
+                )
+            ],
+            source="iq67-checkpoint-meta-test",
+        )
+        legacy = AlwaysDischargePolicy()
+        guarded = AlwaysDischargePolicy()
+        guarded.meta.update({
+            "soc_deadline_enabled": True,
+            "soc_deadline_hour": 6.0,
+            "soc_deadline_shortfall_penalty_vnd": 128_250_000.0,
+        })
+
+        legacy_result = run_drl_policy(month, cfg, legacy, p_ref_kw=1500.0)
+        guarded_result = run_drl_policy(month, cfg, guarded, p_ref_kw=1500.0)
+
+        self.assertAlmostEqual(legacy_result["soc_days"][0][24], cfg.SOC_min)
+        self.assertAlmostEqual(guarded_result["soc_days"][0][24], cfg.SOC_max, places=10)
+        self.assertEqual(legacy_result["soc_deadline_trigger_steps"], 0)
+        self.assertGreater(guarded_result["soc_deadline_override_steps"], 0)
+        self.assertEqual(guarded_result["soc_deadline_unmet_count"], 0)
+
     def test_iq66_checkpoint_metadata_enables_peak_guard_without_changing_legacy_policy(self):
         cfg = load_system_config()
         cfg = make_bess_config(cfg, 1000.0, 500.0, cfg.P_target_user)

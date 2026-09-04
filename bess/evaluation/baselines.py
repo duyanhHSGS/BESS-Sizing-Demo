@@ -103,6 +103,18 @@ def _merge_brain_rollouts(
     out["peak_guard_unmet_steps"] = sum(
         int(part.get("peak_guard_unmet_steps", 0)) for part in parts
     )
+    out["soc_deadline_trigger_steps"] = sum(
+        int(part.get("soc_deadline_trigger_steps", 0)) for part in parts
+    )
+    out["soc_deadline_override_steps"] = sum(
+        int(part.get("soc_deadline_override_steps", 0)) for part in parts
+    )
+    out["soc_deadline_unmet_count"] = sum(
+        int(part.get("soc_deadline_unmet_count", 0)) for part in parts
+    )
+    out["soc_deadline_shortfall_penalty_vnd"] = sum(
+        float(part.get("soc_deadline_shortfall_penalty_vnd", 0.0)) for part in parts
+    )
     out["decision_count"] = sum(int(part["decision_count"]) for part in parts)
     out["blocked_action_pct"] = (
         100.0 * out["blocked_action_count"] / max(1, out["decision_count"])
@@ -167,6 +179,10 @@ def run_drl_policy(
         out["peak_guard_trigger_steps"] = 0
         out["peak_guard_override_steps"] = 0
         out["peak_guard_unmet_steps"] = 0
+        out["soc_deadline_trigger_steps"] = 0
+        out["soc_deadline_override_steps"] = 0
+        out["soc_deadline_unmet_count"] = 0
+        out["soc_deadline_shortfall_penalty_vnd"] = 0.0
         out["decision_count"] = decisions
         out["blocked_action_pct"] = 0.0
         if measure_latency:
@@ -228,6 +244,11 @@ def run_drl_policy(
     peak_guard_enabled = bool(meta.get("peak_guard_enabled", False))
     peak_guard_min_completed_days = int(meta.get("peak_guard_min_completed_days", 1))
     peak_guard_deadband_kw = float(meta.get("peak_guard_deadband_kw", 1.0))
+    soc_deadline_enabled = bool(meta.get("soc_deadline_enabled", False))
+    soc_deadline_hour = float(meta.get("soc_deadline_hour", 6.0))
+    soc_deadline_shortfall_penalty_vnd = float(
+        meta.get("soc_deadline_shortfall_penalty_vnd", 0.0)
+    )
     cheap_tariff_steps = frozenset(int(step) for step in cfg.OFF)
 
     latencies: list[float] = []
@@ -236,6 +257,10 @@ def run_drl_policy(
     peak_guard_trigger_steps = 0
     peak_guard_override_steps = 0
     peak_guard_unmet_steps = 0
+    soc_deadline_trigger_steps = 0
+    soc_deadline_override_steps = 0
+    soc_deadline_unmet_count = 0
+    applied_soc_deadline_penalty_vnd = 0.0
     decisions = 0
     done = False
     while not done:
@@ -264,6 +289,9 @@ def run_drl_policy(
             peak_guard_enabled=peak_guard_enabled,
             peak_guard_min_completed_days=peak_guard_min_completed_days,
             peak_guard_deadband_kw=peak_guard_deadband_kw,
+            soc_deadline_enabled=soc_deadline_enabled,
+            soc_deadline_hour=soc_deadline_hour,
+            soc_deadline_shortfall_penalty_vnd=soc_deadline_shortfall_penalty_vnd,
         )
         if eye6_running_peak_flat is not None:
             native_count = len(transition.native_results)
@@ -274,6 +302,10 @@ def run_drl_policy(
         peak_guard_trigger_steps += transition.peak_guard_trigger_steps
         peak_guard_override_steps += transition.peak_guard_override_steps
         peak_guard_unmet_steps += transition.peak_guard_unmet_steps
+        soc_deadline_trigger_steps += transition.soc_deadline_trigger_steps
+        soc_deadline_override_steps += transition.soc_deadline_override_steps
+        soc_deadline_unmet_count += transition.soc_deadline_unmet_count
+        applied_soc_deadline_penalty_vnd += transition.soc_deadline_shortfall_penalty_vnd
         decisions += 1
         done = transition.done
         if not done:
@@ -291,6 +323,10 @@ def run_drl_policy(
     out["peak_guard_trigger_steps"] = peak_guard_trigger_steps
     out["peak_guard_override_steps"] = peak_guard_override_steps
     out["peak_guard_unmet_steps"] = peak_guard_unmet_steps
+    out["soc_deadline_trigger_steps"] = soc_deadline_trigger_steps
+    out["soc_deadline_override_steps"] = soc_deadline_override_steps
+    out["soc_deadline_unmet_count"] = soc_deadline_unmet_count
+    out["soc_deadline_shortfall_penalty_vnd"] = applied_soc_deadline_penalty_vnd
     out["decision_count"] = decisions
     out["blocked_action_pct"] = 100.0 * blocked_actions / max(1, decisions)
     if eye6_running_peak_flat is not None:
