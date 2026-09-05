@@ -5,7 +5,10 @@ from unittest.mock import patch
 
 import numpy as np
 
-from bess.core.brain_runtime import causal_peak_target_from_history
+from bess.core.brain_runtime import (
+    causal_peak_target_from_history,
+    elastic_peak_target_kw,
+)
 from bess.core.common import load_system_config, make_bess_config
 from bess.core.scenario_gen import DayData, MonthData
 from bess.core.settings import (
@@ -14,6 +17,10 @@ from bess.core.settings import (
     PPO_CAUSAL_PEAK_TARGET_ENABLED,
     PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION,
     PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS,
+    PPO_ELASTIC_PEAK_BID_ENABLED,
+    PPO_ELASTIC_PEAK_RESERVE_FRACTION,
+    PPO_ELASTIC_PEAK_RESERVE_RELEASE_END_HOUR,
+    PPO_ELASTIC_PEAK_RESERVE_RELEASE_START_HOUR,
     PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR,
 )
 from bess.dispatch.dispatch_runner import DispatchRunWarning, run_policy_dispatch
@@ -392,12 +399,162 @@ class CrossResolutionDispatchTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     run_drl_policy(month, cfg, policy, p_ref_kw=1500.0)
 
-    def test_iq72_defaults_replace_noon_lottery_with_causal_target(self):
+    def test_iq75_defaults_use_optimistic_bid_and_runtime_soc_reserve(self):
         self.assertTrue(PPO_CAUSAL_PEAK_TARGET_ENABLED)
         self.assertEqual(PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR, 6.0)
         self.assertEqual(PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS, 30)
-        self.assertEqual(PPO_CAUSAL_PEAK_TARGET_DAY_QUANTILE, 1.0)
-        self.assertEqual(PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION, 0.20)
+        self.assertEqual(PPO_CAUSAL_PEAK_TARGET_DAY_QUANTILE, 0.25)
+        self.assertEqual(PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION, 0.0)
+        self.assertTrue(PPO_ELASTIC_PEAK_BID_ENABLED)
+        self.assertEqual(PPO_ELASTIC_PEAK_RESERVE_FRACTION, 0.20)
+        self.assertEqual(PPO_ELASTIC_PEAK_RESERVE_RELEASE_START_HOUR, 17.5)
+        self.assertEqual(PPO_ELASTIC_PEAK_RESERVE_RELEASE_END_HOUR, 22.5)
+
+    def test_iq75_lower_quartile_ignores_zero_load_history_days(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        cfg.set_dt(0.25)
+
+        def history_day(day_index: int, load_kw: float) -> DayData:
+            return DayData(
+                load=np.full(96, load_kw, dtype=np.float64),
+                pv=np.zeros(96, dtype=np.float64),
+                day_type="weekend" if load_kw == 0.0 else "working",
+                weather="test",
+                day_index=day_index,
+                date_iso=f"2026-01-{day_index:02d}",
+            )
+
+        target = causal_peak_target_from_history(
+            [
+                history_day(1, 0.0),
+                history_day(2, 500.0),
+                history_day(3, 600.0),
+                history_day(4, 700.0),
+            ],
+            cfg,
+            lookback_days=30,
+            day_quantile=0.25,
+            energy_reserve_fraction=0.0,
+            guard_start_hour=6.0,
+            fallback_kw=None,
+        )
+
+        self.assertAlmostEqual(target, 456.25, places=9)
+
+    def test_iq75_elastic_bid_relaxes_before_forced_discharge_crosses_reserve(self):
+        common = {
+            "minimum_state_of_charge": 0.20,
+            "maximum_state_of_charge": 0.90,
+            "battery_capacity_kwh": 1250.0,
+            "battery_power_kw": 450.0,
+            "net_load_kw": 500.0,
+            "block_energy_kwh": 0.0,
+            "block_elapsed_hours": 0.0,
+            "native_step_in_day": 48,
+            "steps_per_day": 96,
+            "timestep_hours": 0.25,
+            "discharge_efficiency": 0.90,
+            "reserve_fraction": 0.20,
+            "reserve_release_start_hour": 17.5,
+            "reserve_release_end_hour": 22.5,
+            "enabled": True,
+        }
+        self.assertAlmostEqual(
+            elastic_peak_target_kw(300.0, state_of_charge=0.90, **common),
+            300.0,
+            places=9,
+        )
+        self.assertAlmostEqual(
+            elastic_peak_target_kw(300.0, state_of_charge=0.34, **common),
+            500.0,
+            places=9,
+        )
+
+    def test_iq75_elastic_bid_releases_reserved_energy_by_end_of_expensive_window(self):
+        target = elastic_peak_target_kw(
+            300.0,
+            state_of_charge=0.34,
+            minimum_state_of_charge=0.20,
+            maximum_state_of_charge=0.90,
+            battery_capacity_kwh=1250.0,
+            battery_power_kw=450.0,
+            net_load_kw=500.0,
+            block_energy_kwh=0.0,
+            block_elapsed_hours=0.0,
+            native_step_in_day=90,
+            steps_per_day=96,
+            timestep_hours=0.25,
+            discharge_efficiency=0.90,
+            reserve_fraction=0.20,
+            reserve_release_start_hour=17.5,
+            reserve_release_end_hour=22.5,
+            enabled=True,
+        )
+        self.assertAlmostEqual(target, 300.0, places=9)
+
+    def test_iq75_elastic_bid_disabled_preserves_legacy_static_target(self):
+        target = elastic_peak_target_kw(
+            300.0,
+            state_of_charge=0.20,
+            minimum_state_of_charge=0.20,
+            maximum_state_of_charge=0.90,
+            battery_capacity_kwh=1250.0,
+            battery_power_kw=450.0,
+            net_load_kw=800.0,
+            block_energy_kwh=0.0,
+            block_elapsed_hours=0.0,
+            native_step_in_day=48,
+            steps_per_day=96,
+            timestep_hours=0.25,
+            discharge_efficiency=0.90,
+            reserve_fraction=0.20,
+            reserve_release_start_hour=17.5,
+            reserve_release_end_hour=22.5,
+            enabled=False,
+        )
+        self.assertEqual(target, 300.0)
+
+    def test_iq75_dispatch_trace_records_elastic_target_not_only_base_bid(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        load = np.zeros(96, dtype=np.float64)
+        load[24:26] = 400.0
+        month = MonthData(days=[DayData(
+            load=load,
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )])
+        policy = IdlePolicy()
+        policy.meta.update({
+            "peak_guard_enabled": True,
+            "peak_guard_first_day_arm_hour": 6.0,
+            "causal_peak_target_enabled": True,
+            "causal_peak_target_lookback_days": 30,
+            "causal_peak_target_day_quantile": 0.25,
+            "causal_peak_target_energy_reserve_fraction": 0.0,
+            "causal_peak_target_fallback_kw": 250.0,
+            "elastic_peak_bid_enabled": True,
+            "elastic_peak_reserve_fraction": 0.20,
+            "elastic_peak_reserve_release_start_hour": 17.5,
+            "elastic_peak_reserve_release_end_hour": 22.5,
+        })
+
+        result = run_drl_policy(
+            month,
+            cfg,
+            policy,
+            p_ref_kw=1500.0,
+            record_brain_eye6=True,
+        )
+
+        self.assertEqual(result["peak_guard_target_kw"], 250.0)
+        self.assertAlmostEqual(result["brain_peak_guard_target_days"][0][24], 400.0, places=9)
+        self.assertLess(result["brain_eye6_running_peak_days"][0][24], 250.0)
 
     def test_iq72_fallback_target_guards_first_block_after_0600_with_eye6_still_lower(self):
         base = load_system_config()

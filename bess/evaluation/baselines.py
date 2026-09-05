@@ -252,6 +252,7 @@ def run_drl_policy(
         else None
     )
     eye6_cursor = 0
+    peak_guard_target_flat = None
     native_steps = native_steps_per_action(cfg.dt, control_dt_minutes)
     charge_only_during_cheap_tariff = bool(
         meta.get("charge_only_during_cheap_tariff", False)
@@ -293,6 +294,18 @@ def run_drl_policy(
             ),
             guard_start_hour=float(meta.get("peak_guard_first_day_arm_hour", 6.0)),
             fallback_kw=None if fallback_meta is None else float(fallback_meta),
+        )
+    elastic_peak_bid_enabled = bool(meta.get("elastic_peak_bid_enabled", False))
+    elastic_peak_reserve_fraction = float(meta.get("elastic_peak_reserve_fraction", 0.20))
+    elastic_peak_reserve_release_start_hour = float(
+        meta.get("elastic_peak_reserve_release_start_hour", 17.5)
+    )
+    elastic_peak_reserve_release_end_hour = float(
+        meta.get("elastic_peak_reserve_release_end_hour", 22.5)
+    )
+    if record_brain_eye6 and peak_guard_target_kw is not None:
+        peak_guard_target_flat = np.empty(
+            sum(len(day.load) for day in month.days), dtype=np.float64
         )
     soc_deadline_enabled = bool(meta.get("soc_deadline_enabled", False))
     soc_deadline_hour = float(meta.get("soc_deadline_hour", 6.0))
@@ -341,6 +354,10 @@ def run_drl_policy(
             peak_guard_first_day_arm_step=peak_guard_first_day_arm_step,
             peak_guard_target_kw=peak_guard_target_kw,
             peak_guard_deadband_kw=peak_guard_deadband_kw,
+            elastic_peak_bid_enabled=elastic_peak_bid_enabled,
+            elastic_peak_reserve_fraction=elastic_peak_reserve_fraction,
+            elastic_peak_reserve_release_start_hour=elastic_peak_reserve_release_start_hour,
+            elastic_peak_reserve_release_end_hour=elastic_peak_reserve_release_end_hour,
             soc_deadline_enabled=soc_deadline_enabled,
             soc_deadline_hour=soc_deadline_hour,
             soc_deadline_shortfall_penalty_vnd=soc_deadline_shortfall_penalty_vnd,
@@ -348,6 +365,14 @@ def run_drl_policy(
         if eye6_running_peak_flat is not None:
             native_count = len(transition.native_results)
             eye6_running_peak_flat[eye6_cursor:eye6_cursor + native_count] = eye6_running_peak_kw
+            if peak_guard_target_flat is not None:
+                active_targets = np.asarray([
+                    peak_guard_target_kw if value is None else value
+                    for value in transition.peak_guard_planned_targets_kw
+                ], dtype=np.float64)
+                if len(active_targets) != native_count:
+                    raise RuntimeError("Elastic Peak Bid trace does not match native transition count")
+                peak_guard_target_flat[eye6_cursor:eye6_cursor + native_count] = active_targets
             eye6_cursor += native_count
         blocked_actions += int(transition.adjusted_action)
         tariff_blocked_charge_steps += transition.tariff_blocked_charge_steps
@@ -392,14 +417,16 @@ def run_drl_policy(
             eye6_days.append(eye6_running_peak_flat[cursor:cursor + step_count].copy())
             cursor += step_count
         out["brain_eye6_running_peak_days"] = eye6_days
-        out["brain_peak_guard_target_days"] = (
-            [
-                np.full(len(day.load), peak_guard_target_kw, dtype=np.float64)
-                for day in month.days
-            ]
-            if peak_guard_target_kw is not None
-            else []
-        )
+        if peak_guard_target_flat is not None:
+            target_days = []
+            cursor = 0
+            for day in month.days:
+                step_count = len(day.load)
+                target_days.append(peak_guard_target_flat[cursor:cursor + step_count].copy())
+                cursor += step_count
+            out["brain_peak_guard_target_days"] = target_days
+        else:
+            out["brain_peak_guard_target_days"] = []
     if measure_latency:
         out["latency_ms_mean"] = float(np.mean(latencies))
         out["latency_ms_max"] = float(np.max(latencies))

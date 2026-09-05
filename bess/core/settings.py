@@ -127,10 +127,17 @@ PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR = 6.0
 PPO_PEAK_GUARD_DEADBAND_KW = 1.0
 PPO_CAUSAL_PEAK_TARGET_ENABLED = True
 PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS = 30
-PPO_CAUSAL_PEAK_TARGET_DAY_QUANTILE = 1.0
-PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION = 0.20
-# TODO(IQ-72): keep the 30-day/worst-day/20%-reserve estimator only if shifted
-# boundary review and the untouched test bucket beat IQ-71 without a jackpot Day 1.
+# IQ-75 deliberately bids from the lower quartile of non-zero historical daily
+# feasible caps. An over-high established monthly peak is irreversible, while an
+# aggressive bid can be relaxed causally before the battery exhausts itself.
+PPO_CAUSAL_PEAK_TARGET_DAY_QUANTILE = 0.25
+PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION = 0.0
+PPO_ELASTIC_PEAK_BID_ENABLED = True
+PPO_ELASTIC_PEAK_RESERVE_FRACTION = 0.20
+PPO_ELASTIC_PEAK_RESERVE_RELEASE_START_HOUR = 17.5
+PPO_ELASTIC_PEAK_RESERVE_RELEASE_END_HOUR = 22.5
+# TODO(IQ-75): keep the optimistic bid + elastic SOC reserve only if identical
+# IQ-72 comparison improves untouched economics and avoids sudden SOC-empty peaks.
 # TODO(IQ-68): preserve legacy checkpoint compatibility for the older cheap-end wake-up contract.
 # IQ-67 makes the operator's daily 06:00 full-SOC requirement a deterministic
 # controller invariant.  The penalty is normally zero because the guard is
