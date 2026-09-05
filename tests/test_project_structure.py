@@ -73,13 +73,21 @@ def test_dispatch_viewer_exposes_selected_ppo_eye6_with_distinct_style() -> None
     assert 'policyKey: "ppo_eye6_running_peak_kw"' in template
     assert 'policy?.algo === "ppo"' in template
     assert 'const dispatchEye6Color = "#ff2bd6"' in template
-    assert "series.eye6 ? 4 : 2" in template
+    assert "series.eye6 ? 4 : (series.target ? 3 : 2)" in template
     assert "Boolean(series.eye6)" in template
     assert "Number(Boolean(left.eye6)) - Number(Boolean(right.eye6))" in template
     assert 'if (checkbox.checked && selectedPolicy?.algo === "ppo")' in template
     assert "old broken Eye 6" in template
     assert "await createDispatchRunFor([policyName]);" in template
     assert "Exact PPO Eye 6 running-peak trace visible" in template
+
+
+def test_dispatch_viewer_exposes_iq72_planned_peak_target_separately() -> None:
+    template = (PROJECT_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+    assert "planned peak target" in template
+    assert 'policyKey: "ppo_peak_guard_target_kw"' in template
+    assert 'const dispatchPeakTargetColor = "#facc15"' in template
+    assert "series.target ? [10, 4] : [5, 5]" in template
 
 
 def test_dispatch_viewer_keeps_grid_display_meter_only() -> None:

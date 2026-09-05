@@ -120,10 +120,17 @@ PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF = True
 # TODO(IQ-66): promote Peak Guard only if unseen economics and human peak review beat IQ-65.
 PPO_PEAK_GUARD_ENABLED = True
 PPO_PEAK_GUARD_MIN_COMPLETED_DAYS = 1
-# IQ-71: give Day 1 half a day to establish a credible seen peak before Peak Police wakes.
-# TODO(IQ-71): keep 12:00 only if the authoritative unseen bucket and human Viewer review beat IQ-70.
-PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR = 12.0
+# IQ-72 separates the planned cap from truthful Eye 6.  New checkpoints wake at
+# the end of smooth charging instead of letting Day 1 choose the whole month.
+# Explicit IQ-71 checkpoint metadata still preserves its historical 12:00 wake.
+PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR = 6.0
 PPO_PEAK_GUARD_DEADBAND_KW = 1.0
+PPO_CAUSAL_PEAK_TARGET_ENABLED = True
+PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS = 30
+PPO_CAUSAL_PEAK_TARGET_DAY_QUANTILE = 1.0
+PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION = 0.20
+# TODO(IQ-72): keep the 30-day/worst-day/20%-reserve estimator only if shifted
+# boundary review and the untouched test bucket beat IQ-71 without a jackpot Day 1.
 # TODO(IQ-68): preserve legacy checkpoint compatibility for the older cheap-end wake-up contract.
 # IQ-67 makes the operator's daily 06:00 full-SOC requirement a deterministic
 # controller invariant.  The penalty is normally zero because the guard is

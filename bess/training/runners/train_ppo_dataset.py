@@ -19,6 +19,7 @@ from bess.agents.ppo_agent import (
 from bess.core.bess_env import OBSERVATION_DIM
 from bess.core.brain_runtime import (
     REWARD_SCALE_VND,
+    causal_peak_target_from_history,
     constrain_charge_to_cheap_window,
     make_brain_env,
     native_steps_per_action,
@@ -31,6 +32,10 @@ from bess.core.settings import (
     PPO_ACTION_MISMATCH_SHAPING_SCALE,
     PPO_ACTOR_GRAD_CLIP,
     PPO_BC_FINE_TUNE_LOG_STD,
+    PPO_CAUSAL_PEAK_TARGET_DAY_QUANTILE,
+    PPO_CAUSAL_PEAK_TARGET_ENABLED,
+    PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION,
+    PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS,
     PPO_CHALLENGER_RESET_PATIENCE,
     PPO_CHALLENGER_RESETS_ENABLED,
     PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
@@ -236,6 +241,7 @@ def _collect_oracle_teacher_samples(
     power_scale_kw: float,
     battery_wear_cost: float,
     native_steps: int,
+    peak_guard_target_kw: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Replay Oracle dispatch and collect Brain7 actions plus real reward components."""
     if len(oracle_dispatch) != len(month.days):
@@ -282,6 +288,15 @@ def _collect_oracle_teacher_samples(
                 native_steps=stop - start,
                 charge_only_during_cheap_tariff=PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
                 cheap_tariff_steps=cheap_steps,
+                peak_guard_enabled=(
+                    PPO_PEAK_GUARD_ENABLED and peak_guard_target_kw is not None
+                ),
+                peak_guard_min_completed_days=PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
+                peak_guard_first_day_arm_step=round(
+                    PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR / cfg.dt
+                ),
+                peak_guard_target_kw=peak_guard_target_kw,
+                peak_guard_deadband_kw=PPO_PEAK_GUARD_DEADBAND_KW,
                 soc_deadline_enabled=PPO_SOC_DEADLINE_ENABLED,
                 soc_deadline_hour=PPO_SOC_DEADLINE_HOUR,
                 soc_deadline_shortfall_penalty_vnd=PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND,
@@ -1196,6 +1211,51 @@ def main() -> None:
     rollout_decisions = decisions_per_day * max(
         len(month.days) for month in train_months
     )
+    causal_peak_target_fallback_kw = (
+        causal_peak_target_from_history(
+            train_days,
+            cfg,
+            lookback_days=PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS,
+            day_quantile=PPO_CAUSAL_PEAK_TARGET_DAY_QUANTILE,
+            energy_reserve_fraction=PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION,
+            guard_start_hour=PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR,
+            fallback_kw=None,
+        )
+        if PPO_CAUSAL_PEAK_TARGET_ENABLED
+        else None
+    )
+
+    def causal_target_for(history_days):
+        if not PPO_CAUSAL_PEAK_TARGET_ENABLED:
+            return None
+        return causal_peak_target_from_history(
+            history_days,
+            cfg,
+            lookback_days=PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS,
+            day_quantile=PPO_CAUSAL_PEAK_TARGET_DAY_QUANTILE,
+            energy_reserve_fraction=PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION,
+            guard_start_hour=PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR,
+            fallback_kw=causal_peak_target_fallback_kw,
+        )
+
+    def causal_histories_and_targets(months, initial_history):
+        history = list(initial_history)
+        histories = []
+        targets = []
+        for episode in months:
+            histories.append(history[-PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS:])
+            targets.append(causal_target_for(history))
+            history.extend(episode.days)
+        return histories, targets
+
+    _train_peak_histories, train_peak_targets = causal_histories_and_targets(
+        train_months,
+        [],
+    )
+    validation_peak_histories, validation_peak_targets = causal_histories_and_targets(
+        validation_months,
+        train_days,
+    )
     learner_device = resolve_ppo_device(args.device)
     agent = PPOAgent(
         OBSERVATION_DIM,
@@ -1236,10 +1296,17 @@ def main() -> None:
         "battery_wear_cost": battery_wear_cost,
         "charge_only_during_cheap_tariff": PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
         "peak_guard_enabled": PPO_PEAK_GUARD_ENABLED,
-        "peak_guard_mode": "seen_peak_meter_budget_first_day_noon_v3",
+        "peak_guard_mode": "causal_history_feasible_target_v4",
         "peak_guard_min_completed_days": PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
         "peak_guard_first_day_arm_hour": PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR,
         "peak_guard_deadband_kw": PPO_PEAK_GUARD_DEADBAND_KW,
+        "causal_peak_target_enabled": PPO_CAUSAL_PEAK_TARGET_ENABLED,
+        "causal_peak_target_lookback_days": PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS,
+        "causal_peak_target_day_quantile": PPO_CAUSAL_PEAK_TARGET_DAY_QUANTILE,
+        "causal_peak_target_energy_reserve_fraction": (
+            PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION
+        ),
+        "causal_peak_target_fallback_kw": causal_peak_target_fallback_kw,
         "soc_deadline_enabled": PPO_SOC_DEADLINE_ENABLED,
         "soc_deadline_mode": "daily_exact_smooth_charge_v2",
         "soc_deadline_hour": PPO_SOC_DEADLINE_HOUR,
@@ -1383,13 +1450,22 @@ def main() -> None:
             "battery_wear_cost": battery_wear_cost,
             "charge_only_during_cheap_tariff": PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
             "peak_guard_enabled": PPO_PEAK_GUARD_ENABLED,
-            "peak_guard_mode": "seen_peak_meter_budget_first_day_noon_v3",
+            "peak_guard_mode": "causal_history_feasible_target_v4",
             "peak_guard_min_completed_days": PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
             "peak_guard_first_day_arm_hour": PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR,
             "peak_guard_first_day_arm_step": round(
                 PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR / cfg.dt
             ),
             "peak_guard_deadband_kw": PPO_PEAK_GUARD_DEADBAND_KW,
+            "causal_peak_target_enabled": PPO_CAUSAL_PEAK_TARGET_ENABLED,
+            "causal_peak_target_lookback_days": PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS,
+            "causal_peak_target_day_quantile": PPO_CAUSAL_PEAK_TARGET_DAY_QUANTILE,
+            "causal_peak_target_energy_reserve_fraction": (
+                PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION
+            ),
+            "causal_peak_target_fallback_kw": causal_peak_target_fallback_kw,
+            "training_causal_peak_targets_kw": train_peak_targets,
+            "validation_causal_peak_targets_kw": validation_peak_targets,
             "soc_deadline_enabled": PPO_SOC_DEADLINE_ENABLED,
             "soc_deadline_mode": "daily_exact_smooth_charge_v2",
             "soc_deadline_hour": PPO_SOC_DEADLINE_HOUR,
@@ -1512,8 +1588,21 @@ def main() -> None:
     def validate_policy_cost() -> float:
         validation_started = time.perf_counter()
         results = [
-            (month, run_drl_policy(month, cfg, agent, p_ref_kw=p_ref))
-            for month in validation_months
+            (
+                month,
+                run_drl_policy(
+                    month,
+                    cfg,
+                    agent,
+                    p_ref_kw=p_ref,
+                    peak_guard_history_days=history,
+                ),
+            )
+            for month, history in zip(
+                validation_months,
+                validation_peak_histories,
+                strict=True,
+            )
         ]
         perf["validation"] += time.perf_counter() - validation_started
         scoring_started = time.perf_counter()
@@ -1579,7 +1668,11 @@ def main() -> None:
         reward_parts = []
         teacher_episode_lengths = []
         dispatch_cursor = 0
-        for train_month in train_months:
+        for train_month, peak_target_kw in zip(
+            train_months,
+            train_peak_targets,
+            strict=True,
+        ):
             month_day_count = len(train_month.days)
             month_dispatch = oracle_dispatch[
                 dispatch_cursor:dispatch_cursor + month_day_count
@@ -1592,6 +1685,7 @@ def main() -> None:
                 power_scale_kw=p_ref,
                 battery_wear_cost=battery_wear_cost,
                 native_steps=native_steps,
+                peak_guard_target_kw=peak_target_kw,
             )
             observation_parts.append(month_observations)
             target_parts.append(month_targets)
@@ -1700,6 +1794,7 @@ def main() -> None:
     # buckets chronologically and reset BrainEnv/recurrent memory at each boundary.
     train_month_cursor = 0
     env = make_training_env(train_months[train_month_cursor])
+    current_peak_guard_target_kw = train_peak_targets[train_month_cursor]
     obs = observation_array(env.reset())
     agent.reset_recurrent_state()
     steps = 0
@@ -1867,6 +1962,7 @@ def main() -> None:
             peak_guard_first_day_arm_step=round(
                 PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR / cfg.dt
             ),
+            peak_guard_target_kw=current_peak_guard_target_kw,
             peak_guard_deadband_kw=PPO_PEAK_GUARD_DEADBAND_KW,
             soc_deadline_enabled=PPO_SOC_DEADLINE_ENABLED,
             soc_deadline_hour=PPO_SOC_DEADLINE_HOUR,
@@ -1953,6 +2049,7 @@ def main() -> None:
             agent.reset_recurrent_state()
             train_month_cursor = (train_month_cursor + 1) % len(train_months)
             env = make_training_env(train_months[train_month_cursor])
+            current_peak_guard_target_kw = train_peak_targets[train_month_cursor]
             next_obs = observation_array(env.reset())
         else:
             if transition.next_observation is None:
@@ -2116,9 +2213,25 @@ def main() -> None:
 
     best_agent = PPOAgent(OBSERVATION_DIM, device=learner_device)
     best_agent.load(RESULTS_DIR / f"policy_{tag}.pt")
+    # The untouched test history/targets are deliberately constructed only now,
+    # after Champion selection has finished.
+    test_peak_histories, test_peak_targets = causal_histories_and_targets(
+        test_months,
+        [*train_days, *val_days],
+    )
+    report["economics"]["test_causal_peak_targets_kw"] = test_peak_targets
     test_results = [
-        (month, run_drl_policy(month, cfg, best_agent, p_ref_kw=p_ref))
-        for month in test_months
+        (
+            month,
+            run_drl_policy(
+                month,
+                cfg,
+                best_agent,
+                p_ref_kw=p_ref,
+                peak_guard_history_days=history,
+            ),
+        )
+        for month, history in zip(test_months, test_peak_histories, strict=True)
     ]
     test_operating_months = [
         _score_ppo_operating_month(

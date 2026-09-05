@@ -266,6 +266,14 @@ def run_policy_dispatch(
             "peak_guard_trigger_steps": rollout.get("peak_guard_trigger_steps", 0),
             "peak_guard_override_steps": rollout.get("peak_guard_override_steps", 0),
             "peak_guard_unmet_steps": rollout.get("peak_guard_unmet_steps", 0),
+            "peak_guard_target_kw_by_episode": (
+                rollout.get("peak_guard_target_kw_by_episode")
+                or (
+                    [rollout["peak_guard_target_kw"]]
+                    if rollout.get("peak_guard_target_kw") is not None
+                    else []
+                )
+            ),
             "soc_deadline_trigger_steps": rollout.get("soc_deadline_trigger_steps", 0),
             "soc_deadline_override_steps": rollout.get("soc_deadline_override_steps", 0),
             "soc_deadline_unmet_count": rollout.get("soc_deadline_unmet_count", 0),
@@ -333,6 +341,14 @@ def policy_result_to_days(
             if len(eye6) != expected_steps:
                 raise RuntimeError("Brain Eye 6 dispatch trace resolution does not match source data")
             day_row["ppo_eye6_running_peak_kw"] = _rounded_series(eye6)
+        target_days = rollout.get("brain_peak_guard_target_days")
+        if target_days:
+            if len(target_days) != len(month.days):
+                raise RuntimeError("Peak Guard target trace day count does not match source data")
+            target = np.asarray(target_days[index], dtype=np.float64)
+            if len(target) != expected_steps:
+                raise RuntimeError("Peak Guard target trace resolution does not match source data")
+            day_row["ppo_peak_guard_target_kw"] = _rounded_series(target)
         day_row["grid_kWh"] = round(float(np.sum(grid) * cfg.dt), 2)
         day_row["energy_cost_vnd"] = round(_day_energy_cost(day_row, parameters, cfg.dt))
         days.append(day_row)

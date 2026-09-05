@@ -5,9 +5,17 @@ from unittest.mock import patch
 
 import numpy as np
 
+from bess.core.brain_runtime import causal_peak_target_from_history
 from bess.core.common import load_system_config, make_bess_config
 from bess.core.scenario_gen import DayData, MonthData
-from bess.core.settings import DEFAULT_PARAMETERS, PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR
+from bess.core.settings import (
+    DEFAULT_PARAMETERS,
+    PPO_CAUSAL_PEAK_TARGET_DAY_QUANTILE,
+    PPO_CAUSAL_PEAK_TARGET_ENABLED,
+    PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION,
+    PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS,
+    PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR,
+)
 from bess.dispatch.dispatch_runner import DispatchRunWarning, run_policy_dispatch
 from bess.evaluation.baselines import run_drl_policy, validate_dispatch_sampling
 
@@ -265,7 +273,7 @@ class CrossResolutionDispatchTests(unittest.TestCase):
         policy.meta.update({
             "peak_guard_enabled": True,
             "peak_guard_min_completed_days": 1,
-            "peak_guard_first_day_arm_hour": PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR,
+            "peak_guard_first_day_arm_hour": 12.0,
             "peak_guard_deadband_kw": 1.0,
             "soc_deadline_enabled": True,
             "soc_deadline_hour": 6.0,
@@ -276,7 +284,7 @@ class CrossResolutionDispatchTests(unittest.TestCase):
         ten_am_block = float(np.mean(result["p_grid_days"][0][40:42]))
         noon_block = float(np.mean(result["p_grid_days"][0][48:50]))
 
-        self.assertEqual(PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR, 12.0)
+        self.assertEqual(PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR, 6.0)
         self.assertAlmostEqual(ten_am_block, 350.0)
         self.assertLessEqual(noon_block, 351.0 + 1e-9)
         self.assertGreater(result["peak_guard_trigger_steps"], 0)
@@ -383,6 +391,182 @@ class CrossResolutionDispatchTests(unittest.TestCase):
                 })
                 with self.assertRaises(ValueError):
                     run_drl_policy(month, cfg, policy, p_ref_kw=1500.0)
+
+    def test_iq72_defaults_replace_noon_lottery_with_causal_target(self):
+        self.assertTrue(PPO_CAUSAL_PEAK_TARGET_ENABLED)
+        self.assertEqual(PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR, 6.0)
+        self.assertEqual(PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS, 30)
+        self.assertEqual(PPO_CAUSAL_PEAK_TARGET_DAY_QUANTILE, 1.0)
+        self.assertEqual(PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION, 0.20)
+
+    def test_iq72_fallback_target_guards_first_block_after_0600_with_eye6_still_lower(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        load = np.zeros(96, dtype=np.float64)
+        load[24:26] = 400.0
+        month = MonthData(
+            days=[DayData(
+                load=load,
+                pv=np.zeros(96, dtype=np.float64),
+                day_type="working",
+                weather="test",
+                day_index=1,
+                date_iso="2026-01-01",
+            )],
+            source="iq72-fallback-target-test",
+        )
+        policy = IdlePolicy()
+        policy.meta.update({
+            "peak_guard_enabled": True,
+            "peak_guard_min_completed_days": 1,
+            "peak_guard_first_day_arm_hour": 6.0,
+            "peak_guard_deadband_kw": 1.0,
+            "causal_peak_target_enabled": True,
+            "causal_peak_target_lookback_days": 30,
+            "causal_peak_target_day_quantile": 1.0,
+            "causal_peak_target_energy_reserve_fraction": 0.20,
+            "causal_peak_target_fallback_kw": 250.0,
+            "soc_deadline_enabled": True,
+            "soc_deadline_hour": 6.0,
+            "soc_deadline_shortfall_penalty_vnd": 128_250_000.0,
+        })
+
+        result = run_drl_policy(
+            month,
+            cfg,
+            policy,
+            p_ref_kw=1500.0,
+            record_brain_eye6=True,
+        )
+
+        guarded_block = float(np.mean(result["p_grid_days"][0][24:26]))
+        self.assertLessEqual(guarded_block, 251.0 + 1e-9)
+        self.assertEqual(result["peak_guard_target_kw"], 250.0)
+        np.testing.assert_allclose(result["brain_peak_guard_target_days"][0], 250.0)
+        self.assertLess(result["brain_eye6_running_peak_days"][0][24], 250.0)
+        self.assertGreater(result["peak_guard_override_steps"], 0)
+
+    def test_iq72_history_target_accounts_for_energy_reserve(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 500.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        history = [DayData(
+            load=np.full(96, 400.0, dtype=np.float64),
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=30,
+            date_iso="2026-01-30",
+        )]
+
+        target = causal_peak_target_from_history(
+            history,
+            cfg,
+            lookback_days=30,
+            day_quantile=1.0,
+            energy_reserve_fraction=0.20,
+            guard_start_hour=6.0,
+            fallback_kw=None,
+        )
+
+        # 70% usable SOC * 1000 kWh * 90% discharge * 80% spendable = 504 kWh.
+        # Across the guarded 18 hours, a 400 kW plateau therefore needs a 372 kW cap.
+        self.assertAlmostEqual(target, 372.0, places=9)
+
+    def test_iq72_history_target_respects_discharge_power_limit(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 500.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        load = np.zeros(96, dtype=np.float64)
+        load[24:26] = 900.0
+        history = [DayData(
+            load=load,
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=30,
+            date_iso="2026-01-30",
+        )]
+
+        target = causal_peak_target_from_history(
+            history,
+            cfg,
+            lookback_days=30,
+            day_quantile=1.0,
+            energy_reserve_fraction=0.20,
+            guard_start_hour=6.0,
+            fallback_kw=None,
+        )
+
+        self.assertAlmostEqual(target, 450.0, places=9)
+
+    def test_iq72_empty_history_requires_or_uses_explicit_fallback(self):
+        cfg = load_system_config()
+        with self.assertRaises(ValueError):
+            causal_peak_target_from_history(
+                [],
+                cfg,
+                lookback_days=30,
+                day_quantile=1.0,
+                energy_reserve_fraction=0.20,
+                guard_start_hour=6.0,
+                fallback_kw=None,
+            )
+        self.assertEqual(
+            causal_peak_target_from_history(
+                [],
+                cfg,
+                lookback_days=30,
+                day_quantile=1.0,
+                energy_reserve_fraction=0.20,
+                guard_start_hour=6.0,
+                fallback_kw=321.0,
+            ),
+            321.0,
+        )
+
+    def test_iq72_next_bucket_uses_only_previous_bucket_as_history(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 500.0, base.P_target_user)
+        cfg.set_dt(0.25)
+
+        def day(day_index: int, load_kw: float) -> DayData:
+            return DayData(
+                load=np.full(96, load_kw, dtype=np.float64),
+                pv=np.zeros(96, dtype=np.float64),
+                day_type="working",
+                weather="test",
+                day_index=day_index,
+                date_iso="2026-01-01",
+            )
+
+        month = MonthData(
+            days=[day(1, 400.0), day(31, 900.0)],
+            source="iq72-causal-bucket-history-test",
+        )
+        policy = IdlePolicy()
+        policy.meta.update({
+            "peak_guard_enabled": True,
+            "peak_guard_first_day_arm_hour": 6.0,
+            "causal_peak_target_enabled": True,
+            "causal_peak_target_lookback_days": 30,
+            "causal_peak_target_day_quantile": 1.0,
+            "causal_peak_target_energy_reserve_fraction": 0.20,
+            "causal_peak_target_fallback_kw": 600.0,
+        })
+
+        result = run_drl_policy(
+            month,
+            cfg,
+            policy,
+            p_ref_kw=1500.0,
+            record_brain_eye6=True,
+        )
+
+        self.assertEqual(result["peak_guard_target_kw_by_episode"], [600.0, 372.0])
+        np.testing.assert_allclose(result["brain_peak_guard_target_days"][0], 600.0)
+        np.testing.assert_allclose(result["brain_peak_guard_target_days"][1], 372.0)
 
     def test_legacy_policy_uses_96_decisions_and_1440_native_updates(self):
         policy = CountingPolicy()
@@ -524,6 +708,48 @@ class CrossResolutionDispatchTests(unittest.TestCase):
         self.assertEqual(len(result["days"][0]["grid"]), 1440)
         self.assertEqual(len(result["days"][0]["ppo_eye6_running_peak_kw"]), 1440)
         self.assertIn("15-minute decisions and 1-minute physics", result["warnings"][0])
+
+    def test_iq72_dispatch_persists_planned_target_separately_from_eye6(self):
+        policy = IdlePolicy()
+        policy.meta.update({
+            "peak_guard_enabled": True,
+            "peak_guard_first_day_arm_hour": 6.0,
+            "causal_peak_target_enabled": True,
+            "causal_peak_target_lookback_days": 30,
+            "causal_peak_target_day_quantile": 1.0,
+            "causal_peak_target_energy_reserve_fraction": 0.20,
+            "causal_peak_target_fallback_kw": 250.0,
+        })
+        parameters = {
+            **DEFAULT_PARAMETERS,
+            "dt": "0.25",
+            "billing_mode": "2tc",
+        }
+        month = MonthData(
+            days=[DayData(
+                load=np.full(96, 100.0, dtype=np.float64),
+                pv=np.zeros(96, dtype=np.float64),
+                day_type="working",
+                weather="test",
+                day_index=1,
+                date_iso="2026-01-01",
+            )],
+            source="iq72-dispatch-trace-test",
+        )
+
+        with patch(
+            "bess.dispatch.dispatch_runner.load_policy",
+            return_value=(policy, "ppo", policy.meta),
+        ):
+            result = run_policy_dispatch(
+                "policy_iq72.pt",
+                parameters,
+                month=month,
+            )
+
+        self.assertEqual(result["activity"]["peak_guard_target_kw_by_episode"], [250.0])
+        np.testing.assert_allclose(result["days"][0]["ppo_peak_guard_target_kw"], 250.0)
+        self.assertIn("ppo_eye6_running_peak_kw", result["days"][0])
 
     def test_dispatch_rejects_non_divisible_selected_data(self):
         policy = CountingPolicy()

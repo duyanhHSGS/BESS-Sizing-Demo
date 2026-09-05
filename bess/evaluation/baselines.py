@@ -13,13 +13,14 @@ import numpy as np
 from bess.core.bess_env import OBSERVATION_DIM
 from bess.core.brain_runtime import (
     BrainTrajectoryRecorder,
+    causal_peak_target_from_history,
     make_brain_env,
     native_steps_per_action,
     observation_array,
     step_brain_control,
 )
 from bess.core.common import validate_control_interval_minutes
-from bess.core.scenario_gen import MonthData
+from bess.core.scenario_gen import DayData, MonthData
 from bess.core.timebase import dispatch_month_start_day
 
 
@@ -115,6 +116,11 @@ def _merge_brain_rollouts(
     out["soc_deadline_shortfall_penalty_vnd"] = sum(
         float(part.get("soc_deadline_shortfall_penalty_vnd", 0.0)) for part in parts
     )
+    out["peak_guard_target_kw_by_episode"] = [
+        part["peak_guard_target_kw"]
+        for part in parts
+        if part.get("peak_guard_target_kw") is not None
+    ]
     out["decision_count"] = sum(int(part["decision_count"]) for part in parts)
     out["blocked_action_pct"] = (
         100.0 * out["blocked_action_count"] / max(1, out["decision_count"])
@@ -124,6 +130,11 @@ def _merge_brain_rollouts(
             day
             for part in parts
             for day in part.get("brain_eye6_running_peak_days", [])
+        ]
+        out["brain_peak_guard_target_days"] = [
+            day
+            for part in parts
+            for day in part.get("brain_peak_guard_target_days", [])
         ]
     if measure_latency:
         out["latency_ms_mean"] = sum(
@@ -145,6 +156,7 @@ def run_drl_policy(
     measure_latency: bool = False,
     deterministic: bool = True,
     record_brain_eye6: bool = False,
+    peak_guard_history_days: list[DayData] | None = None,
 ) -> dict:
     """Run PPO or PPO2 through the environment contract stored in checkpoint meta."""
     meta = getattr(agent, "meta", {}) or {}
@@ -201,19 +213,22 @@ def run_drl_policy(
     if len(billing_episodes) > 1:
         # TODO(DISPATCH-EYE6): keep deployment episodes identical to training:
         # reset Eye 6 and recurrent memory at every fixed 30-day billing boundary.
+        history = list(peak_guard_history_days or [])
+        parts = []
+        for episode in billing_episodes:
+            parts.append(run_drl_policy(
+                episode,
+                cfg,
+                agent,
+                p_ref_kw=p_ref_kw,
+                measure_latency=measure_latency,
+                deterministic=deterministic,
+                record_brain_eye6=record_brain_eye6,
+                peak_guard_history_days=history,
+            ))
+            history.extend(episode.days)
         return _merge_brain_rollouts(
-            [
-                run_drl_policy(
-                    episode,
-                    cfg,
-                    agent,
-                    p_ref_kw=p_ref_kw,
-                    measure_latency=measure_latency,
-                    deterministic=deterministic,
-                    record_brain_eye6=record_brain_eye6,
-                )
-                for episode in billing_episodes
-            ],
+            parts,
             measure_latency=measure_latency,
             record_brain_eye6=record_brain_eye6,
         )
@@ -264,6 +279,21 @@ def run_drl_policy(
             else None
         )
     peak_guard_deadband_kw = float(meta.get("peak_guard_deadband_kw", 1.0))
+    causal_peak_target_enabled = bool(meta.get("causal_peak_target_enabled", False))
+    peak_guard_target_kw = None
+    if causal_peak_target_enabled:
+        fallback_meta = meta.get("causal_peak_target_fallback_kw")
+        peak_guard_target_kw = causal_peak_target_from_history(
+            list(peak_guard_history_days or []),
+            cfg,
+            lookback_days=int(meta.get("causal_peak_target_lookback_days", 30)),
+            day_quantile=float(meta.get("causal_peak_target_day_quantile", 1.0)),
+            energy_reserve_fraction=float(
+                meta.get("causal_peak_target_energy_reserve_fraction", 0.20)
+            ),
+            guard_start_hour=float(meta.get("peak_guard_first_day_arm_hour", 6.0)),
+            fallback_kw=None if fallback_meta is None else float(fallback_meta),
+        )
     soc_deadline_enabled = bool(meta.get("soc_deadline_enabled", False))
     soc_deadline_hour = float(meta.get("soc_deadline_hour", 6.0))
     soc_deadline_shortfall_penalty_vnd = float(
@@ -309,6 +339,7 @@ def run_drl_policy(
             peak_guard_enabled=peak_guard_enabled,
             peak_guard_min_completed_days=peak_guard_min_completed_days,
             peak_guard_first_day_arm_step=peak_guard_first_day_arm_step,
+            peak_guard_target_kw=peak_guard_target_kw,
             peak_guard_deadband_kw=peak_guard_deadband_kw,
             soc_deadline_enabled=soc_deadline_enabled,
             soc_deadline_hour=soc_deadline_hour,
@@ -344,6 +375,7 @@ def run_drl_policy(
     out["peak_guard_trigger_steps"] = peak_guard_trigger_steps
     out["peak_guard_override_steps"] = peak_guard_override_steps
     out["peak_guard_unmet_steps"] = peak_guard_unmet_steps
+    out["peak_guard_target_kw"] = peak_guard_target_kw
     out["soc_deadline_trigger_steps"] = soc_deadline_trigger_steps
     out["soc_deadline_override_steps"] = soc_deadline_override_steps
     out["soc_deadline_unmet_count"] = soc_deadline_unmet_count
@@ -360,6 +392,14 @@ def run_drl_policy(
             eye6_days.append(eye6_running_peak_flat[cursor:cursor + step_count].copy())
             cursor += step_count
         out["brain_eye6_running_peak_days"] = eye6_days
+        out["brain_peak_guard_target_days"] = (
+            [
+                np.full(len(day.load), peak_guard_target_kw, dtype=np.float64)
+                for day in month.days
+            ]
+            if peak_guard_target_kw is not None
+            else []
+        )
     if measure_latency:
         out["latency_ms_mean"] = float(np.mean(latencies))
         out["latency_ms_max"] = float(np.max(latencies))

@@ -25,8 +25,13 @@ from bess.core.bess_env import (
     BrainTimestepInput,
 )
 from bess.core.common import tariff_vector_day, validate_control_interval_minutes
-from bess.core.scenario_gen import MonthData
-from bess.core.timebase import dt_from_steps_per_day
+from bess.core.scenario_gen import DayData, MonthData
+from bess.core.timebase import (
+    demand_window_steps,
+    dt_from_steps_per_day,
+    fixed_demand_block_averages,
+    steps_per_day_from_dt,
+)
 
 REWARD_SCALE_VND = 1_000_000.0
 
@@ -206,6 +211,120 @@ class PeakGuardDecision:
     allowed_grid_kw: float | None
 
 
+def _minimum_daily_peak_target_kw(
+    meter_blocks_kw: list[float],
+    *,
+    maximum_grid_reduction_kw: float,
+    output_energy_budget_kwh: float,
+) -> float:
+    """Return the lowest cap that one full battery could defend for one day."""
+    if not meter_blocks_kw:
+        return 0.0
+
+    ordered = sorted((max(0.0, float(value)) for value in meter_blocks_kw), reverse=True)
+    power_floor = max(0.0, ordered[0] - float(maximum_grid_reduction_kw))
+    energy_budget_kw_blocks = float(output_energy_budget_kwh) / DEMAND_BLOCK_HOURS
+    prefix = 0.0
+    energy_floor = 0.0
+    for count, value in enumerate(ordered, start=1):
+        prefix += value
+        next_value = ordered[count] if count < len(ordered) else 0.0
+        candidate = (prefix - energy_budget_kw_blocks) / count
+        if candidate >= next_value:
+            energy_floor = max(0.0, candidate)
+            break
+    return max(power_floor, energy_floor)
+
+
+def causal_peak_target_from_history(
+    history_days: list[DayData] | tuple[DayData, ...],
+    cfg,
+    *,
+    lookback_days: int,
+    day_quantile: float,
+    energy_reserve_fraction: float,
+    guard_start_hour: float,
+    fallback_kw: float | None,
+) -> float:
+    """Estimate a causal peak cap from completed days and battery feasibility.
+
+    The estimate never reads the episode it will control.  Each historical day
+    is reduced to the lowest fixed-meter cap defendable by battery power and by
+    the reserved usable energy.  A nearest-rank day quantile then provides one
+    stable month-start target; new checkpoints use the worst historical day.
+    """
+    if isinstance(lookback_days, bool) or int(lookback_days) != lookback_days:
+        raise ValueError("causal peak target lookback must be a positive integer")
+    lookback = int(lookback_days)
+    if lookback <= 0:
+        raise ValueError("causal peak target lookback must be a positive integer")
+
+    quantile = float(day_quantile)
+    reserve = float(energy_reserve_fraction)
+    start_hour = float(guard_start_hour)
+    if not math.isfinite(quantile) or not 0.0 < quantile <= 1.0:
+        raise ValueError("causal peak target day quantile must be inside (0, 1]")
+    if not math.isfinite(reserve) or not 0.0 <= reserve < 1.0:
+        raise ValueError("causal peak target energy reserve must be inside [0, 1)")
+    if not math.isfinite(start_hour) or not 0.0 <= start_hour < 24.0:
+        raise ValueError("causal peak target guard start hour must be inside [0, 24)")
+
+    fallback = None if fallback_kw is None else float(fallback_kw)
+    if fallback is not None and (not math.isfinite(fallback) or fallback < 0.0):
+        raise ValueError("causal peak target fallback must be finite and non-negative")
+
+    selected_days = list(history_days)[-lookback:]
+    if not selected_days:
+        if fallback is None:
+            raise ValueError("causal peak target requires completed history or a fallback")
+        return fallback
+
+    dt_hours = float(cfg.dt)
+    steps_per_block = demand_window_steps(dt_hours)
+    exact_start_step = start_hour / dt_hours
+    start_step = round(exact_start_step)
+    if abs(exact_start_step - start_step) > 1e-9:
+        raise ValueError("causal peak target guard start hour must align with the native timestep")
+    if start_step % steps_per_block:
+        raise ValueError("causal peak target guard start hour must align with the fixed meter")
+
+    maximum_grid_reduction_kw = float(cfg.P_rated_nominal) * float(cfg.eta_dis)
+    output_energy_budget_kwh = (
+        max(0.0, float(cfg.SOC_max) - float(cfg.SOC_min))
+        * float(cfg.E_cap)
+        * float(cfg.eta_dis)
+        * (1.0 - reserve)
+    )
+    if maximum_grid_reduction_kw <= 0.0 or output_energy_budget_kwh < 0.0:
+        raise ValueError("causal peak target requires positive battery power and valid energy")
+
+    first_block = start_step // steps_per_block
+    expected_steps_per_day = steps_per_day_from_dt(dt_hours)
+    daily_targets: list[float] = []
+    for day in selected_days:
+        load = np.asarray(day.load, dtype=np.float64)
+        pv = np.asarray(day.pv, dtype=np.float64)
+        if load.shape != pv.shape or load.ndim != 1 or load.size == 0:
+            raise ValueError("causal peak target history days require matching non-empty load/PV")
+        if load.size != expected_steps_per_day:
+            raise ValueError("causal peak target history resolution does not match config")
+        if not np.isfinite(load).all() or not np.isfinite(pv).all():
+            raise ValueError("causal peak target history must be finite")
+        net_load = np.maximum(0.0, load - pv)
+        meter_blocks = fixed_demand_block_averages(net_load, dt_hours)[first_block:]
+        daily_targets.append(_minimum_daily_peak_target_kw(
+            meter_blocks,
+            maximum_grid_reduction_kw=maximum_grid_reduction_kw,
+            output_energy_budget_kwh=output_energy_budget_kwh,
+        ))
+
+    ordered_targets = sorted(daily_targets)
+    rank = max(0, math.ceil(quantile * len(ordered_targets)) - 1)
+    # TODO(IQ-72): replace this history-only estimator only with a causal forecast
+    # that is available identically in training, validation, test, and deployment.
+    return float(ordered_targets[rank])
+
+
 @dataclass(frozen=True, slots=True)
 class SocDeadlineDecision:
     """One native-step exact charging schedule that fills SOC by a clock deadline."""
@@ -325,8 +444,9 @@ def enforce_seen_peak_guard(
     armed: bool,
     deadband_kw: float,
 ) -> PeakGuardDecision:
-    """Raise a policy action only when its projected grid would break Eye 6.
+    """Raise a policy action only when projected grid would break its peak cap.
 
+    ``monthly_peak_kw`` may be truthful Eye 6 or a larger causal planned target.
     The fixed meter has an energy budget of ``monthly_peak_kw * 0.5 h`` for
     each block.  The remaining budget is shared evenly across the remaining
     native samples.  This lets the guard reconsider the second 15-minute row
@@ -439,6 +559,7 @@ def step_brain_control(
     peak_guard_enabled: bool = False,
     peak_guard_min_completed_days: int = 1,
     peak_guard_first_day_arm_step: int | None = None,
+    peak_guard_target_kw: float | None = None,
     peak_guard_deadband_kw: float = 1.0,
     soc_deadline_enabled: bool = False,
     soc_deadline_hour: float = 6.0,
@@ -467,6 +588,10 @@ def step_brain_control(
         assert env.episode is not None
         if not 0 <= int(peak_guard_first_day_arm_step) < env.episode.steps_per_day:
             raise ValueError("Peak Guard first-day arm step must be inside the day")
+    if peak_guard_target_kw is not None:
+        target_kw = float(peak_guard_target_kw)
+        if not math.isfinite(target_kw) or target_kw < 0.0:
+            raise ValueError("Peak Guard planned target must be finite and non-negative")
 
     results: list[BrainEnvironmentStepResult] = []
     reward_vnd = 0.0
@@ -522,7 +647,10 @@ def step_brain_control(
             peak_guard = enforce_seen_peak_guard(
                 step_action,
                 net_load_kw=timestep.net_load_kw,
-                monthly_peak_kw=meter.monthly_peak_kw,
+                monthly_peak_kw=max(
+                    float(meter.monthly_peak_kw),
+                    0.0 if peak_guard_target_kw is None else float(peak_guard_target_kw),
+                ),
                 block_energy_kwh=meter.block_energy_kwh,
                 block_elapsed_hours=meter.block_elapsed_hours,
                 timestep_hours=env.bess_world.timestep_hours,
@@ -537,8 +665,8 @@ def step_brain_control(
             peak_guard_trigger_steps += int(peak_guard.triggered)
             peak_guard_override_steps += int(peak_guard.adjusted)
             adjusted = adjusted or peak_guard.adjusted
-            # TODO(IQ-71): keep this primitive step-based and let checkpoint/trainer
-            # metadata choose the experiment wake clock; old cheap-end checkpoints stay valid.
+            # TODO(IQ-72): keep truthful Eye 6 separate from the planned cap; old
+            # checkpoints without a target must retain their seen-peak behavior.
         deadline_step = None
         native_step_in_day = None
         if soc_deadline_enabled:

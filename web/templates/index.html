@@ -1971,6 +1971,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const dispatchActiveSeries = Object.fromEntries(seriesStyles.map((series) => [series.key, true]));
     const dispatchSelectedPolicies = new Set();
     const dispatchEye6Color = "#ff2bd6";
+    const dispatchPeakTargetColor = "#facc15";
     const dispatchPolicyPalettes = [
       { peak: "#1d4ed8", grid: "#2563eb", rolling_grid: "#38bdf8", discharge: "#0ea5e9", charge: "#0891b2", soc: "#bae6fd" },
       { peak: "#047857", grid: "#059669", rolling_grid: "#34d399", discharge: "#10b981", charge: "#6ee7b7", soc: "#a7f3d0" },
@@ -2958,6 +2959,16 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             eye6: true,
           });
         }
+        if (traceDays.some((day) => Array.isArray(day.ppo_peak_guard_target_kw))) {
+          styles.push({
+            key: `policy:${policyName}:planned-peak-target`,
+            label: `${label} planned peak target`,
+            color: dispatchPeakTargetColor,
+            policyName,
+            policyKey: "ppo_peak_guard_target_kw",
+            target: true,
+          });
+        }
       });
       styles.forEach((series) => {
         if (dispatchActiveSeries[series.key] === undefined) {
@@ -3118,8 +3129,8 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
             plotWidth,
             plotHeight,
             maxY,
-            series.eye6 ? [] : [5, 5],
-            series.eye6 ? 4 : 2,
+            series.eye6 ? [] : (series.target ? [10, 4] : [5, 5]),
+            series.eye6 ? 4 : (series.target ? 3 : 2),
             Boolean(series.eye6),
           );
           else if (series.oracleCharge && oracleDay) drawDispatchLine(combineCharge(oracleDay), series.color, padding, plotWidth, plotHeight, maxY, [3, 4]);
