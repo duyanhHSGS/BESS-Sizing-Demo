@@ -20,6 +20,7 @@ from bess.core.bess_env import OBSERVATION_DIM
 from bess.core.brain_runtime import (
     REWARD_SCALE_VND,
     causal_peak_target_from_history,
+    charge_window_steps,
     constrain_charge_to_cheap_window,
     make_brain_env,
     native_steps_per_action,
@@ -41,6 +42,9 @@ from bess.core.settings import (
     PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
     PPO_CLIP,
     PPO_CRITIC_GRAD_CLIP,
+    PPO_DAYTIME_CHARGE_ENABLED,
+    PPO_DAYTIME_CHARGE_END_HOUR,
+    PPO_DAYTIME_CHARGE_START_HOUR,
     PPO_DECOMPOSED_CRITIC,
     PPO_ENTROPY_COEF,
     PPO_EXPLORATION_LR_MULTIPLIER,
@@ -257,6 +261,16 @@ def _collect_oracle_teacher_samples(
     targets: list[float] = []
     rewards: list[tuple[float, float, float]] = []
     cheap_steps = frozenset(int(step) for step in cfg.OFF)
+    daytime_charge_steps = (
+        charge_window_steps(
+            PPO_DAYTIME_CHARGE_START_HOUR,
+            PPO_DAYTIME_CHARGE_END_HOUR,
+            timestep_hours=cfg.dt,
+            steps_per_day=len(month.days[0].load),
+        )
+        if PPO_DAYTIME_CHARGE_ENABLED
+        else frozenset()
+    )
 
     for day, dispatch in zip(month.days, oracle_dispatch, strict=True):
         native_rows = len(day.load)
@@ -276,6 +290,7 @@ def _collect_oracle_teacher_samples(
                         native_step_in_day=start + offset,
                         cheap_tariff_steps=cheap_steps,
                         enabled=True,
+                        additional_charge_steps=daytime_charge_steps,
                     ) != action
                     for offset in range(stop - start)
                 )
@@ -288,9 +303,8 @@ def _collect_oracle_teacher_samples(
                 native_steps=stop - start,
                 charge_only_during_cheap_tariff=PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
                 cheap_tariff_steps=cheap_steps,
-                peak_guard_enabled=(
-                    PPO_PEAK_GUARD_ENABLED and peak_guard_target_kw is not None
-                ),
+                additional_charge_steps=daytime_charge_steps,
+                peak_guard_enabled=PPO_PEAK_GUARD_ENABLED,
                 peak_guard_min_completed_days=PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
                 peak_guard_first_day_arm_step=round(
                     PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR / cfg.dt
@@ -1207,6 +1221,16 @@ def main() -> None:
     gamma = args.gamma
     native_steps = native_steps_per_action(cfg.dt, args.control_dt_minutes)
     cheap_tariff_steps = frozenset(int(step) for step in cfg.OFF)
+    daytime_charge_steps = (
+        charge_window_steps(
+            PPO_DAYTIME_CHARGE_START_HOUR,
+            PPO_DAYTIME_CHARGE_END_HOUR,
+            timestep_hours=cfg.dt,
+            steps_per_day=len(days[0].load),
+        )
+        if PPO_DAYTIME_CHARGE_ENABLED
+        else frozenset()
+    )
     decisions_per_day = len(days[0].load) // native_steps
     rollout_decisions = decisions_per_day * max(
         len(month.days) for month in train_months
@@ -1295,6 +1319,9 @@ def main() -> None:
         "obs_dim": OBSERVATION_DIM,
         "battery_wear_cost": battery_wear_cost,
         "charge_only_during_cheap_tariff": PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
+        "daytime_charge_enabled": PPO_DAYTIME_CHARGE_ENABLED,
+        "daytime_charge_start_hour": PPO_DAYTIME_CHARGE_START_HOUR,
+        "daytime_charge_end_hour": PPO_DAYTIME_CHARGE_END_HOUR,
         "peak_guard_enabled": PPO_PEAK_GUARD_ENABLED,
         "peak_guard_mode": "causal_history_feasible_target_v4",
         "peak_guard_min_completed_days": PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
@@ -1449,6 +1476,9 @@ def main() -> None:
         "economics": {
             "battery_wear_cost": battery_wear_cost,
             "charge_only_during_cheap_tariff": PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
+            "daytime_charge_enabled": PPO_DAYTIME_CHARGE_ENABLED,
+            "daytime_charge_start_hour": PPO_DAYTIME_CHARGE_START_HOUR,
+            "daytime_charge_end_hour": PPO_DAYTIME_CHARGE_END_HOUR,
             "peak_guard_enabled": PPO_PEAK_GUARD_ENABLED,
             "peak_guard_mode": "causal_history_feasible_target_v4",
             "peak_guard_min_completed_days": PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
@@ -1957,6 +1987,7 @@ def main() -> None:
             native_steps=native_steps,
             charge_only_during_cheap_tariff=PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
             cheap_tariff_steps=cheap_tariff_steps,
+            additional_charge_steps=daytime_charge_steps,
             peak_guard_enabled=PPO_PEAK_GUARD_ENABLED,
             peak_guard_min_completed_days=PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
             peak_guard_first_day_arm_step=round(

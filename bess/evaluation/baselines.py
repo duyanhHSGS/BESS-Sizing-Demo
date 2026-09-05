@@ -14,6 +14,7 @@ from bess.core.bess_env import OBSERVATION_DIM
 from bess.core.brain_runtime import (
     BrainTrajectoryRecorder,
     causal_peak_target_from_history,
+    charge_window_steps,
     make_brain_env,
     native_steps_per_action,
     observation_array,
@@ -300,6 +301,16 @@ def run_drl_policy(
         meta.get("soc_deadline_shortfall_penalty_vnd", 0.0)
     )
     cheap_tariff_steps = frozenset(int(step) for step in cfg.OFF)
+    daytime_charge_steps = (
+        charge_window_steps(
+            float(meta.get("daytime_charge_start_hour", 6.0)),
+            float(meta.get("daytime_charge_end_hour", 17.5)),
+            timestep_hours=cfg.dt,
+            steps_per_day=env.episode.steps_per_day,
+        )
+        if bool(meta.get("daytime_charge_enabled", False))
+        else frozenset()
+    )
 
     latencies: list[float] = []
     blocked_actions = 0
@@ -336,6 +347,7 @@ def run_drl_policy(
             recorder=recorder,
             charge_only_during_cheap_tariff=charge_only_during_cheap_tariff,
             cheap_tariff_steps=cheap_tariff_steps,
+            additional_charge_steps=daytime_charge_steps,
             peak_guard_enabled=peak_guard_enabled,
             peak_guard_min_completed_days=peak_guard_min_completed_days,
             peak_guard_first_day_arm_step=peak_guard_first_day_arm_step,

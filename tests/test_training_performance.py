@@ -12,6 +12,7 @@ from bess.agents.ppo_agent import PPOAgent, RolloutBuffer
 from bess.core.bess_env import OBSERVATION_DIM
 from bess.core.brain_runtime import (
     BrainTrajectoryRecorder,
+    charge_window_steps,
     constrain_charge_to_cheap_window,
     enforce_seen_peak_guard,
     enforce_soc_deadline_guard,
@@ -641,6 +642,72 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
             -0.75,
         )
 
+    def test_iq73_daytime_charge_permission_is_half_open_and_additive(self):
+        cheap_steps = frozenset(range(24))
+        daytime_steps = charge_window_steps(
+            6.0,
+            17.5,
+            timestep_hours=0.25,
+            steps_per_day=96,
+        )
+        self.assertIn(24, daytime_steps)
+        self.assertIn(69, daytime_steps)
+        self.assertNotIn(70, daytime_steps)
+        for step in (23, 24, 69):
+            self.assertEqual(
+                constrain_charge_to_cheap_window(
+                    -0.75,
+                    native_step_in_day=step,
+                    cheap_tariff_steps=cheap_steps,
+                    enabled=True,
+                    additional_charge_steps=daytime_steps,
+                ),
+                -0.75,
+            )
+        self.assertEqual(
+            constrain_charge_to_cheap_window(
+                -0.75,
+                native_step_in_day=70,
+                cheap_tariff_steps=cheap_steps,
+                enabled=True,
+                additional_charge_steps=daytime_steps,
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            constrain_charge_to_cheap_window(
+                0.75,
+                native_step_in_day=70,
+                cheap_tariff_steps=cheap_steps,
+                enabled=True,
+                additional_charge_steps=daytime_steps,
+            ),
+            0.75,
+        )
+        with self.assertRaises(ValueError):
+            charge_window_steps(6.0, 17.55, timestep_hours=0.25, steps_per_day=96)
+
+    def test_iq73_peak_police_clamps_noon_charge_to_remaining_peak_headroom(self):
+        decision = enforce_seen_peak_guard(
+            -0.9,
+            net_load_kw=300.0,
+            monthly_peak_kw=700.0,
+            block_energy_kwh=0.0,
+            block_elapsed_hours=0.0,
+            timestep_hours=0.25,
+            battery_power_kw=500.0,
+            charge_efficiency=0.9,
+            discharge_efficiency=0.9,
+            enabled=True,
+            armed=True,
+            deadband_kw=0.0,
+        )
+        self.assertTrue(decision.triggered)
+        self.assertTrue(decision.adjusted)
+        self.assertAlmostEqual(decision.allowed_grid_kw, 700.0)
+        self.assertAlmostEqual(decision.action, -0.72)
+        # -360 kW battery-side / 0.9 = -400 kW grid-side; 300 + 400 = 700 kW.
+
     def test_actor_only_prediction_matches_deterministic_act(self):
         agent = PPOAgent(obs_dim=OBSERVATION_DIM, seed=7)
         obs = np.linspace(-1.0, 1.0, OBSERVATION_DIM, dtype=np.float32)
@@ -780,7 +847,55 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         self.assertEqual(result["tariff_blocked_charge_steps"], int(noncheap_mask.sum()))
         self.assertGreater(result["blocked_action_pct"], 0.0)
 
-    def test_iq57_oracle_teacher_removes_noncheap_charge_lessons(self):
+    def test_iq73_checkpoint_adds_daytime_charge_but_blocks_1730_and_later(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 20.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        steps = 96
+        day = DayData(
+            load=np.full(steps, 700.0, dtype=np.float64),
+            pv=np.zeros(steps, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        month = MonthData(days=[day], source="iq73-daytime-charge-test")
+
+        class AlwaysChargeAgent:
+            def __init__(self):
+                self.meta = {
+                    "obs_dim": OBSERVATION_DIM,
+                    "control_dt_minutes": 15.0,
+                    "battery_wear_cost": 0.0,
+                    "charge_only_during_cheap_tariff": True,
+                    "daytime_charge_enabled": True,
+                    "daytime_charge_start_hour": 6.0,
+                    "daytime_charge_end_hour": 17.5,
+                    "peak_guard_enabled": True,
+                    "peak_guard_min_completed_days": 1,
+                    "peak_guard_first_day_arm_hour": 6.0,
+                    "peak_guard_deadband_kw": 1.0,
+                }
+
+            @staticmethod
+            def predict_action(_observation):
+                return -1.0
+
+        result = run_drl_policy(month, cfg, AlwaysChargeAgent(), p_ref_kw=1000.0)
+        battery_power = np.asarray(result["p_bess_days"][0], dtype=np.float64)
+        self.assertLess(battery_power[23], 0.0)
+        self.assertLess(battery_power[24], 0.0)
+        self.assertLess(battery_power[69], 0.0)
+        self.assertEqual(battery_power[70], 0.0)
+        self.assertTrue((battery_power[70:] == 0.0).all())
+
+        no_police = AlwaysChargeAgent()
+        no_police.meta["peak_guard_enabled"] = False
+        with self.assertRaisesRegex(ValueError, "requires Peak Guard"):
+            run_drl_policy(month, cfg, no_police, p_ref_kw=1000.0)
+
+    def test_iq73_oracle_teacher_keeps_daytime_charge_lessons_until_1730(self):
         base = load_system_config()
         cfg = make_bess_config(base, 10000.0, 20.0, base.P_target_user)
         cfg.set_dt(0.25)
@@ -793,7 +908,7 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
             day_index=1,
             date_iso="2026-01-01",
         )
-        month = MonthData(days=[day], source="iq57-oracle-filter-test")
+        month = MonthData(days=[day], source="iq73-oracle-filter-test")
         oracle_dispatch = [{
             "discharge": [0.0] * steps,
             "grid_charge": [10.0] * steps,
@@ -811,8 +926,8 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         self.assertEqual(observations.shape, (48, OBSERVATION_DIM))
         self.assertEqual(rewards.shape, (48, 3))
         self.assertTrue(np.isfinite(rewards).all())
-        self.assertTrue((targets[:12] < 0.0).all())
-        self.assertTrue((targets[12:] == 0.0).all())
+        self.assertTrue((targets[:35] < 0.0).all())
+        self.assertTrue((targets[35:] == 0.0).all())
 
     def test_iq68_oracle_teacher_learns_smooth_applied_charge_not_spiky_request(self):
         base = load_system_config()
