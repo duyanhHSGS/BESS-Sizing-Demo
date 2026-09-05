@@ -827,6 +827,24 @@
     .benchmark-detective:hover { border-color: #7c3aed; transform: translateY(-1px); }
     .benchmark-sort { cursor: pointer; user-select: none; }
     .benchmark-sort:hover { color: #4f46e5; }
+    .benchmark-monthly-list { display: grid; gap: 12px; margin-top: 12px; }
+    .benchmark-monthly-card { border: 1px solid #d8dee9; border-radius: 14px; padding: 14px; background: linear-gradient(180deg, #fff, #f8fafc); }
+    .benchmark-monthly-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; align-items: flex-start; margin-bottom: 10px; }
+    .benchmark-monthly-head h3 { margin: 0 0 4px; }
+    .benchmark-monthly-meta { display: flex; flex-wrap: wrap; gap: 6px; }
+    .benchmark-monthly-meta span, .benchmark-role { border-radius: 999px; padding: 4px 8px; font-size: 12px; font-weight: 700; background: #eef2ff; color: #3730a3; }
+    .benchmark-role.train { background: #dcfce7; color: #166534; }
+    .benchmark-role.validation { background: #fef3c7; color: #92400e; }
+    .benchmark-role.test { background: #dbeafe; color: #1d4ed8; }
+    .benchmark-role.ignored { background: #fee2e2; color: #991b1b; }
+    .benchmark-role.mixed { background: #f3e8ff; color: #7e22ce; }
+    .benchmark-role.unknown { background: #e5e7eb; color: #475569; }
+    .benchmark-role-badges { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+    .benchmark-monthly-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .benchmark-monthly-table th, .benchmark-monthly-table td { padding: 7px 8px; border-top: 1px solid #e5e7eb; text-align: right; white-space: nowrap; }
+    .benchmark-monthly-table th:first-child, .benchmark-monthly-table td:first-child { text-align: left; white-space: normal; }
+    .benchmark-monthly-table .positive { color: #166534; font-weight: 800; }
+    .benchmark-monthly-table .negative { color: #b42318; font-weight: 800; }
     .live-hero { background: linear-gradient(135deg, #052e16, #065f46 55%, #0e7490); color: #fff; }
     .live-hero h2 { color: #fff; }
     .live-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
@@ -1703,6 +1721,20 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <canvas id="benchmarking-versus-chart" class="benchmark-chart"></canvas>
         </section>
       </div>
+
+      <section class="card" id="benchmarking-monthly" style="display:none">
+        <div class="section-head">
+          <div>
+            <h2>30-Day Monthly Data 🗓️🔋</h2>
+            <div class="info">Every fixed Dispatch billing bucket, its real dates, benchmark coverage, selected checkpoint split role, and savings versus No-BESS.</div>
+          </div>
+          <label>Split labels for
+            <select id="benchmarking-monthly-split-policy"></select>
+          </label>
+        </div>
+        <div id="benchmarking-monthly-summary" class="info"></div>
+        <div id="benchmarking-monthly-list" class="benchmark-monthly-list"></div>
+      </section>
     </section>
 
     <section id="tab-live-runs" class="tab-panel">
@@ -3387,6 +3419,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       versusDelta: document.getElementById("benchmarking-versus-delta"),
       exportCsv: document.getElementById("benchmarking-export-csv"),
       exportJson: document.getElementById("benchmarking-export-json"),
+      monthlyPanel: document.getElementById("benchmarking-monthly"),
+      monthlySplitPolicy: document.getElementById("benchmarking-monthly-split-policy"),
+      monthlySummary: document.getElementById("benchmarking-monthly-summary"),
+      monthlyList: document.getElementById("benchmarking-monthly-list"),
     };
 
     function benchmarkEscape(value) {
@@ -3590,6 +3626,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       renderBenchmarkChampions();
       fillBenchmarkFighterSelects();
       renderBenchmarkScope();
+      renderBenchmarkMonthlyData();
     }
 
     function scopedBenchmarkRows() {
@@ -3608,6 +3645,148 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         if (total < (oracle?.total_operating_cost_vnd ?? 0)) relation = "Beats Oracle — investigate accounting";
         return { ...fullById.get(contestant.id), ...block, oracle_relation: relation };
       });
+    }
+
+    function benchmarkMonthlyPolicyRows() {
+      const result = benchmarkingState.result;
+      if (!result) return [];
+      const contextByName = new Map((benchmarkingState.context?.policies || []).map((row) => [row.name, row]));
+      return (result.contestants || [])
+        .filter((row) => row.type === "policy")
+        .map((row) => ({ contestant: row, policy: contextByName.get(row.id) || { name: row.id, algo: row.algo, meta: {} } }));
+    }
+
+    function benchmarkRangeContains(range, dateIso) {
+      return Array.isArray(range) && range.length === 2 && dateIso && dateIso >= String(range[0]) && dateIso <= String(range[1]);
+    }
+
+    function benchmarkIgnoredDay(meta, dayIndex) {
+      const ignored = meta?.ignored_unselected_buckets || meta?.ignored_unselected_months || [];
+      return ignored.some((bucket) => {
+        const match = String(bucket).match(/^(\d+)\s*-\s*(\d+)$/);
+        if (!match) return false;
+        return dayIndex >= Number(match[1]) && dayIndex <= Number(match[2]);
+      });
+    }
+
+    function benchmarkRoleForDay(policy, day) {
+      const meta = policy?.meta || {};
+      const dayIndex = Number(day?.day_index);
+      if (Number.isFinite(dayIndex) && benchmarkIgnoredDay(meta, dayIndex)) return "ignored";
+      const roles = [];
+      if (benchmarkRangeContains(meta.train_range, day?.date_iso)) roles.push("train");
+      if (benchmarkRangeContains(meta.validation_range, day?.date_iso)) roles.push("validation");
+      if (benchmarkRangeContains(meta.test_range, day?.date_iso)) roles.push("test");
+      if (roles.length === 1) return roles[0];
+      if (roles.length > 1) return "mixed";
+      return "unknown";
+    }
+
+    function benchmarkRoleBadges(policy, days) {
+      const order = ["train", "validation", "test", "ignored", "mixed", "unknown"];
+      const labels = {
+        train: "🟢 TRAIN",
+        validation: "🟡 VALIDATION",
+        test: "🔵 TEST",
+        ignored: "✂️ IGNORED",
+        mixed: "🟣 MIXED / OVERLAP",
+        unknown: "⚪ ROLE UNKNOWN",
+      };
+      const counts = new Map();
+      days.forEach((day) => {
+        const role = benchmarkRoleForDay(policy, day);
+        counts.set(role, (counts.get(role) || 0) + 1);
+      });
+      return order.filter((role) => counts.has(role)).map((role) =>
+        `<span class="benchmark-role ${role}">${labels[role]} · ${counts.get(role)}d</span>`
+      ).join("");
+    }
+
+    function benchmarkSignedVnd(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return "—";
+      return `${number > 0 ? "+" : ""}${formatNumber(number)} VND`;
+    }
+
+    function benchmarkSignedPct(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return "—";
+      return `${number > 0 ? "+" : ""}${formatNumber(number, 2)}%`;
+    }
+
+    function renderBenchmarkMonthlyData() {
+      const result = benchmarkingState.result;
+      if (!result || !benchmarkingDom.monthlyPanel) return;
+      const baseline = (result.contestants || []).find((row) => row.id === "no_bess") || result.contestants?.[0];
+      const blocks = baseline?.summary?.blocks || [];
+      benchmarkingDom.monthlyPanel.style.display = blocks.length ? "block" : "none";
+      if (!blocks.length) return;
+
+      const policyRows = benchmarkMonthlyPolicyRows();
+      const previous = benchmarkingDom.monthlySplitPolicy.value;
+      benchmarkingDom.monthlySplitPolicy.innerHTML = policyRows.length
+        ? policyRows.map(({ contestant }) => `<option value="${benchmarkEscape(contestant.id)}">${benchmarkEscape(contestant.label)}</option>`).join("")
+        : `<option value="">No checkpoint split metadata</option>`;
+      if (policyRows.some(({ contestant }) => contestant.id === previous)) benchmarkingDom.monthlySplitPolicy.value = previous;
+      const selected = policyRows.find(({ contestant }) => contestant.id === benchmarkingDom.monthlySplitPolicy.value) || policyRows[0] || null;
+      const selectedPolicy = selected?.policy || null;
+
+      benchmarkingDom.monthlySummary.textContent = selected
+        ? `Split colors come only from ${selected.contestant.label} checkpoint metadata; tournament billing and savings are unchanged. Partial buckets may still be benchmarked even when that checkpoint ignored them during training.`
+        : "No selected policy exposes split metadata here. Monthly benchmark costs and coverage are still shown.";
+
+      const blockMaps = new Map((result.contestants || []).map((contestant) => [
+        contestant.id,
+        new Map((contestant.summary?.blocks || []).map((block) => [Number(block.start_day), block])),
+      ]));
+      const sourceDays = baseline?.days || [];
+
+      // TODO(BENCHMARK-MONTHLY-UI): Keep this presentation-only and sourced from existing fixed-30-day benchmark blocks/checkpoint metadata; never create a second billing or training-split implementation here.
+      benchmarkingDom.monthlyList.innerHTML = blocks.map((block, blockIndex) => {
+        const startDay = Number(block.start_day);
+        const expectedEndDay = startDay + 29;
+        const days = sourceDays.filter((day) => Number(day.day_index) >= startDay && Number(day.day_index) <= expectedEndDay);
+        const actualEndDay = days.length ? Number(days[days.length - 1].day_index) : Number(block.end_day);
+        const firstDate = days[0]?.date_iso || "date unavailable";
+        const lastDate = days[days.length - 1]?.date_iso || "date unavailable";
+        const complete = days.length === 30 && actualEndDay === expectedEndDay;
+        const coverage = complete ? "✅ 30/30 included" : `⚠️ ${days.length}/30 present · benchmark includes available days`;
+        const boundary = complete
+          ? `Cut boundary after Day ${expectedEndDay}`
+          : `Fixed bucket ends Day ${expectedEndDay}; CSV currently ends this bucket at Day ${actualEndDay}`;
+        const noBessBlock = blockMaps.get("no_bess")?.get(startDay) || block;
+        const oracleBlock = blockMaps.get("oracle")?.get(startDay);
+        const noBessCost = Number(noBessBlock?.total_operating_cost_vnd);
+        const oracleCost = Number(oracleBlock?.total_operating_cost_vnd);
+        const roleBadges = selectedPolicy ? benchmarkRoleBadges(selectedPolicy, days) : `<span class="benchmark-role unknown">⚪ ROLE UNKNOWN · ${days.length}d</span>`;
+        const rows = (result.contestants || []).map((contestant) => {
+          const fighterBlock = blockMaps.get(contestant.id)?.get(startDay);
+          if (!fighterBlock) return "";
+          const cost = Number(fighterBlock.total_operating_cost_vnd);
+          const saving = Number.isFinite(noBessCost) && Number.isFinite(cost) ? noBessCost - cost : NaN;
+          const savingPct = Number.isFinite(noBessCost) && noBessCost !== 0 && Number.isFinite(saving) ? saving / noBessCost * 100 : NaN;
+          const oracleGap = Number.isFinite(oracleCost) && Number.isFinite(cost) ? cost - oracleCost : NaN;
+          const savingClass = Number.isFinite(saving) ? (saving > 0 ? "positive" : saving < 0 ? "negative" : "") : "";
+          return `<tr>` +
+            `<td><b>${benchmarkEscape(contestant.label)}</b><br><small>${benchmarkEscape(contestant.type === "policy" ? (contestant.algo || "policy") : contestant.type)}</small></td>` +
+            `<td>${formatVnd(cost)}</td>` +
+            `<td class="${savingClass}">${benchmarkSignedVnd(saving)}</td>` +
+            `<td class="${savingClass}">${benchmarkSignedPct(savingPct)}</td>` +
+            `<td>${benchmarkSignedVnd(oracleGap)}</td>` +
+            `<td>${formatNumber(fighterBlock.peak_kw, 1)} kW</td>` +
+          `</tr>`;
+        }).join("");
+        return `<article class="benchmark-monthly-card">` +
+          `<div class="benchmark-monthly-head"><div>` +
+            `<h3>Month ${blockIndex + 1} · Days ${startDay}–${expectedEndDay}</h3>` +
+            `<div class="info">${benchmarkEscape(firstDate)} → ${benchmarkEscape(lastDate)} · Included Day ${startDay}–${actualEndDay}</div>` +
+          `</div><div class="benchmark-role-badges">${roleBadges}</div></div>` +
+          `<div class="benchmark-monthly-meta"><span>${benchmarkEscape(coverage)}</span><span>${benchmarkEscape(boundary)}</span></div>` +
+          `<div class="sizing-table-wrap"><table class="benchmark-monthly-table"><thead><tr>` +
+            `<th>Fighter</th><th>Total incl. wear</th><th>Saving vs No-BESS</th><th>Saving %</th><th>Gap to Oracle</th><th>Peak</th>` +
+          `</tr></thead><tbody>${rows}</tbody></table></div>` +
+        `</article>`;
+      }).join("");
     }
 
     function renderBenchmarkChampions() {
@@ -3787,6 +3966,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       benchmarkingDom.cache.style.display = "none";
     });
     benchmarkingDom.scope.addEventListener("change", renderBenchmarkScope);
+    benchmarkingDom.monthlySplitPolicy.addEventListener("change", renderBenchmarkMonthlyData);
     benchmarkingDom.detectiveFighter.addEventListener("change", renderBenchmarkDetectives);
     benchmarkingDom.versusA.addEventListener("change", drawBenchmarkVersus);
     benchmarkingDom.versusB.addEventListener("change", drawBenchmarkVersus);
