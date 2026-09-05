@@ -199,7 +199,6 @@ class BrainControlTransition:
     soc_deadline_shortfall_penalty_vnd: float
     requested_policy_action: float
     applied_native_actions: tuple[float, ...]
-    peak_guard_planned_targets_kw: tuple[float | None, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,115 +209,6 @@ class PeakGuardDecision:
     triggered: bool
     adjusted: bool
     allowed_grid_kw: float | None
-
-
-def elastic_peak_target_kw(
-    base_target_kw: float,
-    *,
-    state_of_charge: float,
-    minimum_state_of_charge: float,
-    maximum_state_of_charge: float,
-    battery_capacity_kwh: float,
-    battery_power_kw: float,
-    net_load_kw: float,
-    block_energy_kwh: float,
-    block_elapsed_hours: float,
-    native_step_in_day: int,
-    steps_per_day: int,
-    timestep_hours: float,
-    discharge_efficiency: float,
-    reserve_fraction: float,
-    reserve_release_start_hour: float,
-    reserve_release_end_hour: float,
-    enabled: bool,
-) -> float:
-    """Raise an optimistic peak bid only enough to protect a causal SOC reserve.
-
-    The base bid comes only from completed historical days. This helper never
-    looks ahead. It computes the smallest current fixed-meter cap that Peak
-    Police can enforce without *forcing* SOC below a time-varying reserve.
-    PPO remains free to discharge more strongly on its own.
-    """
-    values = (
-        base_target_kw,
-        state_of_charge,
-        minimum_state_of_charge,
-        maximum_state_of_charge,
-        battery_capacity_kwh,
-        battery_power_kw,
-        net_load_kw,
-        block_energy_kwh,
-        block_elapsed_hours,
-        timestep_hours,
-        discharge_efficiency,
-        reserve_fraction,
-        reserve_release_start_hour,
-        reserve_release_end_hour,
-    )
-    if not all(math.isfinite(float(value)) for value in values):
-        raise ValueError("Elastic Peak Bid inputs must all be finite")
-    if not isinstance(native_step_in_day, int) or not isinstance(steps_per_day, int):
-        raise TypeError("Elastic Peak Bid step indexes must be integers")
-
-    base_target = float(base_target_kw)
-    soc = float(state_of_charge)
-    soc_min = float(minimum_state_of_charge)
-    soc_max = float(maximum_state_of_charge)
-    capacity = float(battery_capacity_kwh)
-    rated_power = float(battery_power_kw)
-    net_load = max(0.0, float(net_load_kw))
-    open_energy = float(block_energy_kwh)
-    open_elapsed = float(block_elapsed_hours)
-    dt_hours = float(timestep_hours)
-    eta_dis = float(discharge_efficiency)
-    reserve = float(reserve_fraction)
-    release_start = float(reserve_release_start_hour)
-    release_end = float(reserve_release_end_hour)
-
-    if base_target < 0.0:
-        raise ValueError("Elastic Peak Bid base target must be non-negative")
-    if capacity <= 0.0 or rated_power <= 0.0 or dt_hours <= 0.0:
-        raise ValueError("Elastic Peak Bid battery and timestep values must be positive")
-    if not 0.0 <= soc_min < soc_max <= 1.0:
-        raise ValueError("Elastic Peak Bid SOC limits must satisfy 0 <= min < max <= 1")
-    if not soc_min - 1e-9 <= soc <= soc_max + 1e-9:
-        raise ValueError("Elastic Peak Bid SOC must be inside configured limits")
-    if not 0.0 < eta_dis <= 1.0:
-        raise ValueError("Elastic Peak Bid discharge efficiency must be inside (0, 1]")
-    if not 0.0 <= reserve < 1.0:
-        raise ValueError("Elastic Peak Bid reserve fraction must be inside [0, 1)")
-    if not 0.0 <= release_start < release_end <= 24.0:
-        raise ValueError("Elastic Peak Bid reserve release hours must satisfy 0 <= start < end <= 24")
-    if steps_per_day <= 0 or not 0 <= native_step_in_day < steps_per_day:
-        raise ValueError("Elastic Peak Bid native step must be inside the day")
-    if open_energy < 0.0 or open_elapsed < 0.0 or open_elapsed >= DEMAND_BLOCK_HOURS:
-        raise ValueError("Elastic Peak Bid meter state is invalid")
-    if open_elapsed + dt_hours > DEMAND_BLOCK_HOURS + 1e-12:
-        raise ValueError("Elastic Peak Bid timestep would overrun the fixed meter block")
-    if not enabled:
-        return base_target
-
-    hour = native_step_in_day * dt_hours
-    if hour < release_start:
-        live_reserve_fraction = reserve
-    elif hour >= release_end:
-        live_reserve_fraction = 0.0
-    else:
-        live_reserve_fraction = reserve * (release_end - hour) / (release_end - release_start)
-
-    reserve_soc = soc_min + live_reserve_fraction * (soc_max - soc_min)
-    energy_above_reserve_kwh = max(0.0, soc - reserve_soc) * capacity
-    battery_discharge_budget_kw = min(rated_power, energy_above_reserve_kwh / dt_hours)
-    outside_discharge_budget_kw = battery_discharge_budget_kw * eta_dis
-
-    remaining_time_hours = DEMAND_BLOCK_HOURS - open_elapsed
-    minimum_grid_kw = max(0.0, net_load - outside_discharge_budget_kw)
-    feasibility_floor_kw = (
-        open_energy + minimum_grid_kw * remaining_time_hours
-    ) / DEMAND_BLOCK_HOURS
-    # TODO(IQ-75): this floor may relax only from current SOC/meter facts. Never
-    # feed future current-bucket load, Oracle peak, or validation/test foresight here.
-    return max(base_target, feasibility_floor_kw)
 
 
 def _minimum_daily_peak_target_kw(
@@ -428,14 +318,10 @@ def causal_peak_target_from_history(
             output_energy_budget_kwh=output_energy_budget_kwh,
         ))
 
-    # Zero-target days (for example very low-load Sundays) must not drag an
-    # optimistic working-day bid toward zero. The old IQ-72 worst-day q=1.0
-    # result is unchanged because removing zeros cannot change the maximum.
-    positive_targets = [value for value in daily_targets if value > 1e-9]
-    ordered_targets = sorted(positive_targets or daily_targets)
+    ordered_targets = sorted(daily_targets)
     rank = max(0, math.ceil(quantile * len(ordered_targets)) - 1)
-    # TODO(IQ-75): keep this causal lower-quartile base bid only with the elastic
-    # SOC feasibility floor; never turn it into current-bucket look-ahead.
+    # TODO(IQ-72): replace this history-only estimator only with a causal forecast
+    # that is available identically in training, validation, test, and deployment.
     return float(ordered_targets[rank])
 
 
@@ -675,10 +561,6 @@ def step_brain_control(
     peak_guard_first_day_arm_step: int | None = None,
     peak_guard_target_kw: float | None = None,
     peak_guard_deadband_kw: float = 1.0,
-    elastic_peak_bid_enabled: bool = False,
-    elastic_peak_reserve_fraction: float = 0.20,
-    elastic_peak_reserve_release_start_hour: float = 17.5,
-    elastic_peak_reserve_release_end_hour: float = 22.5,
     soc_deadline_enabled: bool = False,
     soc_deadline_hour: float = 6.0,
     soc_deadline_shortfall_penalty_vnd: float = 0.0,
@@ -731,7 +613,6 @@ def step_brain_control(
         raise ValueError("SOC deadline shortfall penalty must be finite and non-negative")
     applied_shortfall_penalty_vnd = 0.0
     applied_native_actions: list[float] = []
-    peak_guard_planned_targets_kw: list[float | None] = []
 
     for _ in range(native_steps):
         step_action = float(action)
@@ -763,36 +644,12 @@ def step_brain_control(
                 and peak_guard_first_day_arm_step is not None
                 and native_step_in_day >= int(peak_guard_first_day_arm_step)
             )
-            active_planned_target_kw = peak_guard_target_kw
-            if active_planned_target_kw is not None and elastic_peak_bid_enabled:
-                active_planned_target_kw = elastic_peak_target_kw(
-                    float(active_planned_target_kw),
-                    state_of_charge=env.bess_world.state_of_charge,
-                    minimum_state_of_charge=env.bess_world.minimum_state_of_charge,
-                    maximum_state_of_charge=env.bess_world.maximum_state_of_charge,
-                    battery_capacity_kwh=env.bess_world.battery_capacity_kwh,
-                    battery_power_kw=env.bess_world.battery_power_kw,
-                    net_load_kw=timestep.net_load_kw,
-                    block_energy_kwh=meter.block_energy_kwh,
-                    block_elapsed_hours=meter.block_elapsed_hours,
-                    native_step_in_day=native_step_in_day,
-                    steps_per_day=env.episode.steps_per_day,
-                    timestep_hours=env.bess_world.timestep_hours,
-                    discharge_efficiency=env.bess_world.discharge_efficiency,
-                    reserve_fraction=elastic_peak_reserve_fraction,
-                    reserve_release_start_hour=elastic_peak_reserve_release_start_hour,
-                    reserve_release_end_hour=elastic_peak_reserve_release_end_hour,
-                    enabled=True,
-                )
-            peak_guard_planned_targets_kw.append(
-                None if active_planned_target_kw is None else float(active_planned_target_kw)
-            )
             peak_guard = enforce_seen_peak_guard(
                 step_action,
                 net_load_kw=timestep.net_load_kw,
                 monthly_peak_kw=max(
                     float(meter.monthly_peak_kw),
-                    0.0 if active_planned_target_kw is None else float(active_planned_target_kw),
+                    0.0 if peak_guard_target_kw is None else float(peak_guard_target_kw),
                 ),
                 block_energy_kwh=meter.block_energy_kwh,
                 block_elapsed_hours=meter.block_elapsed_hours,
@@ -808,10 +665,8 @@ def step_brain_control(
             peak_guard_trigger_steps += int(peak_guard.triggered)
             peak_guard_override_steps += int(peak_guard.adjusted)
             adjusted = adjusted or peak_guard.adjusted
-            # TODO(IQ-75): keep truthful Eye 6 separate from the elastic planned
-            # cap; old checkpoints without elastic metadata must remain unchanged.
-        else:
-            peak_guard_planned_targets_kw.append(None)
+            # TODO(IQ-72): keep truthful Eye 6 separate from the planned cap; old
+            # checkpoints without a target must retain their seen-peak behavior.
         deadline_step = None
         native_step_in_day = None
         if soc_deadline_enabled:
@@ -892,7 +747,6 @@ def step_brain_control(
         soc_deadline_shortfall_penalty_vnd=applied_shortfall_penalty_vnd,
         requested_policy_action=float(action),
         applied_native_actions=tuple(applied_native_actions),
-        peak_guard_planned_targets_kw=tuple(peak_guard_planned_targets_kw),
     )
 
 
