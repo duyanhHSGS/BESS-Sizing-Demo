@@ -1817,9 +1817,10 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       <div class="live-grid">
         <section class="card shadow-dispatch-card">
           <div class="section-head">
-            <div><h2>Daily shadow dispatch</h2><div>Measured load/PV with No-BESS reference and selected .pt policy behavior.</div></div>
+            <div><h2>Daily shadow dispatch</h2><div>Dispatch Viewer-grade diagnostics over measured No-BESS + selected .pt policy behavior; Shadow intentionally does not run Oracle.</div></div>
             <label>Day <select id="shadow-chart-day"></select></label>
           </div>
+          <div class="bill-strip" id="shadow-bill-strip" aria-label="Selected shadow day virtual electricity bill"></div>
           <div class="chart-wrap">
             <canvas id="shadow-dispatch-chart"></canvas>
             <div class="chart-tooltip" id="shadow-dispatch-tooltip" role="status" aria-live="polite"></div>
@@ -1827,6 +1828,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           <div class="graph-actions"><button id="btn-shadow-dispatch-hide-all" class="tiny" type="button">Hide all lines</button></div>
           <div class="legend" id="shadow-dispatch-legend" aria-label="Shadow dispatch chart line visibility controls"></div>
           <div class="info" id="shadow-chart-info">Run catch-up to create a daily dispatch trace.</div>
+          <div id="shadow-dispatch-warnings" class="warning-panel" role="status" aria-live="polite"></div>
         </section>
         <section class="card">
           <h2>Monthly virtual bill</h2>
@@ -3808,8 +3810,22 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       { key: "policy_grid", label: "Policy grid", color: "#a78bfa", policy: true },
       { key: "policy_soc", label: "Policy SOC", color: "#fde047", policy: true, soc: true },
     ];
+    // TODO(SHADOW-DISPATCH-RICH): keep this list visually aligned with Dispatch Viewer:
+    // fixed-meter grids only, peak references, SOC, Eye 6, and causal planned peak target.
+    const shadowPolicyPalette = dispatchPolicyMetricColors(0);
+    const shadowDispatchStyles = [
+      { key: "load", label: "Load", color: "#92400e" },
+      { key: "pv", label: "PV", color: "#166534" },
+      { key: "no_bess_rolling_grid", label: "No BESS 30-minute meter grid", color: "#9f1239" },
+      { key: "no_bess_mtd_peak", label: "No BESS month-to-date DEADLY peak", color: "#7f1d1d", dash: [4, 5] },
+      { key: "policy_rolling_grid", color: shadowPolicyPalette.rolling_grid, policy: true, policySuffix: "30-minute meter grid" },
+      { key: "policy_mtd_peak", color: shadowPolicyPalette.peak, policy: true, policySuffix: "month-to-date DEADLY peak", dash: [4, 5] },
+      { key: "policy_soc", color: shadowPolicyPalette.soc, policy: true, policySuffix: "SOC %", soc: true },
+      { key: "ppo_eye6_running_peak_kw", color: dispatchEye6Color, policy: true, policySuffix: "👁 Eye 6: running seen peak", lineWidth: 4, glow: true },
+      { key: "ppo_peak_guard_target_kw", color: dispatchPeakTargetColor, policy: true, policySuffix: "planned peak target", dash: [10, 4], lineWidth: 3, target: true },
+    ];
     const liveDailyActiveSeries = Object.fromEntries(dailyDispatchStyles.map((series) => [series.key, true]));
-    const shadowDailyActiveSeries = Object.fromEntries(dailyDispatchStyles.map((series) => [series.key, true]));
+    const shadowDailyActiveSeries = Object.fromEntries(shadowDispatchStyles.map((series) => [series.key, true]));
     const dailyDispatchChartStates = {};
     let livePollTimer = null;
     let liveLastPayload = null;
@@ -3856,15 +3872,15 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       }
     }
 
-    function dailyDispatchSeries(trace, policyLabel) {
-      return dailyDispatchStyles.map((style) => ({
+    function dailyDispatchSeries(trace, policyLabel, styles = dailyDispatchStyles) {
+      return styles.map((style) => ({
         ...style,
-        label: style.policy ? `${policyLabel} ${style.soc ? "SOC" : "grid"}` : style.label,
+        label: style.policy ? `${policyLabel} ${style.policySuffix || (style.soc ? "SOC" : "grid")}` : style.label,
         values: trace?.[style.key] || [],
       }));
     }
 
-    function drawDailyDispatchChart(canvasId, trace, policyLabel, activeSeries, dayMeta = null, tariffConfig = currentTariffConfig) {
+    function drawDailyDispatchChart(canvasId, trace, policyLabel, activeSeries, dayMeta = null, tariffConfig = currentTariffConfig, styles = dailyDispatchStyles) {
       const canvas = document.getElementById(canvasId);
       const width = Math.max(320, canvas.clientWidth || 600);
       const height = Math.max(320, canvas.clientHeight || 430);
@@ -3882,7 +3898,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         dailyDispatchChartStates[canvasId] = null;
         return;
       }
-      const allSeries = dailyDispatchSeries(trace, policyLabel);
+      const allSeries = dailyDispatchSeries(trace, policyLabel, styles);
       const visibleSeries = allSeries.filter((series) => activeSeries[series.key] && series.values.length);
       const powerSeries = visibleSeries.filter((series) => !series.soc);
       const socSeries = visibleSeries.filter((series) => series.soc);
@@ -3913,9 +3929,14 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         dailyCtx.fillText(String(value), width - 40, y + 4);
       });
       powerSeries.forEach((series) => {
+        dailyCtx.save();
         dailyCtx.strokeStyle = series.color;
-        dailyCtx.lineWidth = 2;
-        dailyCtx.setLineDash([]);
+        dailyCtx.lineWidth = series.lineWidth || 2;
+        dailyCtx.setLineDash(series.dash || []);
+        if (series.glow) {
+          dailyCtx.shadowColor = series.color;
+          dailyCtx.shadowBlur = 8;
+        }
         dailyCtx.beginPath();
         series.values.forEach((value, index) => {
           const x = pad.left + plotW * index / Math.max(1, series.values.length - 1);
@@ -3923,6 +3944,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
           if (index) dailyCtx.lineTo(x, y); else dailyCtx.moveTo(x, y);
         });
         dailyCtx.stroke();
+        dailyCtx.restore();
       });
       socSeries.forEach((series) => {
         dailyCtx.strokeStyle = series.color;
@@ -3942,11 +3964,11 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       };
     }
 
-    function renderDailyDispatchLegend(legendId, activeSeries, policyLabel, redraw) {
+    function renderDailyDispatchLegend(legendId, activeSeries, policyLabel, redraw, styles = dailyDispatchStyles) {
       const legendElement = document.getElementById(legendId);
-      legendElement.innerHTML = dailyDispatchStyles.map((series) => {
+      legendElement.innerHTML = styles.map((series) => {
         const label = series.policy
-          ? `${policyLabel} ${series.soc ? "SOC" : "grid"}` : series.label;
+          ? `${policyLabel} ${series.policySuffix || (series.soc ? "SOC" : "grid")}` : series.label;
         return `<button class="legend-item" type="button" data-daily-series="${series.key}" aria-pressed="${activeSeries[series.key]}">` +
           `<span class="swatch" style="background:${series.color};color:${series.color}"></span>${escapeHtml(label)}</button>`;
       }).join("");
@@ -4148,11 +4170,15 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
     const shadowDayTable = document.getElementById("shadow-day-table");
     const shadowChartDay = document.getElementById("shadow-chart-day");
     const shadowChartInfo = document.getElementById("shadow-chart-info");
+    const shadowBillStrip = document.getElementById("shadow-bill-strip");
+    const shadowDispatchWarnings = document.getElementById("shadow-dispatch-warnings");
     const shadowSources = {{ data_csv_files | tojson }};
     let shadowJobId = null;
     let shadowPollTimer = null;
     let shadowLastDays = [];
+    let shadowOkDays = [];
     let shadowTariffConfig = currentTariffConfig;
+    let shadowDemandRate = 0;
 
     function updateShadowSourceFields() {
       document.getElementById("shadow-source-csv-wrap").style.display = shadowSourceKind.value === "csv" ? "inline-flex" : "none";
@@ -4336,14 +4362,104 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
       await renderShadowData();
     }
 
+    function shadowFixedMeterSeries(values) {
+      const numeric = Array.isArray(values) ? values.map(Number) : [];
+      if (!numeric.length) return [];
+      const blockSteps = numeric.length / 48;
+      if (!Number.isInteger(blockSteps) || blockSteps < 1) return numeric;
+      const output = [];
+      for (let start = 0; start < numeric.length; start += blockSteps) {
+        const block = numeric.slice(start, start + blockSteps);
+        const average = block.reduce((sum, value) => sum + value, 0) / block.length;
+        for (let offset = 0; offset < blockSteps; offset += 1) output.push(average);
+      }
+      return output;
+    }
+
+    function shadowViewerTrace(selected) {
+      if (!selected?.trace) return null;
+      const trace = { ...selected.trace };
+      const samples = trace.load?.length || 0;
+      trace.no_bess_rolling_grid = trace.no_bess_rolling_grid?.length
+        ? trace.no_bess_rolling_grid : shadowFixedMeterSeries(trace.no_bess_grid);
+      trace.policy_rolling_grid = trace.policy_rolling_grid?.length
+        ? trace.policy_rolling_grid : shadowFixedMeterSeries(trace.policy_grid);
+      trace.no_bess_mtd_peak = Number.isFinite(Number(selected.nobess_mtd_peak_kw))
+        ? Array(samples).fill(Number(selected.nobess_mtd_peak_kw)) : [];
+      trace.policy_mtd_peak = Number.isFinite(Number(selected.policy_mtd_peak_kw))
+        ? Array(samples).fill(Number(selected.policy_mtd_peak_kw)) : [];
+      return trace;
+    }
+
+    function renderShadowBillStrip(selected, policyLabel) {
+      if (!selected) {
+        shadowBillStrip.innerHTML = "";
+        return;
+      }
+      const month = selected.date.slice(0, 7);
+      const throughSelected = shadowOkDays.filter((day) => day.date.slice(0, 7) === month && day.date <= selected.date);
+      const nobessMtdEnergy = throughSelected.reduce((sum, day) => sum + Number(day.nobess_energy_vnd || 0), 0);
+      const policyMtdEnergy = throughSelected.reduce((sum, day) => sum + Number(day.policy_energy_vnd || 0), 0);
+      const nobessDemand = shadowDemandRate * Number(selected.nobess_mtd_peak_kw || 0);
+      const policyDemand = shadowDemandRate * Number(selected.policy_mtd_peak_kw || 0);
+      const nobessMtdBill = nobessMtdEnergy + nobessDemand;
+      const policyMtdBill = policyMtdEnergy + policyDemand;
+      const dayEnergySaving = Number(selected.nobess_energy_vnd) - Number(selected.policy_energy_vnd);
+      const mtdPeakReduction = Number(selected.nobess_mtd_peak_kw) - Number(selected.policy_mtd_peak_kw);
+      shadowBillStrip.innerHTML = [
+        billCard("Without BESS", [
+          ["MTD energy", formatVnd(nobessMtdEnergy)],
+          ["MTD demand charge", formatVnd(nobessDemand)],
+          ["MTD virtual bill", formatVnd(nobessMtdBill)],
+          ["MTD DEADLY peak", `${formatNumber(selected.nobess_mtd_peak_kw, 1)} kW`],
+        ]),
+        billCard(policyLabel, [
+          ["MTD energy", formatVnd(policyMtdEnergy)],
+          ["MTD demand charge", formatVnd(policyDemand)],
+          ["MTD virtual bill", formatVnd(policyMtdBill)],
+          ["MTD DEADLY peak", `${formatNumber(selected.policy_mtd_peak_kw, 1)} kW`],
+        ]),
+        billCard("Policy saving", [
+          ["MTD bill saving", formatVnd(nobessMtdBill - policyMtdBill)],
+          ["Selected-day energy saving", formatVnd(dayEnergySaving)],
+          ["MTD peak reduction", `${formatNumber(mtdPeakReduction, 1)} kW`],
+          ["End SOC", `${formatNumber(selected.policy_soc_end_pct, 1)}%`],
+        ]),
+      ].join("");
+    }
+
     function renderSelectedShadowDay() {
       const selected = shadowLastDays.find((day) => day.date === shadowChartDay.value)
         || shadowLastDays[shadowLastDays.length - 1];
-      drawDailyDispatchChart("shadow-dispatch-chart", selected?.trace, "Policy", shadowDailyActiveSeries, selected, shadowTariffConfig);
-      renderDailyDispatchLegend("shadow-dispatch-legend", shadowDailyActiveSeries, "Policy", renderSelectedShadowDay);
+      const policyLabel = policyPrefix(shadowPolicy.value || "Policy");
+      const viewerTrace = shadowViewerTrace(selected);
+      drawDailyDispatchChart(
+        "shadow-dispatch-chart",
+        viewerTrace,
+        policyLabel,
+        shadowDailyActiveSeries,
+        selected,
+        shadowTariffConfig,
+        shadowDispatchStyles,
+      );
+      renderDailyDispatchLegend(
+        "shadow-dispatch-legend",
+        shadowDailyActiveSeries,
+        policyLabel,
+        renderSelectedShadowDay,
+        shadowDispatchStyles,
+      );
+      renderShadowBillStrip(selected, policyLabel);
+      const eye6Visible = Array.isArray(viewerTrace?.ppo_eye6_running_peak_kw);
+      const targetVisible = Array.isArray(viewerTrace?.ppo_peak_guard_target_kw);
       shadowChartInfo.textContent = selected
-        ? `${selected.date} · ${selected.day_type} · ${selected.trace?.load?.length || 0} native samples.`
+        ? `${selected.date} · ${selected.day_type} · ${selected.trace?.load?.length || 0} native samples · meter-only grid view · Eye 6 ${eye6Visible ? "visible" : "unavailable"} · planned peak ${targetVisible ? "visible" : "unavailable"}.`
         : "Run catch-up to create a daily dispatch trace.";
+      const violations = Number(selected?.policy_violations) || 0;
+      shadowDispatchWarnings.style.display = violations ? "block" : "none";
+      shadowDispatchWarnings.innerHTML = violations
+        ? `<div>${violations} virtual safety violation${violations === 1 ? "" : "s"} recorded on this day.</div>`
+        : "";
     }
 
     async function renderShadowData() {
@@ -4351,9 +4467,12 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         liveApi("/api/shadow/days"), liveApi("/api/shadow/monthly"), liveApi("/api/shadow/config"),
       ]);
       shadowTariffConfig = tariffConfigFromParameters(config.parameters);
+      shadowDemandRate = config.parameters?.billing_mode === "2tc"
+        ? Number(config.parameters?.billing_peak_penalty || 0) : 0;
       const days = daysPayload.days || [];
       const months = monthsPayload.months || [];
       const okDays = days.filter((row) => row.status === "OK");
+      shadowOkDays = okDays;
       shadowLastDays = okDays.filter((row) => row.trace);
       const totals = months.reduce((acc, month) => ({
         nobess: acc.nobess + month.nobess_bill_vnd,

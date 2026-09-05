@@ -29,6 +29,7 @@ from bess.dispatch.dispatch_runner import (
 )
 from bess.evaluation.baselines import run_drl_policy, validate_dispatch_sampling
 from bess.evaluation.benchmark import (
+    _rolling_30_minute_average,
     list_data_csvs,
     selected_data_filename,
     selected_data_path,
@@ -309,7 +310,15 @@ def _build_rollouts(config: dict[str, Any], month: MonthData, progress: Callable
     control_minutes = validate_dispatch_sampling(meta, cfg.dt * 60.0)
     p_ref = float(meta.get("p_ref_kw") or _policy_reference_kw(month))
     prepare_policy_forecast(config["policy"], agent, meta, month, p_ref)
-    policy = run_drl_policy(month, cfg, agent, p_ref_kw=p_ref)
+    # TODO(SHADOW-DISPATCH-RICH): keep Shadow's diagnostic trace opt-in aligned
+    # with Dispatch Viewer so Eye 6 / planned-target overlays never change policy behavior.
+    policy = run_drl_policy(
+        month,
+        cfg,
+        agent,
+        p_ref_kw=p_ref,
+        record_brain_eye6=True,
+    )
     return month, cfg, policy, algo, control_minutes, None
 
 
@@ -440,6 +449,55 @@ def catchup(
         _RUN_LOCK.release()
 
 
+def _shadow_viewer_trace(index, day, cfg, policy, no_bess_grid, policy_grid, policy_soc) -> dict[str, Any]:
+    """Build the additive Shadow trace fields used by the Dispatch-style viewer."""
+    expected_steps = len(day.load)
+    if len(policy_grid) != expected_steps:
+        raise ShadowRunError("Shadow policy grid resolution does not match source day")
+    if len(policy_soc) == 0:
+        raise ShadowRunError("Shadow policy SOC trace is empty")
+
+    soc_for_plot = (
+        policy_soc[:expected_steps]
+        if len(policy_soc) >= expected_steps
+        else np.pad(policy_soc, (0, expected_steps - len(policy_soc)), mode="edge")
+    )
+    trace = {
+        "load": np.round(np.asarray(day.load, dtype=float), 3).tolist(),
+        "pv": np.round(np.asarray(day.pv, dtype=float), 3).tolist(),
+        # Preserve native grids for audit/backward compatibility, while the UI
+        # intentionally renders only the fixed 30-minute meter series below.
+        "no_bess_grid": np.round(no_bess_grid, 3).tolist(),
+        "policy_grid": np.round(policy_grid, 3).tolist(),
+        "no_bess_rolling_grid": np.round(
+            np.asarray(_rolling_30_minute_average(no_bess_grid, cfg.dt), dtype=float), 3
+        ).tolist(),
+        "policy_rolling_grid": np.round(
+            np.asarray(_rolling_30_minute_average(policy_grid, cfg.dt), dtype=float), 3
+        ).tolist(),
+        "policy_soc": np.round(soc_for_plot * 100.0, 3).tolist(),
+    }
+
+    eye6_days = policy.get("brain_eye6_running_peak_days")
+    if eye6_days is not None:
+        if len(eye6_days) <= index:
+            raise ShadowRunError("Shadow Eye 6 trace day count does not match source data")
+        eye6 = np.asarray(eye6_days[index], dtype=float)
+        if len(eye6) != expected_steps:
+            raise ShadowRunError("Shadow Eye 6 trace resolution does not match source day")
+        trace["ppo_eye6_running_peak_kw"] = np.round(eye6, 3).tolist()
+
+    target_days = policy.get("brain_peak_guard_target_days")
+    if target_days:
+        if len(target_days) <= index:
+            raise ShadowRunError("Shadow planned peak target day count does not match source data")
+        target = np.asarray(target_days[index], dtype=float)
+        if len(target) != expected_steps:
+            raise ShadowRunError("Shadow planned peak target resolution does not match source day")
+        trace["ppo_peak_guard_target_kw"] = np.round(target, 3).tolist()
+    return trace
+
+
 def _save_day(index, day, month, cfg, policy, checkpoint_id: str) -> None:
     del month
     no_bess_grid = np.maximum(0.0, day.load - day.pv)
@@ -463,18 +521,20 @@ def _save_day(index, day, month, cfg, policy, checkpoint_id: str) -> None:
         int(sum(violations.values())),
         checkpoint_id,
     )
+    trace = _shadow_viewer_trace(
+        index,
+        day,
+        cfg,
+        policy,
+        no_bess_grid,
+        policy_grid,
+        policy_soc,
+    )
     with _conn() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO shadow_days VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             row,
         )
-        trace = {
-            "load": np.round(np.asarray(day.load, dtype=float), 3).tolist(),
-            "pv": np.round(np.asarray(day.pv, dtype=float), 3).tolist(),
-            "no_bess_grid": np.round(no_bess_grid, 3).tolist(),
-            "policy_grid": np.round(policy_grid, 3).tolist(),
-            "policy_soc": np.round(policy_soc * 100.0, 3).tolist(),
-        }
         conn.execute(
             "INSERT OR REPLACE INTO shadow_traces(date,trace_json) VALUES (?,?)",
             (day.date_iso, json.dumps(trace, separators=(",", ":"))),
