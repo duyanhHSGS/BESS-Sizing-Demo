@@ -129,6 +129,12 @@ PPO_CAUSAL_PEAK_TARGET_ENABLED = True
 PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS = 30
 PPO_CAUSAL_PEAK_TARGET_DAY_QUANTILE = 1.0
 PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION = 0.20
+# IQ-76 leaves the deployed IQ-72 estimator untouched, but during training only
+# lets Oracle whisper a relaxed target: exact Oracle fixed-30m peak * 1.10.
+PPO_TRAINING_ORACLE_PEAK_HINT_ENABLED = True
+PPO_TRAINING_ORACLE_PEAK_HINT_MULTIPLIER = 1.10
+# TODO(IQ-76): keep this privileged training curriculum only if hint-free
+# validation/test improve over IQ-72 and PPO itself learns useful peak actions.
 # TODO(IQ-72): keep the 30-day/worst-day/20%-reserve estimator only if shifted
 # boundary review and the untouched test bucket beat IQ-71 without a jackpot Day 1.
 # TODO(IQ-68): preserve legacy checkpoint compatibility for the older cheap-end wake-up contract.

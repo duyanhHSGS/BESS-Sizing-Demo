@@ -23,7 +23,10 @@ from bess.core.common import load_system_config, make_bess_config
 from bess.core.scenario_gen import DayData, MonthData
 from bess.evaluation.baselines import run_drl_policy
 from bess.evaluation.benchmark import _rolling_30_minute_average
-from bess.training.runners.train_ppo_dataset import _collect_oracle_teacher_samples
+from bess.training.runners.train_ppo_dataset import (
+    _collect_oracle_teacher_samples,
+    _training_oracle_peak_hint_targets_kw,
+)
 
 
 def _reference_fixed_30_minute_meter(values, dt):
@@ -779,6 +782,96 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         self.assertTrue((battery_power[noncheap_mask] == 0.0).all())
         self.assertEqual(result["tariff_blocked_charge_steps"], int(noncheap_mask.sum()))
         self.assertGreater(result["blocked_action_pct"], 0.0)
+
+    def test_iq76_oracle_peak_hint_uses_fixed_30_minute_meter_and_plus_10_percent(self):
+        steps = 96
+
+        def day(day_index: int) -> DayData:
+            return DayData(
+                load=np.zeros(steps, dtype=np.float64),
+                pv=np.zeros(steps, dtype=np.float64),
+                day_type="working",
+                weather="test",
+                day_index=day_index,
+                date_iso=f"2026-01-{day_index:02d}",
+            )
+
+        months = [
+            MonthData(days=[day(1)], source="iq76-a"),
+            MonthData(days=[day(2)], source="iq76-b"),
+        ]
+        first = np.zeros(steps, dtype=np.float64)
+        first[0:2] = [100.0, 300.0]  # fixed 30m average = 200 kW
+        second = np.zeros(steps, dtype=np.float64)
+        second[0:2] = [400.0, 600.0]  # fixed 30m average = 500 kW
+
+        oracle_peaks, hints = _training_oracle_peak_hint_targets_kw(
+            [first, second],
+            months,
+            dt_hours=0.25,
+            multiplier=1.10,
+        )
+
+        self.assertEqual(oracle_peaks, [200.0, 500.0])
+        self.assertEqual(hints, [220.00000000000003, 550.0])
+
+    def test_iq76_oracle_peak_hint_does_not_use_raw_15_minute_spike(self):
+        day = DayData(
+            load=np.zeros(96, dtype=np.float64),
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        grid = np.zeros(96, dtype=np.float64)
+        grid[0] = 1000.0
+        oracle_peaks, hints = _training_oracle_peak_hint_targets_kw(
+            [grid],
+            [MonthData(days=[day], source="iq76-meter")],
+            dt_hours=0.25,
+            multiplier=1.10,
+        )
+
+        self.assertEqual(oracle_peaks, [500.0])
+        self.assertEqual(hints, [550.0])
+
+    def test_iq76_oracle_peak_hint_rejects_grid_bucket_mismatch(self):
+        day = DayData(
+            load=np.zeros(96, dtype=np.float64),
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        with self.assertRaisesRegex(ValueError, "exactly match training 30-day buckets"):
+            _training_oracle_peak_hint_targets_kw(
+                [np.zeros(96), np.zeros(96)],
+                [MonthData(days=[day], source="iq76-mismatch")],
+                dt_hours=0.25,
+                multiplier=1.10,
+            )
+
+    def test_iq76_oracle_peak_hint_rejects_invalid_multiplier(self):
+        day = DayData(
+            load=np.zeros(96, dtype=np.float64),
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        month = MonthData(days=[day], source="iq76-invalid")
+        for multiplier in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(multiplier=multiplier):
+                with self.assertRaisesRegex(ValueError, "multiplier"):
+                    _training_oracle_peak_hint_targets_kw(
+                        [np.zeros(96)],
+                        [month],
+                        dt_hours=0.25,
+                        multiplier=multiplier,
+                    )
 
     def test_iq57_oracle_teacher_removes_noncheap_charge_lessons(self):
         base = load_system_config()

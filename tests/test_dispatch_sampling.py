@@ -447,6 +447,46 @@ class CrossResolutionDispatchTests(unittest.TestCase):
         self.assertLess(result["brain_eye6_running_peak_days"][0][24], 250.0)
         self.assertGreater(result["peak_guard_override_steps"], 0)
 
+    def test_iq76_training_oracle_hint_metadata_cannot_override_iq72_inference_target(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        load = np.zeros(96, dtype=np.float64)
+        load[24:26] = 400.0
+        month = MonthData(days=[DayData(
+            load=load,
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )])
+        policy = IdlePolicy()
+        policy.meta.update({
+            "peak_guard_enabled": True,
+            "peak_guard_first_day_arm_hour": 6.0,
+            "causal_peak_target_enabled": True,
+            "causal_peak_target_lookback_days": 30,
+            "causal_peak_target_day_quantile": 1.0,
+            "causal_peak_target_energy_reserve_fraction": 0.20,
+            "causal_peak_target_fallback_kw": 250.0,
+            "training_peak_guard_curriculum": "oracle_30m_peak_plus_10pct_v1",
+            "training_oracle_peak_hint_enabled": True,
+            "training_oracle_peak_hint_multiplier": 1.10,
+            "training_oracle_peak_hint_targets_kw": [999.0],
+        })
+
+        result = run_drl_policy(
+            month,
+            cfg,
+            policy,
+            p_ref_kw=1500.0,
+            record_brain_eye6=True,
+        )
+
+        self.assertEqual(result["peak_guard_target_kw"], 250.0)
+        np.testing.assert_allclose(result["brain_peak_guard_target_days"][0], 250.0)
+
     def test_iq72_history_target_accounts_for_energy_reserve(self):
         base = load_system_config()
         cfg = make_bess_config(base, 1000.0, 500.0, base.P_target_user)

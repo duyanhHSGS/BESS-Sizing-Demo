@@ -76,11 +76,17 @@ from bess.core.settings import (
     PPO_TARGET_KL,
     PPO_TEST_BUCKETS,
     PPO_TORCH_THREADS,
+    PPO_TRAINING_ORACLE_PEAK_HINT_ENABLED,
+    PPO_TRAINING_ORACLE_PEAK_HINT_MULTIPLIER,
     PPO_VALIDATE_EVERY_UPDATES,
     PPO_VALIDATION_BUCKETS,
     PPO_VALUE_COEF,
 )
-from bess.core.timebase import DISPATCH_MONTH_BUCKET_DAYS, dispatch_month_start_day
+from bess.core.timebase import (
+    DISPATCH_MONTH_BUCKET_DAYS,
+    dispatch_month_start_day,
+    fixed_demand_block_averages,
+)
 from bess.evaluation.baselines import run_drl_policy, run_no_bess
 from bess.evaluation.oracle.oracle_cache import (
     load_cached_training_dispatch,
@@ -194,6 +200,46 @@ def _score_grid_dispatch_buckets(
     if cursor != len(p_grid_days):
         raise ValueError("Grid traces do not exactly match Dispatch 30-day bucket holdouts")
     return total_cost
+
+
+def _training_oracle_peak_hint_targets_kw(
+    p_grid_days: list[np.ndarray],
+    months: list[MonthData],
+    *,
+    dt_hours: float,
+    multiplier: float,
+) -> tuple[list[float], list[float]]:
+    """Return Oracle fixed-meter peaks and relaxed training-only Peak Guard hints."""
+    if not math.isfinite(multiplier) or multiplier <= 0.0:
+        raise ValueError("Oracle peak hint multiplier must be finite and positive")
+    if not math.isfinite(dt_hours) or dt_hours <= 0.0:
+        raise ValueError("Oracle peak hint timestep must be finite and positive")
+
+    cursor = 0
+    oracle_peaks_kw: list[float] = []
+    hint_targets_kw: list[float] = []
+    for month in months:
+        stop = cursor + len(month.days)
+        month_days = p_grid_days[cursor:stop]
+        if len(month_days) != len(month.days):
+            raise ValueError("Oracle grid traces do not cover every training bucket day")
+        meter_blocks = [
+            block_kw
+            for day_grid in month_days
+            for block_kw in fixed_demand_block_averages(day_grid, dt_hours)
+        ]
+        if not meter_blocks:
+            raise ValueError("Oracle training bucket has no fixed 30-minute meter blocks")
+        oracle_peak_kw = max(0.0, max(float(value) for value in meter_blocks))
+        oracle_peaks_kw.append(oracle_peak_kw)
+        hint_targets_kw.append(oracle_peak_kw * float(multiplier))
+        cursor = stop
+
+    if cursor != len(p_grid_days):
+        raise ValueError("Oracle grid traces do not exactly match training 30-day buckets")
+    # TODO(IQ-76): this privileged answer-key target belongs only to training.
+    # Validation, test, Dispatch, Live, and Shadow must continue using IQ-72 history.
+    return oracle_peaks_kw, hint_targets_kw
 
 
 def _oracle_dispatch_wear_cost_vnd(
@@ -1307,6 +1353,9 @@ def main() -> None:
             PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION
         ),
         "causal_peak_target_fallback_kw": causal_peak_target_fallback_kw,
+        "training_peak_guard_curriculum": "oracle_30m_peak_plus_10pct_v1",
+        "training_oracle_peak_hint_enabled": PPO_TRAINING_ORACLE_PEAK_HINT_ENABLED,
+        "training_oracle_peak_hint_multiplier": PPO_TRAINING_ORACLE_PEAK_HINT_MULTIPLIER,
         "soc_deadline_enabled": PPO_SOC_DEADLINE_ENABLED,
         "soc_deadline_mode": "daily_exact_smooth_charge_v2",
         "soc_deadline_hour": PPO_SOC_DEADLINE_HOUR,
@@ -1399,8 +1448,26 @@ def main() -> None:
     )
     val_day_indexes = [day.day_index for day in val_days]
     train_day_indexes = [day.day_index for day in train_days]
+    train_oracle_grids = load_cached_training_grids(args.oracle_cache, train_day_indexes)
     oracle_grids = load_cached_training_grids(args.oracle_cache, val_day_indexes)
     oracle_dispatch = load_cached_training_dispatch(args.oracle_cache, train_day_indexes)
+    training_oracle_peaks_kw, training_oracle_peak_hint_targets_kw = (
+        _training_oracle_peak_hint_targets_kw(
+            train_oracle_grids,
+            train_months,
+            dt_hours=cfg.dt,
+            multiplier=PPO_TRAINING_ORACLE_PEAK_HINT_MULTIPLIER,
+        )
+    )
+    training_peak_guard_targets_kw = (
+        training_oracle_peak_hint_targets_kw
+        if PPO_TRAINING_ORACLE_PEAK_HINT_ENABLED
+        else train_peak_targets
+    )
+    agent.meta["training_oracle_peaks_kw"] = training_oracle_peaks_kw
+    agent.meta["training_oracle_peak_hint_targets_kw"] = training_oracle_peak_hint_targets_kw
+    # TODO(IQ-76): these are diagnostic/training metadata only. Inference ignores
+    # them and continues to reconstruct IQ-72 causal targets from completed history.
     val_oracle_dispatch = (
         oracle_dispatch
         if train_day_indexes == val_day_indexes
@@ -1465,6 +1532,12 @@ def main() -> None:
             ),
             "causal_peak_target_fallback_kw": causal_peak_target_fallback_kw,
             "training_causal_peak_targets_kw": train_peak_targets,
+            "training_peak_guard_curriculum": "oracle_30m_peak_plus_10pct_v1",
+            "training_oracle_peak_hint_enabled": PPO_TRAINING_ORACLE_PEAK_HINT_ENABLED,
+            "training_oracle_peak_hint_multiplier": PPO_TRAINING_ORACLE_PEAK_HINT_MULTIPLIER,
+            "training_oracle_peaks_kw": training_oracle_peaks_kw,
+            "training_oracle_peak_hint_targets_kw": training_oracle_peak_hint_targets_kw,
+            "training_peak_guard_targets_kw": training_peak_guard_targets_kw,
             "validation_causal_peak_targets_kw": validation_peak_targets,
             "soc_deadline_enabled": PPO_SOC_DEADLINE_ENABLED,
             "soc_deadline_mode": "daily_exact_smooth_charge_v2",
@@ -1670,7 +1743,7 @@ def main() -> None:
         dispatch_cursor = 0
         for train_month, peak_target_kw in zip(
             train_months,
-            train_peak_targets,
+            training_peak_guard_targets_kw,
             strict=True,
         ):
             month_day_count = len(train_month.days)
@@ -1794,7 +1867,7 @@ def main() -> None:
     # buckets chronologically and reset BrainEnv/recurrent memory at each boundary.
     train_month_cursor = 0
     env = make_training_env(train_months[train_month_cursor])
-    current_peak_guard_target_kw = train_peak_targets[train_month_cursor]
+    current_peak_guard_target_kw = training_peak_guard_targets_kw[train_month_cursor]
     obs = observation_array(env.reset())
     agent.reset_recurrent_state()
     steps = 0
@@ -2049,7 +2122,7 @@ def main() -> None:
             agent.reset_recurrent_state()
             train_month_cursor = (train_month_cursor + 1) % len(train_months)
             env = make_training_env(train_months[train_month_cursor])
-            current_peak_guard_target_kw = train_peak_targets[train_month_cursor]
+            current_peak_guard_target_kw = training_peak_guard_targets_kw[train_month_cursor]
             next_obs = observation_array(env.reset())
         else:
             if transition.next_observation is None:
