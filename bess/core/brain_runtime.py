@@ -535,9 +535,8 @@ def constrain_charge_to_cheap_window(
     native_step_in_day: int,
     cheap_tariff_steps: set[int] | frozenset[int],
     enabled: bool,
-    additional_charge_steps: set[int] | frozenset[int] | None = None,
 ) -> float:
-    """Block charging outside cheap slots plus any explicitly allowed extra slots."""
+    """Return zero for charging requests outside configured off-peak clock slots."""
     action_value = float(action)
     if not math.isfinite(action_value):
         raise ValueError("charge window constraint action must be finite")
@@ -546,42 +545,7 @@ def constrain_charge_to_cheap_window(
         raise ValueError("native_step_in_day must not be negative")
     if not enabled or action_value >= 0.0:
         return action_value
-    if step in cheap_tariff_steps:
-        return action_value
-    if additional_charge_steps is not None and step in additional_charge_steps:
-        return action_value
-    return 0.0
-
-
-def charge_window_steps(
-    start_hour: float,
-    end_hour: float,
-    *,
-    timestep_hours: float,
-    steps_per_day: int,
-) -> frozenset[int]:
-    """Return native steps in one half-open clock window ``[start_hour, end_hour)``."""
-    start = float(start_hour)
-    end = float(end_hour)
-    dt_hours = float(timestep_hours)
-    if not all(math.isfinite(value) for value in (start, end, dt_hours)):
-        raise ValueError("charge window hours and timestep must be finite")
-    if not 0.0 <= start < end <= 24.0:
-        raise ValueError("charge window must satisfy 0 <= start < end <= 24")
-    if dt_hours <= 0.0:
-        raise ValueError("charge window timestep must be greater than 0")
-    if steps_per_day <= 0:
-        raise ValueError("charge window steps_per_day must be greater than 0")
-    exact_start = start / dt_hours
-    exact_end = end / dt_hours
-    start_step = round(exact_start)
-    end_step = round(exact_end)
-    if abs(exact_start - start_step) > 1e-9 or abs(exact_end - end_step) > 1e-9:
-        raise ValueError("charge window boundaries must align with the native timestep")
-    if end_step > int(steps_per_day):
-        raise ValueError("charge window end exceeds the native day")
-    # TODO(IQ-73): keep this daylight permission half-open so 17:30 is blocked exactly.
-    return frozenset(range(int(start_step), int(end_step)))
+    return action_value if step in cheap_tariff_steps else 0.0
 
 
 def step_brain_control(
@@ -592,7 +556,6 @@ def step_brain_control(
     recorder: BrainTrajectoryRecorder | None = None,
     charge_only_during_cheap_tariff: bool = False,
     cheap_tariff_steps: set[int] | frozenset[int] | None = None,
-    additional_charge_steps: set[int] | frozenset[int] | None = None,
     peak_guard_enabled: bool = False,
     peak_guard_min_completed_days: int = 1,
     peak_guard_first_day_arm_step: int | None = None,
@@ -609,8 +572,6 @@ def step_brain_control(
         raise ValueError("cheap tariff step indexes are required when cheap-only charging is enabled")
     if charge_only_during_cheap_tariff and env.episode is None:
         raise ValueError("cheap-only charging requires an episode-backed BrainEnv")
-    if additional_charge_steps and not peak_guard_enabled:
-        raise ValueError("additional charge permission requires Peak Guard")
     if peak_guard_enabled and env.episode is None:
         raise ValueError("Peak Guard requires an episode-backed BrainEnv")
     if soc_deadline_enabled and env.episode is None:
@@ -663,7 +624,6 @@ def step_brain_control(
                 native_step_in_day=timestep_index % env.episode.steps_per_day,
                 cheap_tariff_steps=cheap_tariff_steps,
                 enabled=True,
-                additional_charge_steps=additional_charge_steps,
             )
             if not math.isclose(step_action, float(action), rel_tol=0.0, abs_tol=1e-12):
                 adjusted = True
