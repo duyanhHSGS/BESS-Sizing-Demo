@@ -1466,8 +1466,12 @@ def main() -> None:
     )
     agent.meta["training_oracle_peaks_kw"] = training_oracle_peaks_kw
     agent.meta["training_oracle_peak_hint_targets_kw"] = training_oracle_peak_hint_targets_kw
-    # TODO(IQ-76): these are diagnostic/training metadata only. Inference ignores
-    # them and continues to reconstruct IQ-72 causal targets from completed history.
+    agent.meta["training_oracle_peak_hint_bucket_start_days"] = [
+        dispatch_month_start_day(int(month.days[0].day_index))
+        for month in train_months
+    ]
+    # TODO(IQ-76-DISPATCH): ordinary inference ignores these privileged fields;
+    # only Dispatch Viewer's explicitly labeled training-audit replay may use them.
     val_oracle_dispatch = (
         oracle_dispatch
         if train_day_indexes == val_day_indexes
@@ -1537,6 +1541,10 @@ def main() -> None:
             "training_oracle_peak_hint_multiplier": PPO_TRAINING_ORACLE_PEAK_HINT_MULTIPLIER,
             "training_oracle_peaks_kw": training_oracle_peaks_kw,
             "training_oracle_peak_hint_targets_kw": training_oracle_peak_hint_targets_kw,
+            "training_oracle_peak_hint_bucket_start_days": [
+                dispatch_month_start_day(int(month.days[0].day_index))
+                for month in train_months
+            ],
             "training_peak_guard_targets_kw": training_peak_guard_targets_kw,
             "validation_causal_peak_targets_kw": validation_peak_targets,
             "soc_deadline_enabled": PPO_SOC_DEADLINE_ENABLED,

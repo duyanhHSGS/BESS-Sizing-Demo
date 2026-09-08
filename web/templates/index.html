@@ -3188,7 +3188,18 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         const pDay = policyDay(name, day.day_index);
         return Array.isArray(pDay?.ppo_eye6_running_peak_kw);
       }).length;
-      dispatchDayInfo.textContent = `Day ${day.day_index}, ${selectedCandidate.label}: baseline/oracle context matches Sizing Demo. Policy overlays visible for ${overlays} selected policy trace${overlays === 1 ? "" : "s"}. Exact PPO Eye 6 running-peak trace visible for ${eye6Overlays}.`;
+      const targetSources = selectedPolicyNames().flatMap((name) => {
+        const source = policyDay(name, day.day_index)?.ppo_peak_guard_target_source;
+        if (!source) return [];
+        const sourceLabel = source === "training_oracle_hint"
+          ? "saved IQ76 training Oracle whisper"
+          : "causal completed-history target";
+        return [`${policyPrefix(name)}: ${sourceLabel}`];
+      });
+      // TODO(IQ-76-DISPATCH): keep the viewer honest about whether a gold target
+      // is the privileged training audit or the normal causal inference target.
+      dispatchDayInfo.textContent = `Day ${day.day_index}, ${selectedCandidate.label}: baseline/oracle context matches Sizing Demo. Policy overlays visible for ${overlays} selected policy trace${overlays === 1 ? "" : "s"}. Exact PPO Eye 6 running-peak trace visible for ${eye6Overlays}.` +
+        (targetSources.length ? ` Peak target source — ${targetSources.join("; ")}.` : "");
       dispatchChartState = { day, oracleDay, padding, plotWidth, plotHeight, width, height, visibleSeries };
     }
 

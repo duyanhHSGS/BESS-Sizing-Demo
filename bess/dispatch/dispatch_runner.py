@@ -42,11 +42,66 @@ from bess.core.common import (
 )
 from bess.core.config import BESSConfig
 from bess.core.scenario_gen import DayData, MonthData
-from bess.core.timebase import dt_from_steps_per_day, steps_per_day_from_dt
+from bess.core.timebase import (
+    dispatch_month_start_day,
+    dt_from_steps_per_day,
+    steps_per_day_from_dt,
+)
 
 
 class DispatchRunWarning(RuntimeError):
     pass
+
+
+IQ76_ORACLE_WHISPER_CURRICULUM = "oracle_30m_peak_plus_10pct_v1"
+
+
+def _dispatch_training_peak_hint_overrides(
+    meta: dict[str, Any],
+    month: MonthData,
+) -> dict[int, float]:
+    """Map saved IQ76 training whispers to their original Dispatch buckets."""
+    if (
+        meta.get("training_peak_guard_curriculum") != IQ76_ORACLE_WHISPER_CURRICULUM
+        or not bool(meta.get("training_oracle_peak_hint_enabled", False))
+    ):
+        return {}
+
+    raw_targets = meta.get("training_oracle_peak_hint_targets_kw")
+    if raw_targets is None:
+        return {}
+    if not isinstance(raw_targets, (list, tuple)):
+        raise DispatchRunWarning("IQ76 training Oracle hint targets are malformed")
+
+    raw_starts = meta.get("training_oracle_peak_hint_bucket_start_days")
+    if raw_starts is None:
+        # The first IQ76 checkpoint predates explicit bucket labels. Generic PPO
+        # training always selected the oldest complete buckets beginning at day 1.
+        raw_starts = [1 + 30 * index for index in range(len(raw_targets))]
+    if not isinstance(raw_starts, (list, tuple)) or len(raw_starts) != len(raw_targets):
+        raise DispatchRunWarning("IQ76 training Oracle hints do not match their bucket labels")
+
+    available_starts = {
+        dispatch_month_start_day(int(day.day_index))
+        for day in month.days
+    }
+    overrides: dict[int, float] = {}
+    for raw_start, raw_target in zip(raw_starts, raw_targets, strict=True):
+        start = int(raw_start)
+        if dispatch_month_start_day(start) != start or start in overrides:
+            raise DispatchRunWarning("IQ76 training Oracle hint bucket labels are invalid")
+        target = float(raw_target)
+        if not math.isfinite(target) or target < 0.0:
+            raise DispatchRunWarning(
+                "IQ76 training Oracle hint targets must be finite and non-negative"
+            )
+        if start in available_starts:
+            overrides[start] = target
+
+    # TODO(IQ-76-DISPATCH): this is an audit replay for Dispatch Viewer only.
+    # Never silently feed these privileged targets into Benchmarking, Live,
+    # Shadow, validation, test, or ordinary run_drl_policy inference.
+    return overrides
 
 
 def ensure_inside_sizing_demo(path: Path) -> Path:
@@ -230,12 +285,26 @@ def run_policy_dispatch(
         )
     p_ref = float(meta.get("p_ref_kw") or _policy_reference_kw(month))
     prepare_policy_forecast(checkpoint_name, agent, meta, month, p_ref)
+    training_hint_overrides = (
+        _dispatch_training_peak_hint_overrides(meta, month)
+        if algo == "ppo"
+        else {}
+    )
+    if training_hint_overrides:
+        first_start = min(training_hint_overrides)
+        last_start = max(training_hint_overrides)
+        warnings.append(
+            f"{checkpoint_name}: Dispatch Viewer is replaying saved IQ76 training "
+            f"Oracle whispers for {len(training_hint_overrides)} bucket(s), day "
+            f"{first_start}-{last_start + 29}; later buckets remain causal."
+        )
     rollout = run_drl_policy(
         month,
         cfg,
         agent,
         p_ref_kw=p_ref,
         record_brain_eye6=(algo == "ppo"),
+        peak_guard_target_overrides_by_bucket=training_hint_overrides,
     )
     days = policy_result_to_days(month, rollout, cfg, parameters)
     if algo == "ppo2" and meta.get("reference_env") == "ppo2_senior_15m_v1":
@@ -273,6 +342,12 @@ def run_policy_dispatch(
                     if rollout.get("peak_guard_target_kw") is not None
                     else []
                 )
+            ),
+            "peak_guard_target_source_by_episode": rollout.get(
+                "peak_guard_target_source_by_episode",
+                [rollout.get("peak_guard_target_source")]
+                if rollout.get("peak_guard_target_kw") is not None
+                else [],
             ),
             "soc_deadline_trigger_steps": rollout.get("soc_deadline_trigger_steps", 0),
             "soc_deadline_override_steps": rollout.get("soc_deadline_override_steps", 0),
@@ -349,6 +424,13 @@ def policy_result_to_days(
             if len(target) != expected_steps:
                 raise RuntimeError("Peak Guard target trace resolution does not match source data")
             day_row["ppo_peak_guard_target_kw"] = _rounded_series(target)
+            source_days = rollout.get("brain_peak_guard_target_source_days") or []
+            if source_days:
+                if len(source_days) != len(month.days):
+                    raise RuntimeError(
+                        "Peak Guard target source day count does not match source data"
+                    )
+                day_row["ppo_peak_guard_target_source"] = source_days[index]
         day_row["grid_kWh"] = round(float(np.sum(grid) * cfg.dt), 2)
         day_row["energy_cost_vnd"] = round(_day_energy_cost(day_row, parameters, cfg.dt))
         days.append(day_row)

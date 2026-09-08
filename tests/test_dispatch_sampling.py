@@ -16,7 +16,11 @@ from bess.core.settings import (
     PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS,
     PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR,
 )
-from bess.dispatch.dispatch_runner import DispatchRunWarning, run_policy_dispatch
+from bess.dispatch.dispatch_runner import (
+    DispatchRunWarning,
+    _dispatch_training_peak_hint_overrides,
+    run_policy_dispatch,
+)
 from bess.evaluation.baselines import run_drl_policy, validate_dispatch_sampling
 
 
@@ -486,6 +490,192 @@ class CrossResolutionDispatchTests(unittest.TestCase):
 
         self.assertEqual(result["peak_guard_target_kw"], 250.0)
         np.testing.assert_allclose(result["brain_peak_guard_target_days"][0], 250.0)
+
+    def test_explicit_dispatch_audit_override_replays_iq76_bucket_target(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        month = MonthData(days=[DayData(
+            load=np.full(96, 400.0, dtype=np.float64),
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )])
+        policy = IdlePolicy()
+        policy.meta.update({
+            "peak_guard_enabled": True,
+            "peak_guard_first_day_arm_hour": 6.0,
+            "causal_peak_target_enabled": True,
+            "causal_peak_target_fallback_kw": 673.293,
+        })
+
+        result = run_drl_policy(
+            month,
+            cfg,
+            policy,
+            p_ref_kw=1500.0,
+            record_brain_eye6=True,
+            peak_guard_target_overrides_by_bucket={1: 575.25325},
+        )
+
+        self.assertAlmostEqual(result["peak_guard_target_kw"], 575.25325)
+        self.assertEqual(result["peak_guard_target_source"], "training_oracle_hint")
+        np.testing.assert_allclose(
+            result["brain_peak_guard_target_days"][0],
+            575.25325,
+        )
+
+    def test_dispatch_iq76_hints_map_to_absolute_30_day_buckets(self):
+        month = MonthData(days=[
+            DayData(
+                load=np.zeros(96),
+                pv=np.zeros(96),
+                day_type="working",
+                weather="test",
+                day_index=day_index,
+                date_iso="2026-01-01",
+            )
+            for day_index in (1, 31, 61)
+        ])
+        meta = {
+            "training_peak_guard_curriculum": "oracle_30m_peak_plus_10pct_v1",
+            "training_oracle_peak_hint_enabled": True,
+            "training_oracle_peak_hint_targets_kw": [575.25325, 460.59967],
+        }
+
+        self.assertEqual(
+            _dispatch_training_peak_hint_overrides(meta, month),
+            {1: 575.25325, 31: 460.59967},
+        )
+
+    def test_dispatch_iq76_explicit_bucket_labels_do_not_shift_with_view_slice(self):
+        month = MonthData(days=[DayData(
+            load=np.zeros(96),
+            pv=np.zeros(96),
+            day_type="working",
+            weather="test",
+            day_index=31,
+            date_iso="2026-01-31",
+        )])
+        meta = {
+            "training_peak_guard_curriculum": "oracle_30m_peak_plus_10pct_v1",
+            "training_oracle_peak_hint_enabled": True,
+            "training_oracle_peak_hint_targets_kw": [460.59967],
+            "training_oracle_peak_hint_bucket_start_days": [31],
+        }
+
+        self.assertEqual(
+            _dispatch_training_peak_hint_overrides(meta, month),
+            {31: 460.59967},
+        )
+
+    def test_dispatch_non_iq76_checkpoint_never_receives_training_override(self):
+        meta = {
+            "training_peak_guard_curriculum": "some_future_curriculum",
+            "training_oracle_peak_hint_enabled": True,
+            "training_oracle_peak_hint_targets_kw": [999.0],
+        }
+        self.assertEqual(
+            _dispatch_training_peak_hint_overrides(meta, dense_month()),
+            {},
+        )
+
+    def test_dispatch_iq76_rejects_malformed_hint_metadata(self):
+        base_meta = {
+            "training_peak_guard_curriculum": "oracle_30m_peak_plus_10pct_v1",
+            "training_oracle_peak_hint_enabled": True,
+        }
+        bad_cases = (
+            ({**base_meta, "training_oracle_peak_hint_targets_kw": "575"}, "malformed"),
+            ({
+                **base_meta,
+                "training_oracle_peak_hint_targets_kw": [575.0],
+                "training_oracle_peak_hint_bucket_start_days": [],
+            }, "do not match"),
+            ({
+                **base_meta,
+                "training_oracle_peak_hint_targets_kw": [575.0],
+                "training_oracle_peak_hint_bucket_start_days": [2],
+            }, "labels are invalid"),
+            ({**base_meta, "training_oracle_peak_hint_targets_kw": [float("nan")]}, "finite"),
+            ({**base_meta, "training_oracle_peak_hint_targets_kw": [-1.0]}, "non-negative"),
+        )
+        for meta, message in bad_cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                DispatchRunWarning,
+                message,
+            ):
+                _dispatch_training_peak_hint_overrides(meta, dense_month())
+
+    def test_dispatch_runner_replays_training_hint_then_returns_to_causal_history(self):
+        base = load_system_config()
+        policy = IdlePolicy()
+        policy.meta.update({
+            "e_cap_kwh": 1000.0,
+            "p_rated_kw": 500.0,
+            "peak_guard_enabled": True,
+            "peak_guard_first_day_arm_hour": 6.0,
+            "causal_peak_target_enabled": True,
+            "causal_peak_target_lookback_days": 30,
+            "causal_peak_target_day_quantile": 1.0,
+            "causal_peak_target_energy_reserve_fraction": 0.20,
+            "causal_peak_target_fallback_kw": 673.293,
+            "training_peak_guard_curriculum": "oracle_30m_peak_plus_10pct_v1",
+            "training_oracle_peak_hint_enabled": True,
+            "training_oracle_peak_hint_targets_kw": [575.25325],
+        })
+        month = MonthData(days=[
+            DayData(
+                load=np.full(96, 400.0),
+                pv=np.zeros(96),
+                day_type="working",
+                weather="test",
+                day_index=day_index,
+                date_iso="2026-01-01",
+            )
+            for day_index in (1, 31)
+        ])
+        parameters = {
+            **DEFAULT_PARAMETERS,
+            "dt": "0.25",
+            "billing_mode": "2tc",
+            "minimum_soc": base.SOC_min,
+            "maximum_soc": base.SOC_max,
+        }
+
+        with patch(
+            "bess.dispatch.dispatch_runner.load_policy",
+            return_value=(policy, "ppo", policy.meta),
+        ):
+            result = run_policy_dispatch(
+                "policy_ppo-iq76.pt",
+                parameters,
+                month=month,
+            )
+
+        self.assertEqual(
+            result["activity"]["peak_guard_target_source_by_episode"],
+            ["training_oracle_hint", "causal_history"],
+        )
+        self.assertAlmostEqual(
+            result["activity"]["peak_guard_target_kw_by_episode"][0],
+            575.25325,
+        )
+        self.assertAlmostEqual(
+            result["activity"]["peak_guard_target_kw_by_episode"][1],
+            372.0,
+        )
+        self.assertEqual(
+            result["days"][0]["ppo_peak_guard_target_source"],
+            "training_oracle_hint",
+        )
+        self.assertEqual(
+            result["days"][1]["ppo_peak_guard_target_source"],
+            "causal_history",
+        )
+        self.assertIn("replaying saved IQ76 training Oracle whispers", result["warnings"][0])
 
     def test_iq72_history_target_accounts_for_energy_reserve(self):
         base = load_system_config()

@@ -121,6 +121,11 @@ def _merge_brain_rollouts(
         for part in parts
         if part.get("peak_guard_target_kw") is not None
     ]
+    out["peak_guard_target_source_by_episode"] = [
+        part.get("peak_guard_target_source")
+        for part in parts
+        if part.get("peak_guard_target_kw") is not None
+    ]
     out["decision_count"] = sum(int(part["decision_count"]) for part in parts)
     out["blocked_action_pct"] = (
         100.0 * out["blocked_action_count"] / max(1, out["decision_count"])
@@ -135,6 +140,11 @@ def _merge_brain_rollouts(
             day
             for part in parts
             for day in part.get("brain_peak_guard_target_days", [])
+        ]
+        out["brain_peak_guard_target_source_days"] = [
+            source
+            for part in parts
+            for source in part.get("brain_peak_guard_target_source_days", [])
         ]
     if measure_latency:
         out["latency_ms_mean"] = sum(
@@ -157,6 +167,7 @@ def run_drl_policy(
     deterministic: bool = True,
     record_brain_eye6: bool = False,
     peak_guard_history_days: list[DayData] | None = None,
+    peak_guard_target_overrides_by_bucket: dict[int, float] | None = None,
 ) -> dict:
     """Run PPO or PPO2 through the environment contract stored in checkpoint meta."""
     meta = getattr(agent, "meta", {}) or {}
@@ -209,6 +220,16 @@ def run_drl_policy(
             f"current BrainEnv requires {OBSERVATION_DIM}. Retrain this policy."
         )
 
+    peak_guard_target_overrides: dict[int, float] = {}
+    for raw_start, raw_target in (peak_guard_target_overrides_by_bucket or {}).items():
+        start = int(raw_start)
+        if dispatch_month_start_day(start) != start:
+            raise ValueError("Peak Guard target override keys must be 30-day bucket starts")
+        target = float(raw_target)
+        if not np.isfinite(target) or target < 0.0:
+            raise ValueError("Peak Guard target overrides must be finite and non-negative")
+        peak_guard_target_overrides[start] = target
+
     billing_episodes = _dispatch_month_episodes(month)
     if len(billing_episodes) > 1:
         # TODO(DISPATCH-EYE6): keep deployment episodes identical to training:
@@ -225,6 +246,7 @@ def run_drl_policy(
                 deterministic=deterministic,
                 record_brain_eye6=record_brain_eye6,
                 peak_guard_history_days=history,
+                peak_guard_target_overrides_by_bucket=peak_guard_target_overrides,
             ))
             history.extend(episode.days)
         return _merge_brain_rollouts(
@@ -281,7 +303,19 @@ def run_drl_policy(
     peak_guard_deadband_kw = float(meta.get("peak_guard_deadband_kw", 1.0))
     causal_peak_target_enabled = bool(meta.get("causal_peak_target_enabled", False))
     peak_guard_target_kw = None
-    if causal_peak_target_enabled:
+    peak_guard_target_source = None
+    episode_bucket_start = (
+        dispatch_month_start_day(int(month.days[0].day_index))
+        if month.days
+        else None
+    )
+    if episode_bucket_start in peak_guard_target_overrides:
+        # TODO(IQ-76-DISPATCH): this explicit override exists only so Dispatch
+        # Viewer can replay the saved target used by a training bucket. Normal
+        # inference callers pass no overrides and remain strictly causal.
+        peak_guard_target_kw = peak_guard_target_overrides[episode_bucket_start]
+        peak_guard_target_source = "training_oracle_hint"
+    elif causal_peak_target_enabled:
         fallback_meta = meta.get("causal_peak_target_fallback_kw")
         peak_guard_target_kw = causal_peak_target_from_history(
             list(peak_guard_history_days or []),
@@ -294,6 +328,7 @@ def run_drl_policy(
             guard_start_hour=float(meta.get("peak_guard_first_day_arm_hour", 6.0)),
             fallback_kw=None if fallback_meta is None else float(fallback_meta),
         )
+        peak_guard_target_source = "causal_history"
     soc_deadline_enabled = bool(meta.get("soc_deadline_enabled", False))
     soc_deadline_hour = float(meta.get("soc_deadline_hour", 6.0))
     soc_deadline_shortfall_penalty_vnd = float(
@@ -376,6 +411,7 @@ def run_drl_policy(
     out["peak_guard_override_steps"] = peak_guard_override_steps
     out["peak_guard_unmet_steps"] = peak_guard_unmet_steps
     out["peak_guard_target_kw"] = peak_guard_target_kw
+    out["peak_guard_target_source"] = peak_guard_target_source
     out["soc_deadline_trigger_steps"] = soc_deadline_trigger_steps
     out["soc_deadline_override_steps"] = soc_deadline_override_steps
     out["soc_deadline_unmet_count"] = soc_deadline_unmet_count
@@ -397,6 +433,11 @@ def run_drl_policy(
                 np.full(len(day.load), peak_guard_target_kw, dtype=np.float64)
                 for day in month.days
             ]
+            if peak_guard_target_kw is not None
+            else []
+        )
+        out["brain_peak_guard_target_source_days"] = (
+            [peak_guard_target_source for _day in month.days]
             if peak_guard_target_kw is not None
             else []
         )
