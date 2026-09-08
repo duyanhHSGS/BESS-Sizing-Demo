@@ -114,6 +114,14 @@ PPO_RESET_OPTIMIZER_ON_REANCHOR = True
 PPO_PRESERVE_CRITIC_ON_REANCHOR = True
 # TODO(IQ-57): keep cheap-only charging as an IQ-57+ architecture rule and audit unseen-month economics.
 PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF = True
+# IQ-77 restores IQ-73's normal-window permission on top of IQ-76. PPO may
+# request charging from 06:00 until 17:30, but Peak Police still runs after the
+# permission gate and may reduce, cancel, or reverse an unsafe charge request.
+PPO_DAYTIME_CHARGE_ENABLED = True
+PPO_DAYTIME_CHARGE_START_HOUR = 6.0
+PPO_DAYTIME_CHARGE_END_HOUR = 17.5
+# TODO(IQ-77): keep the extra [06:00, 17:30) permission only if Farex unseen
+# economics and human meter traces beat IQ-76 without creating new peaks.
 # IQ-66 adds a meter-aware minimum-action clamp after one complete billing day.
 # It only strengthens an action whose projected grid would exceed Eye 6; it does
 # not block safe below-peak discharge, keeping this experiment to one behavior change.

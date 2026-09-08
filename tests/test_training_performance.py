@@ -12,6 +12,7 @@ from bess.agents.ppo_agent import PPOAgent, RolloutBuffer
 from bess.core.bess_env import OBSERVATION_DIM
 from bess.core.brain_runtime import (
     BrainTrajectoryRecorder,
+    charge_window_steps,
     constrain_charge_to_cheap_window,
     enforce_seen_peak_guard,
     enforce_soc_deadline_guard,
@@ -644,6 +645,153 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
             -0.75,
         )
 
+    def test_iq77_normal_charge_permission_is_half_open_and_additive(self):
+        cheap_steps = frozenset(range(24))
+        normal_steps = charge_window_steps(
+            6.0,
+            17.5,
+            timestep_hours=0.25,
+            steps_per_day=96,
+        )
+
+        self.assertEqual(min(normal_steps), 24)
+        self.assertEqual(max(normal_steps), 69)
+        self.assertEqual(len(normal_steps), 46)
+        for step in (23, 24, 69):
+            with self.subTest(step=step):
+                self.assertEqual(
+                    constrain_charge_to_cheap_window(
+                        -0.75,
+                        native_step_in_day=step,
+                        cheap_tariff_steps=cheap_steps,
+                        enabled=True,
+                        additional_charge_steps=normal_steps,
+                    ),
+                    -0.75,
+                )
+        self.assertEqual(
+            constrain_charge_to_cheap_window(
+                -0.75,
+                native_step_in_day=70,
+                cheap_tariff_steps=cheap_steps,
+                enabled=True,
+                additional_charge_steps=normal_steps,
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            constrain_charge_to_cheap_window(
+                0.75,
+                native_step_in_day=70,
+                cheap_tariff_steps=cheap_steps,
+                enabled=True,
+                additional_charge_steps=normal_steps,
+            ),
+            0.75,
+        )
+
+    def test_iq77_normal_charge_window_respects_other_native_resolutions(self):
+        normal_steps = charge_window_steps(
+            6.0,
+            17.5,
+            timestep_hours=0.5,
+            steps_per_day=48,
+        )
+
+        self.assertEqual(min(normal_steps), 12)
+        self.assertEqual(max(normal_steps), 34)
+        self.assertEqual(len(normal_steps), 23)
+        self.assertNotIn(35, normal_steps)
+
+    def test_iq77_charge_window_rejects_invalid_clock_geometry(self):
+        bad_cases = (
+            (-0.25, 17.5, 0.25, 96),
+            (6.0, 6.0, 0.25, 96),
+            (17.5, 6.0, 0.25, 96),
+            (6.0, 24.25, 0.25, 96),
+            (float("nan"), 17.5, 0.25, 96),
+            (6.0, float("inf"), 0.25, 96),
+            (6.0, 17.5, 0.0, 96),
+            (6.0, 17.55, 0.25, 96),
+            (6.0, 17.5, 0.25, 0),
+            (6.0, 17.5, 0.25, 69),
+        )
+        for start, end, dt_hours, steps_per_day in bad_cases:
+            with self.subTest(
+                start=start,
+                end=end,
+                dt_hours=dt_hours,
+                steps_per_day=steps_per_day,
+            ):
+                with self.assertRaises(ValueError):
+                    charge_window_steps(
+                        start,
+                        end,
+                        timestep_hours=dt_hours,
+                        steps_per_day=steps_per_day,
+                    )
+
+    def test_iq77_additional_charge_permission_requires_peak_police(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 20.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        day = DayData(
+            load=np.full(96, 700.0, dtype=np.float64),
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        env = make_brain_env(
+            MonthData(days=[day], source="iq77-police-required"),
+            cfg,
+            power_scale_kw=1000.0,
+        )
+        env.reset()
+
+        with self.assertRaisesRegex(ValueError, "requires Peak Guard"):
+            step_brain_control(
+                env,
+                -1.0,
+                native_steps=1,
+                charge_only_during_cheap_tariff=True,
+                cheap_tariff_steps=frozenset(cfg.OFF),
+                additional_charge_steps=frozenset({24}),
+                peak_guard_enabled=False,
+            )
+        with self.assertRaisesRegex(ValueError, "requires the charge-window constraint"):
+            step_brain_control(
+                env,
+                -1.0,
+                native_steps=1,
+                charge_only_during_cheap_tariff=False,
+                additional_charge_steps=frozenset({24}),
+                peak_guard_enabled=True,
+            )
+
+    def test_iq77_peak_police_clamps_normal_window_charge_to_headroom(self):
+        decision = enforce_seen_peak_guard(
+            -0.9,
+            net_load_kw=300.0,
+            monthly_peak_kw=700.0,
+            block_energy_kwh=0.0,
+            block_elapsed_hours=0.0,
+            timestep_hours=0.25,
+            battery_power_kw=500.0,
+            charge_efficiency=0.9,
+            discharge_efficiency=0.9,
+            enabled=True,
+            armed=True,
+            deadband_kw=0.0,
+        )
+
+        self.assertTrue(decision.triggered)
+        self.assertTrue(decision.adjusted)
+        self.assertAlmostEqual(decision.allowed_grid_kw, 700.0)
+        self.assertAlmostEqual(decision.action, -0.72)
+        # -360 kW battery-side / 0.9 = -400 kW grid-side; 300 + 400 = 700 kW.
+
     def test_actor_only_prediction_matches_deterministic_act(self):
         agent = PPOAgent(obs_dim=OBSERVATION_DIM, seed=7)
         obs = np.linspace(-1.0, 1.0, OBSERVATION_DIM, dtype=np.float32)
@@ -783,6 +931,94 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         self.assertEqual(result["tariff_blocked_charge_steps"], int(noncheap_mask.sum()))
         self.assertGreater(result["blocked_action_pct"], 0.0)
 
+    def test_iq77_checkpoint_adds_normal_charge_but_blocks_1730_and_later(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1000.0, 20.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        steps = 96
+        day = DayData(
+            load=np.full(steps, 700.0, dtype=np.float64),
+            pv=np.zeros(steps, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        month = MonthData(days=[day], source="iq77-normal-charge-test")
+
+        class AlwaysChargeAgent:
+            meta = {
+                "obs_dim": OBSERVATION_DIM,
+                "control_dt_minutes": 15.0,
+                "battery_wear_cost": 0.0,
+                "charge_only_during_cheap_tariff": True,
+                "daytime_charge_enabled": True,
+                "daytime_charge_start_hour": 6.0,
+                "daytime_charge_end_hour": 17.5,
+                "peak_guard_enabled": True,
+                "peak_guard_min_completed_days": 1,
+                "peak_guard_first_day_arm_hour": 6.0,
+                "peak_guard_deadband_kw": 1.0,
+            }
+
+            @staticmethod
+            def predict_action(_observation):
+                return -1.0
+
+        result = run_drl_policy(month, cfg, AlwaysChargeAgent(), p_ref_kw=1000.0)
+        battery_power = np.asarray(result["p_bess_days"][0], dtype=np.float64)
+
+        self.assertLess(battery_power[23], 0.0)
+        self.assertLess(battery_power[24], 0.0)
+        self.assertLess(battery_power[69], 0.0)
+        self.assertEqual(battery_power[70], 0.0)
+        self.assertTrue((battery_power[70:] == 0.0).all())
+
+    def test_iq77_peak_police_stops_integrated_normal_window_peak_break(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 10000.0, 500.0, base.P_target_user)
+        cfg.set_dt(0.25)
+        load = np.full(96, 1000.0, dtype=np.float64)
+        load[:24] = 500.0
+        day = DayData(
+            load=load,
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        month = MonthData(days=[day], source="iq77-integrated-peak-police")
+
+        class AlwaysChargeAgent:
+            meta = {
+                "obs_dim": OBSERVATION_DIM,
+                "control_dt_minutes": 15.0,
+                "battery_wear_cost": 0.0,
+                "charge_only_during_cheap_tariff": True,
+                "daytime_charge_enabled": True,
+                "daytime_charge_start_hour": 6.0,
+                "daytime_charge_end_hour": 17.5,
+                "peak_guard_enabled": True,
+                "peak_guard_min_completed_days": 1,
+                "peak_guard_first_day_arm_hour": 6.0,
+                "peak_guard_deadband_kw": 0.0,
+            }
+
+            @staticmethod
+            def predict_action(_observation):
+                return -1.0
+
+        result = run_drl_policy(month, cfg, AlwaysChargeAgent(), p_ref_kw=1000.0)
+        battery_power = np.asarray(result["p_bess_days"][0], dtype=np.float64)
+        grid_power = np.asarray(result["p_grid_days"][0], dtype=np.float64)
+
+        self.assertAlmostEqual(battery_power[23], -500.0)
+        self.assertGreater(battery_power[24], -500.0)
+        self.assertLess(battery_power[24], 0.0)
+        self.assertLessEqual(grid_power[24], grid_power[:24].max() + 1e-9)
+        self.assertGreater(result["peak_guard_override_steps"], 0)
+
     def test_iq76_oracle_peak_hint_uses_fixed_30_minute_meter_and_plus_10_percent(self):
         steps = 96
 
@@ -873,7 +1109,7 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
                         multiplier=multiplier,
                     )
 
-    def test_iq57_oracle_teacher_removes_noncheap_charge_lessons(self):
+    def test_iq77_oracle_teacher_keeps_normal_charge_lessons_until_1730(self):
         base = load_system_config()
         cfg = make_bess_config(base, 10000.0, 20.0, base.P_target_user)
         cfg.set_dt(0.25)
@@ -886,7 +1122,7 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
             day_index=1,
             date_iso="2026-01-01",
         )
-        month = MonthData(days=[day], source="iq57-oracle-filter-test")
+        month = MonthData(days=[day], source="iq77-oracle-filter-test")
         oracle_dispatch = [{
             "discharge": [0.0] * steps,
             "grid_charge": [10.0] * steps,
@@ -904,8 +1140,8 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         self.assertEqual(observations.shape, (48, OBSERVATION_DIM))
         self.assertEqual(rewards.shape, (48, 3))
         self.assertTrue(np.isfinite(rewards).all())
-        self.assertTrue((targets[:12] < 0.0).all())
-        self.assertTrue((targets[12:] == 0.0).all())
+        self.assertTrue((targets[:35] < 0.0).all())
+        self.assertTrue((targets[35:] == 0.0).all())
 
     def test_iq68_oracle_teacher_learns_smooth_applied_charge_not_spiky_request(self):
         base = load_system_config()
