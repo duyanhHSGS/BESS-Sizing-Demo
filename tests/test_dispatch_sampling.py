@@ -396,8 +396,8 @@ class CrossResolutionDispatchTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     run_drl_policy(month, cfg, policy, p_ref_kw=1500.0)
 
-    def test_iq72_defaults_replace_noon_lottery_with_causal_target(self):
-        self.assertTrue(PPO_CAUSAL_PEAK_TARGET_ENABLED)
+    def test_iq78_defaults_disable_causal_peak_controller_but_keep_legacy_parameters(self):
+        self.assertFalse(PPO_CAUSAL_PEAK_TARGET_ENABLED)
         self.assertEqual(PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR, 6.0)
         self.assertEqual(PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS, 30)
         self.assertEqual(PPO_CAUSAL_PEAK_TARGET_DAY_QUANTILE, 1.0)

@@ -4,11 +4,14 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
+from unittest.mock import patch
 
 import numpy as np
 import torch
 
 from bess.agents.ppo_agent import PPOAgent, RolloutBuffer
+from bess.core import settings as ppo_settings
 from bess.core.bess_env import OBSERVATION_DIM
 from bess.core.brain_runtime import (
     BrainTrajectoryRecorder,
@@ -57,6 +60,113 @@ class FixedDemandBlockTests(unittest.TestCase):
 
 
 class InferenceAndEnvironmentTests(unittest.TestCase):
+    def test_iq78_new_training_defaults_disable_all_human_control_rules(self):
+        self.assertFalse(ppo_settings.PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF)
+        self.assertFalse(ppo_settings.PPO_DAYTIME_CHARGE_ENABLED)
+        self.assertFalse(ppo_settings.PPO_PEAK_GUARD_ENABLED)
+        self.assertFalse(ppo_settings.PPO_CAUSAL_PEAK_TARGET_ENABLED)
+        self.assertFalse(ppo_settings.PPO_TRAINING_ORACLE_PEAK_HINT_ENABLED)
+        self.assertFalse(ppo_settings.PPO_SOC_DEADLINE_ENABLED)
+        self.assertEqual(ppo_settings.PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND, 0.0)
+        self.assertEqual(ppo_settings.PPO_ACTION_MISMATCH_SHAPING_SCALE, 0.0)
+
+    def test_iq78_policy_action_reaches_physics_without_human_override(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        day_one = DayData(
+            load=np.full(96, 100.0, dtype=np.float64),
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        day_two = DayData(
+            load=np.full(96, 200.0, dtype=np.float64),
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=2,
+            date_iso="2026-01-02",
+        )
+        env = make_brain_env(
+            MonthData(days=[day_one, day_two], source="iq78-no-human-rules"),
+            cfg,
+            power_scale_kw=1000.0,
+            initial_state_of_charge=0.50,
+        )
+        env.reset()
+
+        # Establish a completed-day peak, then coast through Day 2 to 18:00.
+        # Old Peak Police, cheap-window logic, and the 06:00 SOC schedule would
+        # all have opportunities to interfere before the final command.
+        step_brain_control(
+            env,
+            0.0,
+            native_steps=96,
+            charge_only_during_cheap_tariff=ppo_settings.PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
+            peak_guard_enabled=ppo_settings.PPO_PEAK_GUARD_ENABLED,
+            soc_deadline_enabled=ppo_settings.PPO_SOC_DEADLINE_ENABLED,
+        )
+        step_brain_control(
+            env,
+            0.0,
+            native_steps=72,
+            charge_only_during_cheap_tariff=ppo_settings.PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
+            peak_guard_enabled=ppo_settings.PPO_PEAK_GUARD_ENABLED,
+            soc_deadline_enabled=ppo_settings.PPO_SOC_DEADLINE_ENABLED,
+        )
+        self.assertAlmostEqual(env.bess_world.state_of_charge, 0.50, places=12)
+
+        requested_action = -0.5
+        transition = step_brain_control(
+            env,
+            requested_action,
+            native_steps=1,
+            charge_only_during_cheap_tariff=ppo_settings.PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
+            peak_guard_enabled=ppo_settings.PPO_PEAK_GUARD_ENABLED,
+            soc_deadline_enabled=ppo_settings.PPO_SOC_DEADLINE_ENABLED,
+        )
+        physics = transition.native_results[0].bess.physics
+        self.assertEqual(transition.applied_native_actions, (requested_action,))
+        self.assertEqual(transition.tariff_blocked_charge_steps, 0)
+        self.assertEqual(transition.peak_guard_override_steps, 0)
+        self.assertEqual(transition.soc_deadline_override_steps, 0)
+        self.assertAlmostEqual(physics.final_battery_kw, physics.requested_battery_kw, places=12)
+        self.assertLess(physics.final_battery_kw, 0.0)
+        self.assertGreater(physics.grid_import_kw, 200.0)
+
+    def test_iq78_physics_still_clips_impossible_battery_requests(self):
+        base = load_system_config()
+        cfg = make_bess_config(base, 1250.0, 450.0, base.P_target_user)
+        day = DayData(
+            load=np.full(96, 700.0, dtype=np.float64),
+            pv=np.zeros(96, dtype=np.float64),
+            day_type="working",
+            weather="test",
+            day_index=1,
+            date_iso="2026-01-01",
+        )
+        env = make_brain_env(
+            MonthData(days=[day], source="iq78-physics-stays"),
+            cfg,
+            power_scale_kw=1000.0,
+            initial_state_of_charge=cfg.SOC_min,
+        )
+        env.reset()
+        transition = step_brain_control(
+            env,
+            1.0,
+            native_steps=1,
+            charge_only_during_cheap_tariff=ppo_settings.PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF,
+            peak_guard_enabled=ppo_settings.PPO_PEAK_GUARD_ENABLED,
+            soc_deadline_enabled=ppo_settings.PPO_SOC_DEADLINE_ENABLED,
+        )
+        physics = transition.native_results[0].bess.physics
+        self.assertGreater(physics.requested_battery_kw, 0.0)
+        self.assertEqual(physics.final_battery_kw, 0.0)
+        self.assertAlmostEqual(physics.next_soc, cfg.SOC_min, places=12)
+
     @staticmethod
     def _peak_guard(action, **overrides):
         arguments = {
@@ -722,14 +832,13 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
                 end=end,
                 dt_hours=dt_hours,
                 steps_per_day=steps_per_day,
-            ):
-                with self.assertRaises(ValueError):
-                    charge_window_steps(
-                        start,
-                        end,
-                        timestep_hours=dt_hours,
-                        steps_per_day=steps_per_day,
-                    )
+            ), self.assertRaises(ValueError):
+                charge_window_steps(
+                    start,
+                    end,
+                    timestep_hours=dt_hours,
+                    steps_per_day=steps_per_day,
+                )
 
     def test_iq77_additional_charge_permission_requires_peak_police(self):
         base = load_system_config()
@@ -947,7 +1056,7 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         month = MonthData(days=[day], source="iq77-normal-charge-test")
 
         class AlwaysChargeAgent:
-            meta = {
+            meta: ClassVar[dict[str, object]] = {
                 "obs_dim": OBSERVATION_DIM,
                 "control_dt_minutes": 15.0,
                 "battery_wear_cost": 0.0,
@@ -991,7 +1100,7 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         month = MonthData(days=[day], source="iq77-integrated-peak-police")
 
         class AlwaysChargeAgent:
-            meta = {
+            meta: ClassVar[dict[str, object]] = {
                 "obs_dim": OBSERVATION_DIM,
                 "control_dt_minutes": 15.0,
                 "battery_wear_cost": 0.0,
@@ -1100,14 +1209,16 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
         )
         month = MonthData(days=[day], source="iq76-invalid")
         for multiplier in (0.0, -1.0, float("nan"), float("inf")):
-            with self.subTest(multiplier=multiplier):
-                with self.assertRaisesRegex(ValueError, "multiplier"):
-                    _training_oracle_peak_hint_targets_kw(
-                        [np.zeros(96)],
-                        [month],
-                        dt_hours=0.25,
-                        multiplier=multiplier,
-                    )
+            with self.subTest(multiplier=multiplier), self.assertRaisesRegex(
+                ValueError,
+                "multiplier",
+            ):
+                _training_oracle_peak_hint_targets_kw(
+                    [np.zeros(96)],
+                    [month],
+                    dt_hours=0.25,
+                    multiplier=multiplier,
+                )
 
     def test_iq77_oracle_teacher_keeps_normal_charge_lessons_until_1730(self):
         base = load_system_config()
@@ -1128,14 +1239,28 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
             "grid_charge": [10.0] * steps,
         }]
 
-        observations, targets, rewards = _collect_oracle_teacher_samples(
-            month,
-            oracle_dispatch,
-            cfg,
-            power_scale_kw=1000.0,
-            battery_wear_cost=0.0,
-            native_steps=2,
-        )
+        with (
+            patch(
+                "bess.training.runners.train_ppo_dataset.PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF",
+                True,
+            ),
+            patch(
+                "bess.training.runners.train_ppo_dataset.PPO_DAYTIME_CHARGE_ENABLED",
+                True,
+            ),
+            patch(
+                "bess.training.runners.train_ppo_dataset.PPO_PEAK_GUARD_ENABLED",
+                True,
+            ),
+        ):
+            observations, targets, rewards = _collect_oracle_teacher_samples(
+                month,
+                oracle_dispatch,
+                cfg,
+                power_scale_kw=1000.0,
+                battery_wear_cost=0.0,
+                native_steps=2,
+            )
 
         self.assertEqual(observations.shape, (48, OBSERVATION_DIM))
         self.assertEqual(rewards.shape, (48, 3))
@@ -1162,14 +1287,18 @@ class InferenceAndEnvironmentTests(unittest.TestCase):
             "grid_charge": [438.1] * 24 + [0.0] * (steps - 24),
         }]
 
-        _observations, targets, _rewards = _collect_oracle_teacher_samples(
-            month,
-            oracle_dispatch,
-            cfg,
-            power_scale_kw=1000.0,
-            battery_wear_cost=0.0,
-            native_steps=2,
-        )
+        with patch(
+            "bess.training.runners.train_ppo_dataset.PPO_SOC_DEADLINE_ENABLED",
+            True,
+        ):
+            _observations, targets, _rewards = _collect_oracle_teacher_samples(
+                month,
+                oracle_dispatch,
+                cfg,
+                power_scale_kw=1000.0,
+                battery_wear_cost=0.0,
+                native_steps=2,
+            )
 
         expected_action = -((0.90 - 0.20) * 1250.0 / 6.0) / 450.0
         raw_oracle_action = -(438.1 * cfg.eta_ch) / cfg.P_rated_nominal

@@ -1369,7 +1369,11 @@ def main() -> None:
         "daytime_charge_start_hour": PPO_DAYTIME_CHARGE_START_HOUR,
         "daytime_charge_end_hour": PPO_DAYTIME_CHARGE_END_HOUR,
         "peak_guard_enabled": PPO_PEAK_GUARD_ENABLED,
-        "peak_guard_mode": "causal_history_feasible_target_v4",
+        "peak_guard_mode": (
+            "causal_history_feasible_target_v4"
+            if PPO_PEAK_GUARD_ENABLED
+            else "disabled_iq78_no_human_guards_v1"
+        ),
         "peak_guard_min_completed_days": PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
         "peak_guard_first_day_arm_hour": PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR,
         "peak_guard_deadband_kw": PPO_PEAK_GUARD_DEADBAND_KW,
@@ -1380,16 +1384,28 @@ def main() -> None:
             PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION
         ),
         "causal_peak_target_fallback_kw": causal_peak_target_fallback_kw,
-        "training_peak_guard_curriculum": "oracle_30m_peak_plus_10pct_v1",
+        "training_peak_guard_curriculum": (
+            "oracle_30m_peak_plus_10pct_v1"
+            if PPO_TRAINING_ORACLE_PEAK_HINT_ENABLED
+            else "disabled_iq78_no_human_guards_v1"
+        ),
         "training_oracle_peak_hint_enabled": PPO_TRAINING_ORACLE_PEAK_HINT_ENABLED,
         "training_oracle_peak_hint_multiplier": PPO_TRAINING_ORACLE_PEAK_HINT_MULTIPLIER,
         "soc_deadline_enabled": PPO_SOC_DEADLINE_ENABLED,
-        "soc_deadline_mode": "daily_exact_smooth_charge_v2",
+        "soc_deadline_mode": (
+            "daily_exact_smooth_charge_v2"
+            if PPO_SOC_DEADLINE_ENABLED
+            else "disabled_iq78_no_human_guards_v1"
+        ),
         "soc_deadline_hour": PPO_SOC_DEADLINE_HOUR,
         "soc_deadline_target": "soc_max",
         "soc_deadline_shortfall_penalty_vnd": PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND,
         "reward_mode": "brain_savings_vnd_v1",
-        "training_reward_shaping": "phantom_wear_plus_soc_deadline_shortfall_v3",
+        "training_reward_shaping": (
+            "none_iq78_real_brainenv_economics_v1"
+            if args.action_mismatch_shaping_scale == 0.0 and not PPO_SOC_DEADLINE_ENABLED
+            else "phantom_wear_plus_soc_deadline_shortfall_v3"
+        ),
         "training_reward_shaping_scale": args.action_mismatch_shaping_scale,
         "initial_soc": float(cfg.SOC_min),
         "gamma": gamma,
@@ -1478,14 +1494,23 @@ def main() -> None:
     train_oracle_grids = load_cached_training_grids(args.oracle_cache, train_day_indexes)
     oracle_grids = load_cached_training_grids(args.oracle_cache, val_day_indexes)
     oracle_dispatch = load_cached_training_dispatch(args.oracle_cache, train_day_indexes)
-    training_oracle_peaks_kw, training_oracle_peak_hint_targets_kw = (
-        _training_oracle_peak_hint_targets_kw(
-            train_oracle_grids,
-            train_months,
-            dt_hours=cfg.dt,
-            multiplier=PPO_TRAINING_ORACLE_PEAK_HINT_MULTIPLIER,
+    if PPO_TRAINING_ORACLE_PEAK_HINT_ENABLED:
+        training_oracle_peaks_kw, training_oracle_peak_hint_targets_kw = (
+            _training_oracle_peak_hint_targets_kw(
+                train_oracle_grids,
+                train_months,
+                dt_hours=cfg.dt,
+                multiplier=PPO_TRAINING_ORACLE_PEAK_HINT_MULTIPLIER,
+            )
         )
-    )
+        training_oracle_peak_hint_bucket_start_days = [
+            dispatch_month_start_day(int(month.days[0].day_index))
+            for month in train_months
+        ]
+    else:
+        training_oracle_peaks_kw = []
+        training_oracle_peak_hint_targets_kw = []
+        training_oracle_peak_hint_bucket_start_days = []
     training_peak_guard_targets_kw = (
         training_oracle_peak_hint_targets_kw
         if PPO_TRAINING_ORACLE_PEAK_HINT_ENABLED
@@ -1493,10 +1518,9 @@ def main() -> None:
     )
     agent.meta["training_oracle_peaks_kw"] = training_oracle_peaks_kw
     agent.meta["training_oracle_peak_hint_targets_kw"] = training_oracle_peak_hint_targets_kw
-    agent.meta["training_oracle_peak_hint_bucket_start_days"] = [
-        dispatch_month_start_day(int(month.days[0].day_index))
-        for month in train_months
-    ]
+    agent.meta["training_oracle_peak_hint_bucket_start_days"] = (
+        training_oracle_peak_hint_bucket_start_days
+    )
     # TODO(IQ-76-DISPATCH): ordinary inference ignores these privileged fields;
     # only Dispatch Viewer's explicitly labeled training-audit replay may use them.
     val_oracle_dispatch = (
@@ -1551,7 +1575,11 @@ def main() -> None:
             "daytime_charge_start_hour": PPO_DAYTIME_CHARGE_START_HOUR,
             "daytime_charge_end_hour": PPO_DAYTIME_CHARGE_END_HOUR,
             "peak_guard_enabled": PPO_PEAK_GUARD_ENABLED,
-            "peak_guard_mode": "causal_history_feasible_target_v4",
+            "peak_guard_mode": (
+                "causal_history_feasible_target_v4"
+                if PPO_PEAK_GUARD_ENABLED
+                else "disabled_iq78_no_human_guards_v1"
+            ),
             "peak_guard_min_completed_days": PPO_PEAK_GUARD_MIN_COMPLETED_DAYS,
             "peak_guard_first_day_arm_hour": PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR,
             "peak_guard_first_day_arm_step": round(
@@ -1566,24 +1594,35 @@ def main() -> None:
             ),
             "causal_peak_target_fallback_kw": causal_peak_target_fallback_kw,
             "training_causal_peak_targets_kw": train_peak_targets,
-            "training_peak_guard_curriculum": "oracle_30m_peak_plus_10pct_v1",
+            "training_peak_guard_curriculum": (
+                "oracle_30m_peak_plus_10pct_v1"
+                if PPO_TRAINING_ORACLE_PEAK_HINT_ENABLED
+                else "disabled_iq78_no_human_guards_v1"
+            ),
             "training_oracle_peak_hint_enabled": PPO_TRAINING_ORACLE_PEAK_HINT_ENABLED,
             "training_oracle_peak_hint_multiplier": PPO_TRAINING_ORACLE_PEAK_HINT_MULTIPLIER,
             "training_oracle_peaks_kw": training_oracle_peaks_kw,
             "training_oracle_peak_hint_targets_kw": training_oracle_peak_hint_targets_kw,
-            "training_oracle_peak_hint_bucket_start_days": [
-                dispatch_month_start_day(int(month.days[0].day_index))
-                for month in train_months
-            ],
+            "training_oracle_peak_hint_bucket_start_days": (
+                training_oracle_peak_hint_bucket_start_days
+            ),
             "training_peak_guard_targets_kw": training_peak_guard_targets_kw,
             "validation_causal_peak_targets_kw": validation_peak_targets,
             "soc_deadline_enabled": PPO_SOC_DEADLINE_ENABLED,
-            "soc_deadline_mode": "daily_exact_smooth_charge_v2",
+            "soc_deadline_mode": (
+                "daily_exact_smooth_charge_v2"
+                if PPO_SOC_DEADLINE_ENABLED
+                else "disabled_iq78_no_human_guards_v1"
+            ),
             "soc_deadline_hour": PPO_SOC_DEADLINE_HOUR,
             "soc_deadline_target": "soc_max",
             "soc_deadline_shortfall_penalty_vnd": PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND,
             "reward_mode": "brain_savings_vnd_v1",
-            "training_reward_shaping": "phantom_wear_plus_soc_deadline_shortfall_v3",
+            "training_reward_shaping": (
+                "none_iq78_real_brainenv_economics_v1"
+                if args.action_mismatch_shaping_scale == 0.0 and not PPO_SOC_DEADLINE_ENABLED
+                else "phantom_wear_plus_soc_deadline_shortfall_v3"
+            ),
             "training_reward_shaping_scale": args.action_mismatch_shaping_scale,
             "champion_scoring_uses_shaping": False,
         },

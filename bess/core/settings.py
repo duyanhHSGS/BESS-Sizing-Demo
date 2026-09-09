@@ -112,50 +112,30 @@ PPO_CHALLENGER_RESETS_ENABLED = True
 PPO_RESET_OPTIMIZER_ON_REANCHOR = True
 # TODO(IQ-56): keep this only if recurrent clean-data MEGATRAIN beats IQ-54 unseen July.
 PPO_PRESERVE_CRITIC_ON_REANCHOR = True
-# TODO(IQ-57): keep cheap-only charging as an IQ-57+ architecture rule and audit unseen-month economics.
-PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF = True
-# IQ-77 restores IQ-73's normal-window permission on top of IQ-76. PPO may
-# request charging from 06:00 until 17:30, but Peak Police still runs after the
-# permission gate and may reduce, cancel, or reverse an unsafe charge request.
-PPO_DAYTIME_CHARGE_ENABLED = True
+# IQ-78 removes every hand-authored generic-PPO action override from new runs.
+# Legacy checkpoint metadata can still opt back into the old guards during replay.
+PPO_CHARGE_ONLY_DURING_CHEAP_TARIFF = False
+PPO_DAYTIME_CHARGE_ENABLED = False
 PPO_DAYTIME_CHARGE_START_HOUR = 6.0
 PPO_DAYTIME_CHARGE_END_HOUR = 17.5
-# TODO(IQ-77): keep the extra [06:00, 17:30) permission only if Farex unseen
-# economics and human meter traces beat IQ-76 without creating new peaks.
-# IQ-66 adds a meter-aware minimum-action clamp after one complete billing day.
-# It only strengthens an action whose projected grid would exceed Eye 6; it does
-# not block safe below-peak discharge, keeping this experiment to one behavior change.
-# TODO(IQ-66): promote Peak Guard only if unseen economics and human peak review beat IQ-65.
-PPO_PEAK_GUARD_ENABLED = True
+PPO_PEAK_GUARD_ENABLED = False
 PPO_PEAK_GUARD_MIN_COMPLETED_DAYS = 1
-# IQ-72 separates the planned cap from truthful Eye 6.  New checkpoints wake at
-# the end of smooth charging instead of letting Day 1 choose the whole month.
-# Explicit IQ-71 checkpoint metadata still preserves its historical 12:00 wake.
 PPO_PEAK_GUARD_FIRST_DAY_ARM_HOUR = 6.0
 PPO_PEAK_GUARD_DEADBAND_KW = 1.0
-PPO_CAUSAL_PEAK_TARGET_ENABLED = True
+PPO_CAUSAL_PEAK_TARGET_ENABLED = False
 PPO_CAUSAL_PEAK_TARGET_LOOKBACK_DAYS = 30
 PPO_CAUSAL_PEAK_TARGET_DAY_QUANTILE = 1.0
 PPO_CAUSAL_PEAK_TARGET_ENERGY_RESERVE_FRACTION = 0.20
-# IQ-76 leaves the deployed IQ-72 estimator untouched, but during training only
-# lets Oracle whisper a relaxed target: exact Oracle fixed-30m peak * 1.10.
-PPO_TRAINING_ORACLE_PEAK_HINT_ENABLED = True
+PPO_TRAINING_ORACLE_PEAK_HINT_ENABLED = False
 PPO_TRAINING_ORACLE_PEAK_HINT_MULTIPLIER = 1.10
-# TODO(IQ-76): keep this privileged training curriculum only if hint-free
-# validation/test improve over IQ-72 and PPO itself learns useful peak actions.
-# TODO(IQ-72): keep the 30-day/worst-day/20%-reserve estimator only if shifted
-# boundary review and the untouched test bucket beat IQ-71 without a jackpot Day 1.
-# TODO(IQ-68): preserve legacy checkpoint compatibility for the older cheap-end wake-up contract.
-# IQ-67 makes the operator's daily 06:00 full-SOC requirement a deterministic
-# controller invariant.  The penalty is normally zero because the guard is
-# physically able to meet the deadline; it teaches PPO that an impossible or
-# externally interrupted deadline miss is still bad.
-PPO_SOC_DEADLINE_ENABLED = True
+PPO_SOC_DEADLINE_ENABLED = False
 PPO_SOC_DEADLINE_HOUR = 6.0
-PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND = 128_250_000.0
-# TODO(IQ-67): compare every 30-day bucket against IQ-65/IQ-66 and audit the
-# overnight grid peak before promoting the 06:00 SOC Deadline Guard.
-PPO_ACTION_MISMATCH_SHAPING_SCALE = 0.10
+PPO_SOC_DEADLINE_SHORTFALL_PENALTY_VND = 0.0
+# IQ-78 also restores the PPO learning reward to the real BrainEnv economics:
+# no phantom-wear penalty for physically rejected requests.
+PPO_ACTION_MISMATCH_SHAPING_SCALE = 0.0
+# TODO(IQ-78): compare the no-human-guards checkpoint against IQ-77 on the same
+# validation/test buckets and inspect whether PPO learns peak defense by itself.
 PPO_ORACLE_BC_ENABLED = True
 PPO_ORACLE_ACTOR_BC_MAX_EPOCHS = 300
 PPO_ORACLE_BC_MAX_EPOCHS = 100
