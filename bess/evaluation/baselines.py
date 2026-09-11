@@ -176,7 +176,7 @@ def run_drl_policy(
     control_dt_minutes = validate_dispatch_sampling(meta, native_dt_minutes)
 
     if meta.get("reference_env") == "ppo2_senior_15m_v1":
-        from bess.core.ppo2_env import PPO2Env
+        from ppo2.env import PPO2Env
 
         env = PPO2Env(
             cfg,

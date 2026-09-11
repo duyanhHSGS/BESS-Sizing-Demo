@@ -10,9 +10,6 @@ from pathlib import Path
 from bess.agents import SUPPORTED_POLICY_ALGORITHMS
 from bess.core.common import ensure_inside_directory, validate_control_interval_minutes
 from bess.core.settings import (
-    PPO2_GAMMA,
-    PPO2_LAM_ENERGY,
-    PPO2_LAM_PEAK,
     PPO_FIT_CONTROL_DT_MINUTES,
     PPO_GAMMA,
     PPO_LAMBDA,
@@ -30,15 +27,21 @@ from bess.training.training_datasets import (
     require_min_days,
 )
 from bess.training.training_jobs import Job, JobManager
+from ppo2.settings import (
+    PPO2_GAMMA,
+    PPO2_LAM_ENERGY,
+    PPO2_LAM_PEAK,
+    PPO2_LAUNCH_DEFAULTS,
+)
 
 BASE_DIR = PROJECT_ROOT
 CHECKPOINT_DIR = BASE_DIR / "checkpoints"
 USER_DATA_DIR = BASE_DIR / "user_data"
 PPO_SCRIPT = BASE_DIR / "bess" / "training" / "runners" / "train_ppo_dataset.py"
-PPO2_SCRIPT = BASE_DIR / "bess" / "training" / "runners" / "train_ppo2_dataset.py"
+PPO2_SCRIPT = BASE_DIR / "ppo2" / "runner.py"
 TRAINING_MODULES = {
     "ppo": "bess.training.runners.train_ppo_dataset",
-    "ppo2": "bess.training.runners.train_ppo2_dataset",
+    "ppo2": "ppo2.runner",
 }
 ALGORITHMS = SUPPORTED_POLICY_ALGORITHMS
 
@@ -600,53 +603,54 @@ def build_training_command(
             else "--no-oracle-bc-enabled"
         )
     elif algo == "ppo2":
+        defaults = PPO2_LAUNCH_DEFAULTS
         gamma = _bounded_float(
-            payload, "ppo2_gamma", PPO2_GAMMA,
+            payload, "ppo2_gamma", defaults["ppo2_gamma"],
             minimum=0.0, minimum_inclusive=False, maximum=1.0,
         )
         if not math.isclose(gamma, 1.0, rel_tol=0.0, abs_tol=1e-12):
             raise TrainingLaunchError("PPO2 senior-reference mode requires ppo2_gamma=1.0")
         lam_energy = _bounded_float(
-            payload, "ppo2_lam_energy", PPO2_LAM_ENERGY,
+            payload, "ppo2_lam_energy", defaults["ppo2_lam_energy"],
             minimum=0.0, maximum=1.0,
         )
         lam_peak = _bounded_float_list(
-            payload, "ppo2_lam_peak", PPO2_LAM_PEAK,
+            payload, "ppo2_lam_peak", defaults["ppo2_lam_peak"],
             minimum=0.0, maximum=1.0,
         )
         seeds = _int_list(payload, "ppo2_seeds")
         cmd.extend(
             [
-                "--steps", str(_bounded_int(payload, "ppo2_steps", 1_500_000, minimum=1)),
-                "--seed", str(_int(payload, "ppo2_seed", 0)),
-                "--rollout", str(_bounded_int(payload, "ppo2_rollout", 2_880, minimum=1)),
-                "--eval-every", str(_bounded_int(payload, "ppo2_eval_every", 20, minimum=1)),
-                "--min-month-coverage", str(_bounded_float(payload, "ppo2_min_month_coverage", 0.8, minimum=0.01, maximum=1.0)),
-                "--val-months", str(_bounded_int(payload, "ppo2_val_months", 2, minimum=1, maximum=24)),
-                "--test-months", str(_bounded_int(payload, "ppo2_test_months", 1, minimum=1, maximum=24)),
+                "--steps", str(_bounded_int(payload, "ppo2_steps", defaults["ppo2_steps"], minimum=1)),
+                "--seed", str(_int(payload, "ppo2_seed", defaults["ppo2_seed"])),
+                "--rollout", str(_bounded_int(payload, "ppo2_rollout", defaults["ppo2_rollout"], minimum=1)),
+                "--eval-every", str(_bounded_int(payload, "ppo2_eval_every", defaults["ppo2_eval_every"], minimum=1)),
+                "--min-month-coverage", str(_bounded_float(payload, "ppo2_min_month_coverage", defaults["ppo2_min_month_coverage"], minimum=0.01, maximum=1.0)),
+                "--val-months", str(_bounded_int(payload, "ppo2_val_months", defaults["ppo2_val_months"], minimum=1, maximum=24)),
+                "--test-months", str(_bounded_int(payload, "ppo2_test_months", defaults["ppo2_test_months"], minimum=1, maximum=24)),
                 "--gamma", str(gamma),
                 "--lambda-energy", str(lam_energy),
                 "--lambda-peak", lam_peak,
-                "--actor-lr", str(_bounded_float(payload, "ppo2_actor_lr", 3e-5, minimum=0.0, minimum_inclusive=False, maximum=1.0)),
-                "--critic-lr", str(_bounded_float(payload, "ppo2_critic_lr", 3e-4, minimum=0.0, minimum_inclusive=False, maximum=1.0)),
-                "--init-std", str(_bounded_float(payload, "ppo2_init_std", 0.15, minimum=0.0, minimum_inclusive=False, maximum=5.0)),
-                "--clip-penalty", str(_bounded_float(payload, "ppo2_clip_penalty", 100.0, minimum=0.0, maximum=1e9)),
-                "--bc-epochs", str(_bounded_int(payload, "ppo2_bc_epochs", 10, minimum=0, maximum=10_000)),
-                "--ppo-clip", str(_bounded_float(payload, "ppo2_clip", 0.2, minimum=0.0, minimum_inclusive=False, maximum=1.0)),
-                "--ppo-epochs", str(_bounded_int(payload, "ppo2_epochs", 6, minimum=1, maximum=1_000)),
-                "--minibatch", str(_bounded_int(payload, "ppo2_minibatch", 256, minimum=1, maximum=1_000_000)),
-                "--entropy-coef", str(_bounded_float(payload, "ppo2_ent_coef", 0.01, minimum=0.0, maximum=100.0)),
-                "--value-coef", str(_bounded_float(payload, "ppo2_vf_coef", 0.5, minimum=0.0, maximum=100.0)),
-                "--target-kl", str(_bounded_float(payload, "ppo2_target_kl", 0.01, minimum=0.0, minimum_inclusive=False, maximum=100.0)),
-                "--shaping-margin", str(_bounded_float(payload, "ppo2_shaping_margin", 0.9, minimum=0.0, maximum=1.0)),
-                "--aug-load-sigma", str(_bounded_float(payload, "ppo2_aug_load_sigma", 0.04, minimum=0.0, maximum=2.0)),
-                "--aug-pv-sigma", str(_bounded_float(payload, "ppo2_aug_pv_sigma", 0.08, minimum=0.0, maximum=2.0)),
-                "--aug-rho-load", str(_bounded_float(payload, "ppo2_aug_rho_load", 0.9, minimum=-0.999999, maximum=0.999999)),
-                "--aug-rho-pv", str(_bounded_float(payload, "ppo2_aug_rho_pv", 0.9, minimum=-0.999999, maximum=0.999999)),
-                "--bc-lr", str(_bounded_float(payload, "ppo2_bc_lr", 1e-3, minimum=0.0, minimum_inclusive=False, maximum=1.0)),
-                "--bc-minibatch", str(_bounded_int(payload, "ppo2_bc_minibatch", 256, minimum=1, maximum=1_000_000)),
-                "--bc-action-clip", str(_bounded_float(payload, "ppo2_bc_action_clip", 0.95, minimum=0.0, minimum_inclusive=False, maximum=1.0)),
-                "--torch-threads", str(_bounded_int(payload, "ppo2_torch_threads", 2, minimum=1, maximum=128)),
+                "--actor-lr", str(_bounded_float(payload, "ppo2_actor_lr", defaults["ppo2_actor_lr"], minimum=0.0, minimum_inclusive=False, maximum=1.0)),
+                "--critic-lr", str(_bounded_float(payload, "ppo2_critic_lr", defaults["ppo2_critic_lr"], minimum=0.0, minimum_inclusive=False, maximum=1.0)),
+                "--init-std", str(_bounded_float(payload, "ppo2_init_std", defaults["ppo2_init_std"], minimum=0.0, minimum_inclusive=False, maximum=5.0)),
+                "--clip-penalty", str(_bounded_float(payload, "ppo2_clip_penalty", defaults["ppo2_clip_penalty"], minimum=0.0, maximum=1e9)),
+                "--bc-epochs", str(_bounded_int(payload, "ppo2_bc_epochs", defaults["ppo2_bc_epochs"], minimum=0, maximum=10_000)),
+                "--ppo-clip", str(_bounded_float(payload, "ppo2_clip", defaults["ppo2_clip"], minimum=0.0, minimum_inclusive=False, maximum=1.0)),
+                "--ppo-epochs", str(_bounded_int(payload, "ppo2_epochs", defaults["ppo2_epochs"], minimum=1, maximum=1_000)),
+                "--minibatch", str(_bounded_int(payload, "ppo2_minibatch", defaults["ppo2_minibatch"], minimum=1, maximum=1_000_000)),
+                "--entropy-coef", str(_bounded_float(payload, "ppo2_ent_coef", defaults["ppo2_ent_coef"], minimum=0.0, maximum=100.0)),
+                "--value-coef", str(_bounded_float(payload, "ppo2_vf_coef", defaults["ppo2_vf_coef"], minimum=0.0, maximum=100.0)),
+                "--target-kl", str(_bounded_float(payload, "ppo2_target_kl", defaults["ppo2_target_kl"], minimum=0.0, minimum_inclusive=False, maximum=100.0)),
+                "--shaping-margin", str(_bounded_float(payload, "ppo2_shaping_margin", defaults["ppo2_shaping_margin"], minimum=0.0, maximum=1.0)),
+                "--aug-load-sigma", str(_bounded_float(payload, "ppo2_aug_load_sigma", defaults["ppo2_aug_load_sigma"], minimum=0.0, maximum=2.0)),
+                "--aug-pv-sigma", str(_bounded_float(payload, "ppo2_aug_pv_sigma", defaults["ppo2_aug_pv_sigma"], minimum=0.0, maximum=2.0)),
+                "--aug-rho-load", str(_bounded_float(payload, "ppo2_aug_rho_load", defaults["ppo2_aug_rho_load"], minimum=-0.999999, maximum=0.999999)),
+                "--aug-rho-pv", str(_bounded_float(payload, "ppo2_aug_rho_pv", defaults["ppo2_aug_rho_pv"], minimum=-0.999999, maximum=0.999999)),
+                "--bc-lr", str(_bounded_float(payload, "ppo2_bc_lr", defaults["ppo2_bc_lr"], minimum=0.0, minimum_inclusive=False, maximum=1.0)),
+                "--bc-minibatch", str(_bounded_int(payload, "ppo2_bc_minibatch", defaults["ppo2_bc_minibatch"], minimum=1, maximum=1_000_000)),
+                "--bc-action-clip", str(_bounded_float(payload, "ppo2_bc_action_clip", defaults["ppo2_bc_action_clip"], minimum=0.0, minimum_inclusive=False, maximum=1.0)),
+                "--torch-threads", str(_bounded_int(payload, "ppo2_torch_threads", defaults["ppo2_torch_threads"], minimum=1, maximum=128)),
             ]
         )
         if seeds:

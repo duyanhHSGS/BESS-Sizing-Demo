@@ -187,9 +187,8 @@ PPO_TUNABLE_DEFAULTS = {
 }
 
 # PPO2 remains separately configured below.
-PPO2_GAMMA = 1.0
-PPO2_LAM_ENERGY = 0.97
-PPO2_LAM_PEAK = 0.97
+# Compatibility re-export: PPO2 owns its algorithm settings in root ppo2/settings.py.
+from ppo2.settings import PPO2_GAMMA, PPO2_LAM_ENERGY, PPO2_LAM_PEAK
 
 # Live UI data: main.py uses these when optional sample sizing is enabled.
 SAMPLE_BATTERY_CANDIDATES = tuple(

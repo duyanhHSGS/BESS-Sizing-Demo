@@ -31,7 +31,7 @@ from bess.training.training_checkpoints import CHECKPOINT_DIR, _load_checkpoint_
 
 BASE_DIR = PROJECT_ROOT
 
-from bess.agents.ppo2_agent import PPO2InferenceAgent
+from ppo2.agent import PPO2InferenceAgent
 from bess.agents.ppo_agent import PPOAgent
 from bess.core.bess_env import OBSERVATION_DIM
 from bess.core.common import (
@@ -308,7 +308,7 @@ def run_policy_dispatch(
     )
     days = policy_result_to_days(month, rollout, cfg, parameters)
     if algo == "ppo2" and meta.get("reference_env") == "ppo2_senior_15m_v1":
-        from bess.evaluation.oracle.ppo2_oracle import score_month as score_ppo2_month
+        from ppo2.oracle import score_month as score_ppo2_month
 
         kpi = score_ppo2_month(
             rollout["p_grid_days"],
