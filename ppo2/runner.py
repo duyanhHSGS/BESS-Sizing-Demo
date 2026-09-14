@@ -50,6 +50,8 @@ from ppo2.settings import (
     LEARNING_RATE,
     MIN_MONTH_COVERAGE,
     PPO_CLIP,
+    PPO2_CONTROL_DT_MINUTES,
+    PPO2_CONTROL_NATIVE_STEPS,
     PPO_EPOCHS,
     PPO_MINIBATCH,
     RESULTS_DIR,
@@ -232,10 +234,13 @@ def _run_policy(
     clip_reasons: list[str | None] = []
     while not done:
         action = agent.act(obs, deterministic=deterministic)[0]
-        obs, _reward, done, info = env.step(action)
-        requested.append(info["p_requested_kw"])
-        executed.append(info["p_executed_kw"])
-        clip_reasons.append(info["clip_reason"])
+        obs, _reward, done, info = env.step_control(
+            action, native_steps=PPO2_CONTROL_NATIVE_STEPS
+        )
+        for native_info in info["native_infos"]:
+            requested.append(native_info["p_requested_kw"])
+            executed.append(native_info["p_executed_kw"])
+            clip_reasons.append(native_info["clip_reason"])
 
     def split(values: np.ndarray) -> list[np.ndarray]:
         return [
@@ -262,6 +267,8 @@ def _baseline_cost(
     cfg,
     degradation_cost_per_kwh_discharged: float,
     runner,
+    *,
+    oracle_control_steps: int = 1,
 ) -> float:
     total = 0.0
     for month in months:
@@ -270,6 +277,7 @@ def _baseline_cost(
                 month,
                 cfg,
                 degradation_cost_per_kwh_discharged=degradation_cost_per_kwh_discharged,
+                control_steps=oracle_control_steps,
             )
         else:
             result = runner(month, cfg)
@@ -395,16 +403,23 @@ def _behavior_clone_actor(
             np.asarray(day_power, dtype=np.float64)
             for day_power in solution["p_bess_days"]
         ])
-        for target_power in flat:
+        if len(flat) % PPO2_CONTROL_NATIVE_STEPS != 0:
+            raise RuntimeError("PPO2 Oracle trajectory must align to 30-minute control blocks")
+        for start in range(0, len(flat), PPO2_CONTROL_NATIVE_STEPS):
             if done:
                 raise RuntimeError("PPO2 oracle trajectory is longer than the episode")
+            teacher_block = flat[start:start + PPO2_CONTROL_NATIVE_STEPS]
+            if not np.allclose(teacher_block, teacher_block[0], rtol=0.0, atol=1e-7):
+                raise RuntimeError("PPO2 30-minute Oracle teacher changed action inside a control block")
             action_star = float(np.clip(
-                target_power / cfg.P_rated_nominal, -action_clip, action_clip
+                teacher_block[0] / cfg.P_rated_nominal, -action_clip, action_clip
             ))
             if env.history_ready:
                 observations.append(obs)
                 targets.append(action_star)
-            obs, _reward, done, _info = env.step(action_star)
+            obs, _reward, done, _info = env.step_control(
+                action_star, native_steps=PPO2_CONTROL_NATIVE_STEPS
+            )
 
     obs_tensor = torch.as_tensor(np.asarray(observations, dtype=np.float32))
     target_tensor = torch.as_tensor(np.asarray(targets, dtype=np.float32))
@@ -553,13 +568,14 @@ def _train_seed(
         "obs_dim": PPO2_OBS_DIM,
         "obs_variant": "base",
         "native_dt_minutes": 15.0,
-        "control_dt_minutes": 15.0,
-        "native_steps_per_action": 1,
+        "control_dt_minutes": PPO2_CONTROL_DT_MINUTES,
+        "native_steps_per_action": PPO2_CONTROL_NATIVE_STEPS,
         "observation_schema": "causal_block_aware",
         "reference_env": "ppo2_senior_15m_v1",
         "action_distribution": "tanh_squashed_gaussian",
-        "action_mapping": "physical_feasible_15m",
-        "action_interval_minutes": 15,
+        "action_mapping": "physical_feasible_15m_held_30m",
+        "action_interval_minutes": int(PPO2_CONTROL_DT_MINUTES),
+        "oracle_teacher_control_minutes": int(PPO2_CONTROL_DT_MINUTES),
         "objective": "energy+demand_fixed30m+degradation_discharged+terminal",
         "demand_window": "fixed_30m_block_v1",
         "billing_demand_window_minutes": 30,
@@ -713,7 +729,9 @@ def _train_seed(
 
     while steps < total_steps:
         action, logp, latent, value_energy, value_peak = agent.act(obs)
-        next_obs, _reward, done, info = env.step(action)
+        next_obs, _reward, done, info = env.step_control(
+            action, native_steps=PPO2_CONTROL_NATIVE_STEPS
+        )
         reward_energy, reward_peak = _split_reward(info, env.reward_scale_vnd)
         if not info["action_held"]:
             buffer.add(
@@ -727,7 +745,7 @@ def _train_seed(
                 value_peak,
                 float(done),
             )
-        steps += 1
+        steps += int(info["native_steps"])
         if done:
             month_index += 1
             next_index = month_index % len(train_months)
@@ -814,11 +832,17 @@ def main() -> None:
         raise SystemExit("PPO2 senior-reference mode requires gamma=1.0")
     if args.obs_variant != "base":
         raise SystemExit("PPO2 senior-reference mode is forecast-free and requires --obs-variant base")
-    if abs(args.control_dt_minutes - 15.0) > 1e-9:
-        raise SystemExit("PPO2 senior-reference mode requires a 15-minute control interval")
+    if abs(args.control_dt_minutes - PPO2_CONTROL_DT_MINUTES) > 1e-9:
+        raise SystemExit(
+            f"PPO2 experiment requires a {PPO2_CONTROL_DT_MINUTES:g}-minute control interval"
+        )
     resolve_ppo2_device(args.device)
     numeric_checks = (
         (args.steps > 0, "--steps must be > 0"),
+        (
+            args.steps % PPO2_CONTROL_NATIVE_STEPS == 0,
+            f"--steps must be divisible by {PPO2_CONTROL_NATIVE_STEPS} native steps per action",
+        ),
         (args.rollout > 0, "--rollout must be > 0"),
         (args.eval_every > 0, "--eval-every must be > 0"),
         (0.0 < args.min_month_coverage <= 1.0, "--min-month-coverage must be in (0, 1]"),
@@ -896,6 +920,7 @@ def main() -> None:
                 month,
                 cfg,
                 degradation_cost_per_kwh_discharged=degradation_cost,
+                control_steps=PPO2_CONTROL_NATIVE_STEPS,
             )
             for month in train_months
         ]
@@ -932,6 +957,13 @@ def main() -> None:
 
     val_base = _baseline_cost(val_months, cfg, degradation_cost, run_no_bess)
     val_oracle = _baseline_cost(val_months, cfg, degradation_cost, run_oracle)
+    val_control_oracle = _baseline_cost(
+        val_months,
+        cfg,
+        degradation_cost,
+        run_oracle,
+        oracle_control_steps=PPO2_CONTROL_NATIVE_STEPS,
+    )
     curve: list[dict] = []
     arm_results: dict[float, list[tuple[float, Path]]] = {}
     for lam_peak in lambda_peaks:
@@ -1002,6 +1034,13 @@ def main() -> None:
 
     test_base = _baseline_cost(test_months, cfg, degradation_cost, run_no_bess)
     test_oracle = _baseline_cost(test_months, cfg, degradation_cost, run_oracle)
+    test_control_oracle = _baseline_cost(
+        test_months,
+        cfg,
+        degradation_cost,
+        run_oracle,
+        oracle_control_steps=PPO2_CONTROL_NATIVE_STEPS,
+    )
     savings: list[float] = []
     for _, seed_path in arm_results[best_lambda]:
         seed_agent = PPO2Agent(PPO2_OBS_DIM, device="cpu")
@@ -1016,6 +1055,9 @@ def main() -> None:
     test_score = _evaluate_months(test_months, cfg, best_agent, p_ref, degradation_cost)
     test_saving = (test_base - test_score["total_cost_vnd"]) / test_base * 100.0
     test_gap = (test_score["total_cost_vnd"] - test_oracle) / test_oracle * 100.0
+    test_control_gap = (
+        (test_score["total_cost_vnd"] - test_control_oracle) / test_control_oracle * 100.0
+    )
     raw_initial_fit_cost = best_agent.meta.get("raw_initial_validation_cost_vnd")
     initial_fit_cost = best_agent.meta.get("initial_validation_cost_vnd")
     fit_improvement_pct = (
@@ -1032,6 +1074,7 @@ def main() -> None:
         "test_saving_pct": round(test_saving, 2),
         "test_metrics": test_score,
         "test_oracle_gap_pct": round(test_gap, 2),
+        "test_control_oracle_gap_pct": round(test_control_gap, 2),
         "seeds": seeds,
         "test_saving_pct_by_seed": [round(value, 2) for value in savings],
         "fit_test_overlap": args.fit_test,
@@ -1069,6 +1112,10 @@ def main() -> None:
         "training": {
             "steps": args.steps,
             "rollout": args.rollout,
+            "rollout_unit": "policy_decisions",
+            "native_dt_minutes": 15.0,
+            "control_dt_minutes": PPO2_CONTROL_DT_MINUTES,
+            "native_steps_per_action": PPO2_CONTROL_NATIVE_STEPS,
             "eval_every": args.eval_every,
             "actor_lr": args.actor_lr,
             "critic_lr": args.critic_lr,
@@ -1109,6 +1156,7 @@ def main() -> None:
         "validation": {
             "no_bess_vnd": val_base,
             "oracle_vnd": val_oracle,
+            "control_oracle_vnd": val_control_oracle,
             "raw_before_bc_vnd": raw_initial_fit_cost if args.fit_test else None,
             "initial_vnd": initial_fit_cost if args.fit_test else None,
             "best_vnd": best_overall,
@@ -1118,8 +1166,10 @@ def main() -> None:
             **test_score,
             "no_bess_vnd": test_base,
             "oracle_vnd": test_oracle,
+            "control_oracle_vnd": test_control_oracle,
             "saving_pct": test_saving,
             "oracle_gap_pct": test_gap,
+            "control_oracle_gap_pct": test_control_gap,
         },
     }
     write_report(report_path, report)
@@ -1147,7 +1197,8 @@ def main() -> None:
         f"{test_months[-1].days[-1].date_iso}: "
         f"{test_score['total_cost_vnd']/1e6:.1f}M vs no-BESS "
         f"{test_base/1e6:.1f}M -> saving {test_saving:.2f}% | "
-        f"oracle gap {test_gap:.2f}% | peak {test_score['pmax_month_kw']:.0f} kW | "
+        f"15m oracle gap {test_gap:.2f}% | 30m oracle gap {test_control_gap:.2f}% | "
+        f"peak {test_score['pmax_month_kw']:.0f} kW | "
         f"lambda_peak={best_lambda:g} seeds={seeds}{spread} ===",
         flush=True,
     )

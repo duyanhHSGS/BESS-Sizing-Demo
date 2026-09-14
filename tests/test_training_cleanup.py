@@ -151,7 +151,7 @@ class GenericPPOLauncherTests(unittest.TestCase):
                     {"algo": "ppo2", "control_dt_minutes": 15},
                     csv_path,
                 ),
-                15,
+                30,
             )
 
     def test_fit_command_forwards_all_generic_ppo_ui_tunables(self):
@@ -296,7 +296,7 @@ class PPO2LauncherTests(unittest.TestCase):
         self.assertNotIn("--oracle-cache", command)
         steps_index = command.index("--steps")
         self.assertEqual(command[steps_index + 1], "1500000")
-        self.assertEqual(command[command.index("--control-dt-minutes") + 1], "15")
+        self.assertEqual(command[command.index("--control-dt-minutes") + 1], "30")
 
     def test_reference_command_forwards_custom_ppo2_knobs(self):
         with tempfile.TemporaryDirectory() as directory:
