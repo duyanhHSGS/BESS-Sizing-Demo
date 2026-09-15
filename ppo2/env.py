@@ -4,7 +4,8 @@ This is a direct logic port of the archived senior causal BESS environment in
 git-plz-ignore/senior-ppo2-reference/. The only
 changes are attribute/import adapters for this repository's shared BESSConfig and
 DayData/MonthData types. The reference contract is intentionally 15-minute-only:
-96 slots/day, two slots per fixed 30-minute demand block, and a 17D observation.
+96 slots/day, two slots per fixed 30-minute demand block, and a compact 16D
+observation for new policies. Legacy 17D checkpoints retain replay support.
 """
 from __future__ import annotations
 
@@ -20,7 +21,10 @@ from ppo2.settings import TOU_RULES, is_sunday, tariff_vector_day
 PPO2_STEPS_PER_DAY = 96
 PPO2_DT_HOURS = 0.25
 PPO2_DEMAND_BLOCK_SLOTS = 2
-PPO2_OBS_DIM = 17
+PPO2_OBS_DIM = 16
+PPO2_LEGACY_OBS_DIM = 17
+PPO2_OBSERVATION_SCHEMA = "causal_block_aware_no_pv_surplus_v1"
+PPO2_LEGACY_OBSERVATION_SCHEMA = "causal_block_aware"
 PPO2_HISTORY_WINDOW_SLOTS = 5
 PPO2_EWMA_ALPHA = 0.4
 
@@ -138,6 +142,7 @@ class PPO2Env:
         p_ref_kw: float,
         degradation_cost_per_kwh_discharged: float,
         clip_penalty_per_kwh: float = 0.0,
+        observation_schema: str = PPO2_OBSERVATION_SCHEMA,
     ):
         if abs(float(cfg.dt) - PPO2_DT_HOURS) > 1e-12:
             raise ValueError("PPO2 senior-reference mode requires exactly 15-minute data (dt=0.25 h)")
@@ -154,12 +159,24 @@ class PPO2Env:
         self.p_ref = float(p_ref_kw)
         self.deg = float(degradation_cost_per_kwh_discharged)
         self.clip_penalty_per_kwh = float(clip_penalty_per_kwh)
+        if observation_schema not in {
+            PPO2_OBSERVATION_SCHEMA,
+            PPO2_LEGACY_OBSERVATION_SCHEMA,
+        }:
+            raise ValueError(f"unsupported PPO2 observation schema: {observation_schema!r}")
+        self.observation_schema = observation_schema
+        # TODO(PPO2-EYE-PURGE): keep legacy 17-eye replay available while testing
+        # one compact-eye removal at a time; do not silently reinterpret old checkpoints.
+        self.obs_dim = (
+            PPO2_OBS_DIM
+            if observation_schema == PPO2_OBSERVATION_SCHEMA
+            else PPO2_LEGACY_OBS_DIM
+        )
         self.reward_scale_vnd = max(
             1.0,
             self.p_ref * cfg.T_cap,
             self.p_ref * cfg.price_peak * self.dt,
         )
-        self.obs_dim = PPO2_OBS_DIM
         self.month: MonthData | None = None
         self.log_grid: list[np.ndarray] = []
         self.log_soc: list[np.ndarray] = []
@@ -238,30 +255,33 @@ class PPO2Env:
         p_ref = self.p_ref
         angle = 2.0 * np.pi * slot / self.n_steps
         effective_load = max(0.0, self.prev_load - self.prev_pv)
-        pv_surplus = max(0.0, self.prev_pv - self.prev_load)
         block_phase = float(slot % 2)
-        return np.array(
-            [
-                np.sin(angle),
-                np.cos(angle),
-                effective_load / p_ref,
-                pv_surplus / p_ref,
-                self.prev_p_bess / self.cfg.P_rated_nominal,
-                self.prev_demand / p_ref,
-                self.soc,
-                self.tariff[slot] / self.cfg.price_peak,
-                self._time_to_tariff_transition(slot),
-                self.d_run / p_ref,
-                self.d_run_nb / p_ref,
-                1.0 if day.day_type == "working" else 0.0,
-                (date.day - 1) / calendar.monthrange(date.year, date.month)[1],
-                block_phase,
-                self._block_grid_sum / p_ref,
-                self.net_load.ewma_kw / p_ref,
-                self.net_load.trend_kw_per_hour / p_ref,
-            ],
-            dtype=np.float32,
-        )
+        shared = [
+            np.sin(angle),
+            np.cos(angle),
+            effective_load / p_ref,
+        ]
+        # New compact policies intentionally omit the old expression below:
+        # max(0.0, self.prev_pv - self.prev_load) / p_ref
+        if self.observation_schema == PPO2_LEGACY_OBSERVATION_SCHEMA:
+            # Legacy checkpoints were trained with a dedicated PV-surplus eye.
+            shared.append(max(0.0, self.prev_pv - self.prev_load) / p_ref)
+        shared.extend([
+            self.prev_p_bess / self.cfg.P_rated_nominal,
+            self.prev_demand / p_ref,
+            self.soc,
+            self.tariff[slot] / self.cfg.price_peak,
+            self._time_to_tariff_transition(slot),
+            self.d_run / p_ref,
+            self.d_run_nb / p_ref,
+            1.0 if day.day_type == "working" else 0.0,
+            (date.day - 1) / calendar.monthrange(date.year, date.month)[1],
+            block_phase,
+            self._block_grid_sum / p_ref,
+            self.net_load.ewma_kw / p_ref,
+            self.net_load.trend_kw_per_hour / p_ref,
+        ])
+        return np.asarray(shared, dtype=np.float32)
 
     def project_action(self, action: float, load: float, pv: float) -> PPO2FeasibleAction:
         cfg = self.cfg

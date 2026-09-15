@@ -17,7 +17,7 @@ Controller families
 The learned-controller surface intentionally contains only **PPO** and **PPO2**.
 
 - **PPO** uses the canonical resolution-aware seven-eye `BrainEnv`.
-- **PPO2** is the isolated senior-reference path. It keeps its dedicated 15-minute `PPO2Env`, 17-input contract, actor-only deployment wrapper, training runner, and private PPO2 Oracle/scorer.
+- **PPO2** is the isolated senior-reference path. It keeps its dedicated 15-minute `PPO2Env`, compact 16-input contract for new policies, actor-only deployment wrapper, training runner, and private PPO2 Oracle/scorer. Legacy 17-input checkpoints retain explicit replay support.
 - **No-BESS** and **Oracle LP** are references used for measurement; they are not learned controllers.
 
 Training, Dispatch, Live Runs, Shadow Running, and Benchmarking accept only PPO/PPO2 checkpoints. Old checkpoint files from removed algorithms may still exist as runtime artifacts on another machine, but they are not runnable by this source tree.

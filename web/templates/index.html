@@ -5162,7 +5162,7 @@ The number of steps is detected from the CSV and dt, never fixed at 96.
         const fitTest = document.getElementById("train-ppo2-fit-test").checked;
         trainPlan.textContent = fitTest
           ? `PPO2 FIT TEST: ${document.getElementById("train-ppo2-steps").value} steps; ALL ${days} supplied day(s) are reused for training, validation, and test; raw-before-BC and pre-PPO deterministic IQ are recorded; load/PV augmentation is forced OFF. This measures fit/memorization ONLY, not generalization.`
-          : `PPO2 reference plan: ${document.getElementById("train-ppo2-steps").value} steps; fixed 15m/17D reference environment; calendar-month split with ${valMonths} validation + ${testMonths} newest test month(s), ≥${formatNumber(coverage, 0)}% coverage; λ_energy ${document.getElementById("train-ppo2-lam-energy").value}; λ_peak sweep ${document.getElementById("train-ppo2-lam-peak").value}; internal fixed-block month Oracle; CPU threads ${document.getElementById("train-ppo2-torch-threads").value}. No shared rolling-Oracle cache is required.`;
+          : `PPO2 reference plan: ${document.getElementById("train-ppo2-steps").value} steps; fixed 15m/16D compact environment; calendar-month split with ${valMonths} validation + ${testMonths} newest test month(s), ≥${formatNumber(coverage, 0)}% coverage; λ_energy ${document.getElementById("train-ppo2-lam-energy").value}; λ_peak sweep ${document.getElementById("train-ppo2-lam-peak").value}; internal fixed-block month Oracle; CPU threads ${document.getElementById("train-ppo2-torch-threads").value}. No shared rolling-Oracle cache is required.`;
         return;
       }
       const valMonths = Number(trainValMonths.value);

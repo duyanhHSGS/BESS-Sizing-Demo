@@ -3,7 +3,7 @@
 PPO2 is intentionally a controlled reference port for A/B comparison against this
 repo's original PPO. Algorithmic choices mirror the archived senior
 run_train_dataset.py in git-plz-ignore/senior-ppo2-reference/source/:
-15-minute 17D environment, fixed 30-minute blocks, month LP oracle, oracle-based
+15-minute compact 16D environment, fixed 30-minute blocks, month LP oracle, oracle-based
 peak shaping, behaviour cloning, decomposed PPO, calendar-month holdouts, and the
 same selection protocol. Only repository paths/config field names are adapted.
 """
@@ -26,7 +26,12 @@ import torch
 
 from ppo2.agent import PPO2Agent, RolloutBuffer, resolve_ppo2_device
 from ppo2.data import DayData, MonthData
-from ppo2.env import PPO2_OBS_DIM, PPO2_STEPS_PER_DAY, PPO2Env
+from ppo2.env import (
+    PPO2_OBS_DIM,
+    PPO2_OBSERVATION_SCHEMA,
+    PPO2_STEPS_PER_DAY,
+    PPO2Env,
+)
 from ppo2.oracle import fixed_pmax_day, run_no_bess, run_oracle, score_month
 from ppo2.reporting import write_report
 from ppo2.settings import (
@@ -552,6 +557,7 @@ def _train_seed(
         "p_rated_kw": cfg.P_rated_nominal,
         "obs_dim": PPO2_OBS_DIM,
         "obs_variant": "base",
+        "observation_schema": PPO2_OBSERVATION_SCHEMA,
         "native_dt_minutes": 15.0,
         "control_dt_minutes": 15.0,
         "native_steps_per_action": 1,

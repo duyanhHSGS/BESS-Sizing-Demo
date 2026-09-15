@@ -178,12 +178,16 @@ def run_drl_policy(
     if meta.get("reference_env") == "ppo2_senior_15m_v1":
         from ppo2.env import PPO2Env
 
+        # Legacy PPO2 checkpoints did not record an observation schema and used
+        # the original 17-eye vector. New compact checkpoints name their schema.
+        observation_schema = str(meta.get("observation_schema") or "causal_block_aware")
         env = PPO2Env(
             cfg,
             p_ref_kw=p_ref_kw,
             degradation_cost_per_kwh_discharged=float(
                 meta.get("degradation_cost_per_kwh_discharged", 0.0)
             ),
+            observation_schema=observation_schema,
         )
         observation = env.reset(month)
         done = False

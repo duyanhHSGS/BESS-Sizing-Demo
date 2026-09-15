@@ -13,7 +13,13 @@ from bess.agents.ppo2_agent import (
     _adv_share_of_return,
 )
 from bess.core.common import load_system_config
-from bess.core.ppo2_env import PPO2_OBS_DIM, PPO2Env
+from bess.core.ppo2_env import (
+    PPO2_LEGACY_OBS_DIM,
+    PPO2_LEGACY_OBSERVATION_SCHEMA,
+    PPO2_OBS_DIM,
+    PPO2_OBSERVATION_SCHEMA,
+    PPO2Env,
+)
 from bess.core.scenario_gen import DayData, MonthData
 from bess.evaluation.baselines import run_drl_policy
 from bess.evaluation.oracle.ppo2_oracle import run_oracle, score_month
@@ -53,20 +59,66 @@ def _env() -> PPO2Env:
     )
 
 
-def test_ppo2_observation_is_senior_style_17d() -> None:
+def test_ppo2_compact_observation_purges_only_pv_surplus_eye() -> None:
     env = _env()
-    obs = env.reset(_month())
-    assert obs.shape == (PPO2_OBS_DIM,)
-    assert PPO2_OBS_DIM == 17
-    assert np.all(np.isfinite(obs))
-    assert obs[0] == pytest.approx(0.0)
-    assert obs[1] == pytest.approx(1.0)
-    assert obs[7] == pytest.approx(env.cfg.price_off / env.cfg.price_peak)
-    assert obs[6] == pytest.approx(env.cfg.SOC_min)
+    compact = env.reset(_month())
+    legacy_env = PPO2Env(
+        env.cfg,
+        p_ref_kw=500.0,
+        degradation_cost_per_kwh_discharged=500.0,
+        clip_penalty_per_kwh=100.0,
+        observation_schema=PPO2_LEGACY_OBSERVATION_SCHEMA,
+    )
+    legacy = legacy_env.reset(_month())
+
+    assert PPO2_OBS_DIM == 16
+    assert PPO2_LEGACY_OBS_DIM == 17
+    assert compact.shape == (PPO2_OBS_DIM,)
+    assert legacy.shape == (PPO2_LEGACY_OBS_DIM,)
+    np.testing.assert_array_equal(compact, np.delete(legacy, 3))
+    assert np.all(np.isfinite(compact))
+    assert compact[0] == pytest.approx(0.0)
+    assert compact[1] == pytest.approx(1.0)
+    assert compact[6] == pytest.approx(env.cfg.price_off / env.cfg.price_peak)
+    assert compact[5] == pytest.approx(env.cfg.SOC_min)
     assert env.n_steps == 96
     assert env.block_slots == 2
 
 
+def test_ppo2_compact_schema_omits_nonzero_pv_surplus_value() -> None:
+    compact_env = _env()
+    compact_env.reset(_month())
+    compact_env.prev_load = 100.0
+    compact_env.prev_pv = 300.0
+    compact_env.prev_p_bess = 45.0
+    compact = compact_env._obs()
+
+    legacy_env = PPO2Env(
+        compact_env.cfg,
+        p_ref_kw=500.0,
+        degradation_cost_per_kwh_discharged=500.0,
+        observation_schema=PPO2_LEGACY_OBSERVATION_SCHEMA,
+    )
+    legacy_env.reset(_month())
+    legacy_env.prev_load = 100.0
+    legacy_env.prev_pv = 300.0
+    legacy_env.prev_p_bess = 45.0
+    legacy = legacy_env._obs()
+
+    assert legacy[3] == pytest.approx(200.0 / 500.0)
+    assert compact[3] == pytest.approx(45.0 / compact_env.cfg.P_rated_nominal)
+    np.testing.assert_array_equal(compact, np.delete(legacy, 3))
+
+
+def test_ppo2_rejects_unknown_observation_schema() -> None:
+    cfg = load_system_config()
+    with pytest.raises(ValueError, match="unsupported PPO2 observation schema"):
+        PPO2Env(
+            cfg,
+            p_ref_kw=500.0,
+            degradation_cost_per_kwh_discharged=500.0,
+            observation_schema="caveman_has_99_eyes",
+        )
 def test_ppo2_tariff_countdown_sees_midnight_boundary() -> None:
     env = _env()
     env.reset(_month())
@@ -74,8 +126,19 @@ def test_ppo2_tariff_countdown_sees_midnight_boundary() -> None:
     # peak until 22:30; this verifies the observation follows tariff truth.
     env.t = round(22.0 / env.dt)
     obs = env._obs()
-    assert obs[7] == pytest.approx(env.cfg.price_peak / env.cfg.price_peak)
-    assert obs[8] == pytest.approx(0.5 / 24.0)
+    assert obs[6] == pytest.approx(env.cfg.price_peak / env.cfg.price_peak)
+    assert obs[7] == pytest.approx(0.5 / 24.0)
+
+
+def test_ppo2_compact_schema_keeps_both_open_meter_block_eyes() -> None:
+    env = _env()
+    env.reset(_month(load_kw=100.0))
+
+    obs, _, done, _ = env.step(0.0)
+
+    assert done is False
+    assert obs[12] == pytest.approx(1.0)
+    assert obs[13] == pytest.approx(100.0 / 500.0)
 
 
 def test_ppo2_projection_has_no_economic_peak_safe_charge_guard() -> None:
@@ -205,6 +268,7 @@ def test_ppo2_inference_checkpoint_is_actor_only_and_matches_training_actor() ->
     agent.meta = {
         "obs_dim": PPO2_OBS_DIM,
         "reference_env": "ppo2_senior_15m_v1",
+        "observation_schema": PPO2_OBSERVATION_SCHEMA,
         "native_dt_minutes": 15.0,
         "control_dt_minutes": 15.0,
         "native_steps_per_action": 1,
@@ -226,6 +290,7 @@ def test_shared_rollout_uses_ppo2_reference_environment_from_meta() -> None:
     agent = PPO2Agent(PPO2_OBS_DIM, seed=13, device="cpu")
     agent.meta = {
         "reference_env": "ppo2_senior_15m_v1",
+        "observation_schema": PPO2_OBSERVATION_SCHEMA,
         "native_dt_minutes": 15.0,
         "control_dt_minutes": 15.0,
         "native_steps_per_action": 1,
@@ -234,6 +299,21 @@ def test_shared_rollout_uses_ppo2_reference_environment_from_meta() -> None:
     result = run_drl_policy(_month(load_kw=100.0), cfg, agent, p_ref_kw=500.0)
     assert result["decision_count"] == 96
     assert result["soc_days"][0][0] == pytest.approx(cfg.SOC_min)
+
+
+def test_shared_rollout_preserves_legacy_17_eye_ppo2_checkpoint() -> None:
+    cfg = load_system_config()
+    agent = PPO2Agent(PPO2_LEGACY_OBS_DIM, seed=17, device="cpu")
+    agent.meta = {
+        "reference_env": "ppo2_senior_15m_v1",
+        "obs_dim": PPO2_LEGACY_OBS_DIM,
+        "native_dt_minutes": 15.0,
+        "control_dt_minutes": 15.0,
+        "native_steps_per_action": 1,
+        "degradation_cost_per_kwh_discharged": 500.0,
+    }
+    result = run_drl_policy(_month(load_kw=100.0), cfg, agent, p_ref_kw=500.0)
+    assert result["decision_count"] == 96
 
 
 def test_adv_share_of_return_matches_variance_ratio() -> None:
