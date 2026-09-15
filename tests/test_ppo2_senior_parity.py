@@ -144,7 +144,7 @@ def test_ppo2_oracle_objective_matches_reference_scorer() -> None:
 
 
 def test_ppo2_reference_training_constants_match_senior() -> None:
-    assert ROLLOUT == 96 * 30
+    assert ROLLOUT == 48 * 30
     assert MIN_MONTH_COVERAGE == pytest.approx(0.8)
     assert VAL_MONTHS == 2
     assert TEST_MONTHS == 1
@@ -227,13 +227,41 @@ def test_shared_rollout_uses_ppo2_reference_environment_from_meta() -> None:
     agent.meta = {
         "reference_env": "ppo2_senior_15m_v1",
         "native_dt_minutes": 15.0,
+        "control_dt_minutes": 30.0,
+        "native_steps_per_action": 2,
+        "degradation_cost_per_kwh_discharged": 500.0,
+    }
+    result = run_drl_policy(_month(load_kw=100.0), cfg, agent, p_ref_kw=500.0)
+    assert result["decision_count"] == 48
+    assert result["soc_days"][0][0] == pytest.approx(cfg.SOC_min)
+
+
+def test_shared_rollout_preserves_legacy_15m_ppo2_checkpoint_clock() -> None:
+    cfg = load_system_config()
+    agent = PPO2Agent(PPO2_OBS_DIM, seed=14, device="cpu")
+    agent.meta = {
+        "reference_env": "ppo2_senior_15m_v1",
+        "native_dt_minutes": 15.0,
         "control_dt_minutes": 15.0,
         "native_steps_per_action": 1,
         "degradation_cost_per_kwh_discharged": 500.0,
     }
     result = run_drl_policy(_month(load_kw=100.0), cfg, agent, p_ref_kw=500.0)
     assert result["decision_count"] == 96
-    assert result["soc_days"][0][0] == pytest.approx(cfg.SOC_min)
+
+
+def test_shared_rollout_rejects_disagreeing_ppo2_sampling_metadata() -> None:
+    cfg = load_system_config()
+    agent = PPO2Agent(PPO2_OBS_DIM, seed=15, device="cpu")
+    agent.meta = {
+        "reference_env": "ppo2_senior_15m_v1",
+        "native_dt_minutes": 15.0,
+        "control_dt_minutes": 30.0,
+        "native_steps_per_action": 1,
+        "degradation_cost_per_kwh_discharged": 500.0,
+    }
+    with pytest.raises(ValueError, match="sampling metadata disagrees"):
+        run_drl_policy(_month(load_kw=100.0), cfg, agent, p_ref_kw=500.0)
 
 
 def test_adv_share_of_return_matches_variance_ratio() -> None:

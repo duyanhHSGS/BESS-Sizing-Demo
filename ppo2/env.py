@@ -280,6 +280,40 @@ class PPO2Env:
             allow_export=bool(cfg.ENABLE_EXPORT),
         )
 
+    def step_control(self, action: float, native_steps: int = PPO2_DEMAND_BLOCK_SLOTS):
+        """Hold one policy action across native physics steps and aggregate its reward."""
+        if native_steps <= 0:
+            raise ValueError("native_steps must be > 0")
+        held_at_decision = not self.history_ready
+        held_action = 0.0 if held_at_decision else float(action)
+        total_reward = 0.0
+        native_infos: list[dict] = []
+        obs = None
+        done = False
+        for _ in range(native_steps):
+            obs, reward, done, info = self.step(held_action)
+            total_reward += float(reward)
+            native_infos.append(info)
+            if done:
+                break
+        if not native_infos:
+            raise RuntimeError("PPO2 control step produced no native transitions")
+
+        combined = dict(native_infos[-1])
+        for key in (
+            "rew_energy_delta",
+            "rew_peak_delta",
+            "rew_deg_cost",
+            "rew_terminal_cost",
+            "rew_clip_cost",
+            "rew_total",
+        ):
+            combined[key] = sum(float(info[key]) for info in native_infos)
+        combined["action_held"] = held_at_decision
+        combined["native_steps"] = len(native_infos)
+        combined["native_infos"] = tuple(native_infos)
+        return obs, total_reward, done, combined
+
     def step(self, action: float):
         cfg = self.cfg
         day = self.month.days[self.day]

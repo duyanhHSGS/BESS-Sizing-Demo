@@ -189,13 +189,22 @@ def run_drl_policy(
         done = False
         latencies: list[float] = []
         decisions = 0
+        native_steps = round(control_dt_minutes / native_dt_minutes)
+        expected_native_steps = int(meta.get("native_steps_per_action", native_steps))
+        if native_steps != expected_native_steps:
+            raise ValueError(
+                "PPO2 checkpoint sampling metadata disagrees: control_dt_minutes "
+                "does not match native_steps_per_action"
+            )
+        # TODO(PPO2-30M): replay each checkpoint with its recorded control clock so
+        # old 15-minute PPO2 artifacts and new 30-minute experiments stay comparable.
         while not done:
             started = time.perf_counter()
             raw_action = agent.act(observation, deterministic=deterministic)
             action = raw_action[0] if isinstance(raw_action, tuple) else raw_action
             if measure_latency:
                 latencies.append((time.perf_counter() - started) * 1e3)
-            observation, _, done, _ = env.step(action)
+            observation, _, done, _ = env.step_control(action, native_steps=native_steps)
             decisions += 1
         out = _result(env.log_grid, env.log_soc, env.log_pbess)
         out["blocked_action_count"] = 0
