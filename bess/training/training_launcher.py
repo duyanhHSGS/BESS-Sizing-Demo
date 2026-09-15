@@ -27,7 +27,12 @@ from bess.training.training_datasets import (
     require_min_days,
 )
 from bess.training.training_jobs import Job, JobManager
-from ppo2.settings import PPO2_CONTROL_DT_MINUTES, PPO2_LAUNCH_DEFAULTS
+from ppo2.settings import (
+    PPO2_GAMMA,
+    PPO2_LAM_ENERGY,
+    PPO2_LAM_PEAK,
+    PPO2_LAUNCH_DEFAULTS,
+)
 
 BASE_DIR = PROJECT_ROOT
 CHECKPOINT_DIR = BASE_DIR / "checkpoints"
@@ -196,12 +201,11 @@ def _automatic_train_bucket_count(n_days: int, val_months: int, test_months: int
 def _control_dt_minutes(payload: dict, csv_path: Path) -> int:
     native_minutes = float(detect_resolution_minutes(csv_path))
     algo = str(payload.get("algo", "ppo")).strip().lower()
-    if algo == "ppo":
-        requested = PPO_FIT_CONTROL_DT_MINUTES
-    elif algo == "ppo2":
-        requested = PPO2_CONTROL_DT_MINUTES
-    else:
-        requested = _float(payload, "control_dt_minutes", native_minutes)
+    requested = (
+        PPO_FIT_CONTROL_DT_MINUTES
+        if algo == "ppo"
+        else _float(payload, "control_dt_minutes", native_minutes)
+    )
     try:
         validate_control_interval_minutes(native_minutes, requested)
     except ValueError as exc:
@@ -322,12 +326,10 @@ def build_training_command(
     control_dt_minutes = _control_dt_minutes(payload, csv_path)
     if algo == "ppo2" and (
         not math.isclose(native_dt_minutes, 15.0, rel_tol=0.0, abs_tol=1e-9)
-        or not math.isclose(
-            control_dt_minutes, PPO2_CONTROL_DT_MINUTES, rel_tol=0.0, abs_tol=1e-9
-        )
+        or not math.isclose(control_dt_minutes, 15.0, rel_tol=0.0, abs_tol=1e-9)
     ):
         raise TrainingLaunchError(
-            "PPO2 requires 15-minute native data and a 30-minute control interval"
+            "PPO2 senior-reference mode requires the dataset itself and control interval to be exactly 15 minutes"
         )
     if algo == "ppo2" and device == "cuda":
         raise TrainingLaunchError("PPO2 senior-reference mode is CPU-only")
