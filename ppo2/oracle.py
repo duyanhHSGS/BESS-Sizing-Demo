@@ -120,7 +120,6 @@ def solve_month_lp(
     *,
     soc_init: float,
     degradation_cost_per_kwh_discharged: float,
-    control_steps: int = 1,
 ) -> dict:
     """Port of senior lp_core.solve_month_lp with this repo's config names."""
     _require_reference_dt(cfg)
@@ -134,9 +133,6 @@ def solve_month_lp(
     steps = PPO2_STEPS_PER_DAY * n_days
     block = PPO2_DEMAND_BLOCK_SLOTS
     n_blocks = steps // block
-    if control_steps <= 0 or steps % control_steps != 0:
-        raise ValueError("control_steps must be a positive divisor of the PPO2 horizon")
-    control_equalities = (steps // control_steps) * max(0, control_steps - 1)
     energy_cap = cfg.E_cap
     rated = cfg.P_rated_nominal
     eta_c, eta_d = cfg.eta_ch, cfg.eta_dis
@@ -173,7 +169,7 @@ def solve_month_lp(
     eq_rows: list[int] = []
     eq_cols: list[int] = []
     eq_data: list[float] = []
-    b_eq = np.zeros(steps + 1 + control_equalities)
+    b_eq = np.zeros(steps + 1)
     for t in range(steps):
         eq_rows += [t, t, t]
         eq_cols += [soc_idx(t + 1), ICG + t, ICP + t]
@@ -192,16 +188,7 @@ def solve_month_lp(
     eq_cols += [soc_idx(steps), IU, IV]
     eq_data += [-energy_cap, -1.0, 1.0]
     b_eq[terminal_row] = -soc_init * energy_cap
-
-    equality_row = steps + 1
-    for start in range(0, steps, control_steps):
-        for t in range(start + 1, start + control_steps):
-            # One actor request must represent the same net battery power for the whole block.
-            eq_rows += [equality_row] * 6
-            eq_cols += [ID + t, ICG + t, ICP + t, ID + start, ICG + start, ICP + start]
-            eq_data += [1.0, -1.0, -1.0, -1.0, 1.0, 1.0]
-            equality_row += 1
-    a_eq = coo_matrix((eq_data, (eq_rows, eq_cols)), shape=(equality_row, n)).tocsr()
+    a_eq = coo_matrix((eq_data, (eq_rows, eq_cols)), shape=(steps + 1, n)).tocsr()
 
     ub_rows: list[int] = []
     ub_cols: list[int] = []
@@ -273,20 +260,13 @@ def _split_by_day(flat: np.ndarray) -> list[np.ndarray]:
     ]
 
 
-def run_oracle(
-    month: MonthData,
-    cfg,
-    *,
-    degradation_cost_per_kwh_discharged: float,
-    control_steps: int = 1,
-) -> dict:
+def run_oracle(month: MonthData, cfg, *, degradation_cost_per_kwh_discharged: float) -> dict:
     soc_init = min(cfg.SOC_max, cfg.SOC_min + cfg.SOC_safety)
     solution = solve_month_lp(
         month.days,
         cfg,
         soc_init=soc_init,
         degradation_cost_per_kwh_discharged=degradation_cost_per_kwh_discharged,
-        control_steps=control_steps,
     )
     grids = _split_by_day(np.maximum(0.0, solution["p_grid"]))
     pbs = _split_by_day(solution["p_bess"])
@@ -335,6 +315,5 @@ def run_oracle(
         "ppk_lp_kw": solution["ppk_kw"] if cfg.T_cap > 0.0 else None,
         "terminal_soc": float(soc[-1]),
         "max_simultaneous_kw": simultaneous_kw,
-        "control_steps": control_steps,
         "valid_for_benchmark": True,
     }
