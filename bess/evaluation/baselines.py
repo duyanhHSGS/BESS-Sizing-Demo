@@ -189,6 +189,8 @@ def run_drl_policy(
             ),
             observation_schema=observation_schema,
         )
+        if hasattr(agent, "reset_recurrent_state"):
+            agent.reset_recurrent_state()
         observation = env.reset(month)
         done = False
         latencies: list[float] = []
@@ -216,6 +218,8 @@ def run_drl_policy(
         if measure_latency:
             out["latency_ms_mean"] = float(np.mean(latencies))
             out["latency_ms_max"] = float(np.max(latencies))
+        if hasattr(agent, "reset_recurrent_state"):
+            agent.reset_recurrent_state()
         return out
 
     checkpoint_obs_dim = meta.get("obs_dim")

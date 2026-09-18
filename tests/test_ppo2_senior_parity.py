@@ -34,6 +34,11 @@ from bess.training.runners.train_ppo2_dataset import (
     _split_months,
 )
 from ppo2.runner import _checkpoint_observation_meta
+from ppo2.settings import (
+    PPO2_HIDDEN_SIZE,
+    PPO2_RECURRENT_ENABLED,
+    PPO2_RECURRENT_SEQUENCE_LENGTH,
+)
 
 
 def _month(*, load_kw: float = 100.0, pv_kw: float = 0.0) -> MonthData:
@@ -332,6 +337,195 @@ def test_adv_share_of_return_matches_variance_ratio() -> None:
     values = np.array([0.5, 2.0, 4.0], dtype=np.float32)
     expected = float(np.var(returns - values) / np.var(returns))
     assert _adv_share_of_return(returns, values) == pytest.approx(expected)
+
+
+def test_ppo2_iq4_defaults_to_one_day_recurrent_memory() -> None:
+    assert PPO2_RECURRENT_ENABLED is True
+    assert PPO2_HIDDEN_SIZE == 128
+    assert PPO2_RECURRENT_SEQUENCE_LENGTH == 96
+
+
+def test_ppo2_recurrent_memory_advances_and_resets() -> None:
+    agent = PPO2Agent(
+        obs_dim=PPO2_OBS_DIM,
+        seed=3,
+        device="cpu",
+        hidden_size=16,
+        recurrent_enabled=True,
+        recurrent_sequence_length=4,
+    )
+    obs = np.linspace(-0.5, 0.5, PPO2_OBS_DIM, dtype=np.float32)
+
+    assert agent._actor_hidden is None
+    first = agent.predict_action(obs)
+    assert agent._actor_hidden is not None
+    hidden_after_first = agent._actor_hidden.detach().cpu().numpy().copy()
+    second = agent.predict_action(obs)
+    hidden_after_second = agent._actor_hidden.detach().cpu().numpy().copy()
+    assert not np.array_equal(hidden_after_first, hidden_after_second)
+
+    agent.reset_recurrent_state()
+    assert agent._actor_hidden is None
+    assert agent.predict_action(obs) == pytest.approx(first, abs=1e-7)
+    assert np.isfinite(second)
+
+
+def test_ppo2_recurrent_rejects_invalid_sequence_length() -> None:
+    with pytest.raises(ValueError, match="recurrent_sequence_length"):
+        PPO2Agent(
+            obs_dim=PPO2_OBS_DIM,
+            device="cpu",
+            recurrent_enabled=True,
+            recurrent_sequence_length=0,
+        )
+
+
+def test_ppo2_recurrent_buffer_requires_hidden_state() -> None:
+    buffer = RolloutBuffer(
+        size=1,
+        obs_dim=PPO2_OBS_DIM,
+        recurrent_hidden_size=8,
+    )
+    with pytest.raises(ValueError, match="requires actor and critic hidden state"):
+        buffer.add(
+            np.zeros(PPO2_OBS_DIM, dtype=np.float32),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        )
+
+
+def test_ppo2_recurrent_chunks_never_cross_month_done() -> None:
+    agent = PPO2Agent(
+        obs_dim=PPO2_OBS_DIM,
+        device="cpu",
+        hidden_size=8,
+        recurrent_enabled=True,
+        recurrent_sequence_length=2,
+    )
+    done = np.asarray([0, 0, 1, 0, 0, 0, 1, 0], dtype=np.float32)
+    assert agent._recurrent_chunks(done) == [
+        (0, 2),
+        (2, 3),
+        (3, 5),
+        (5, 7),
+        (7, 8),
+    ]
+
+
+def test_ppo2_recurrent_update_uses_stored_hidden_states() -> None:
+    agent = PPO2Agent(
+        obs_dim=PPO2_OBS_DIM,
+        seed=7,
+        device="cpu",
+        hidden_size=8,
+        recurrent_enabled=True,
+        recurrent_sequence_length=2,
+        epochs=1,
+        minibatch=4,
+    )
+    buffer = RolloutBuffer(
+        size=6,
+        obs_dim=PPO2_OBS_DIM,
+        recurrent_hidden_size=8,
+    )
+    for step in range(6):
+        obs = np.full(PPO2_OBS_DIM, step / 10.0, dtype=np.float32)
+        action, logp, latent, value_energy, value_peak = agent.act(obs)
+        actor_hidden, critic_hidden = agent.recurrent_rollout_inputs()
+        done = step in {2, 5}
+        buffer.add(
+            obs,
+            action,
+            latent,
+            logp,
+            0.01 * (step + 1),
+            -0.005 * step,
+            value_energy,
+            value_peak,
+            float(done),
+            actor_hidden=actor_hidden,
+            critic_hidden=critic_hidden,
+        )
+        if done:
+            agent.reset_recurrent_state()
+
+    agent.update(buffer, last_val_energy=0.0, last_val_peak=0.0)
+    assert buffer.ptr == 0
+    assert agent.diagnostics["recurrent_sequence_length"] == 2
+    assert agent.diagnostics["recurrent_chunk_count"] == 4
+    assert np.isfinite(agent.diagnostics["approx_kl"])
+
+
+def test_ppo2_recurrent_checkpoint_roundtrip_and_actor_only_inference() -> None:
+    agent = PPO2Agent(
+        obs_dim=PPO2_OBS_DIM,
+        seed=11,
+        device="cpu",
+        hidden_size=16,
+        recurrent_enabled=True,
+        recurrent_sequence_length=4,
+    )
+    agent.meta = {
+        "obs_dim": PPO2_OBS_DIM,
+        "recurrent_enabled": True,
+        "hidden_size": 16,
+        "recurrent_sequence_length": 4,
+        "reference_env": "ppo2_senior_15m_v1",
+    }
+    first_obs = np.zeros(PPO2_OBS_DIM, dtype=np.float32)
+    second_obs = np.ones(PPO2_OBS_DIM, dtype=np.float32) * 0.25
+    agent.reset_recurrent_state()
+    expected_first = agent.predict_action(first_obs)
+    expected_second = agent.predict_action(second_obs)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        checkpoint = Path(tmp) / "recurrent.pt"
+        agent.save(checkpoint)
+
+        inference = PPO2InferenceAgent(PPO2_OBS_DIM)
+        meta = inference.load(str(checkpoint))
+        assert meta["recurrent_enabled"] is True
+        assert inference.recurrent_enabled is True
+        assert inference.predict_action(first_obs) == pytest.approx(expected_first, abs=1e-7)
+        assert inference.predict_action(second_obs) == pytest.approx(expected_second, abs=1e-7)
+
+        loader = PPO2Agent(PPO2_OBS_DIM, device="cpu")
+        loader.load(checkpoint)
+        assert loader.recurrent_enabled is True
+        assert loader.hidden_size == 16
+        assert loader.recurrent_sequence_length == 4
+
+
+def test_ppo2_recurrent_rollout_resets_memory_after_shared_evaluation() -> None:
+    agent = PPO2Agent(
+        obs_dim=PPO2_OBS_DIM,
+        seed=13,
+        device="cpu",
+        hidden_size=8,
+        recurrent_enabled=True,
+        recurrent_sequence_length=96,
+    )
+    agent.meta = {
+        "reference_env": "ppo2_senior_15m_v1",
+        "observation_schema": PPO2_OBSERVATION_SCHEMA,
+        "native_dt_minutes": 15.0,
+        "control_dt_minutes": 15.0,
+        "native_steps_per_action": 1,
+        "recurrent_enabled": True,
+        "hidden_size": 8,
+        "recurrent_sequence_length": 96,
+        "degradation_cost_per_kwh_discharged": 500.0,
+    }
+    result = run_drl_policy(_month(load_kw=100.0), load_system_config(), agent, p_ref_kw=500.0)
+    assert result["decision_count"] == 96
+    assert agent._actor_hidden is None
+    assert agent._critic_hidden is None
 
 
 def test_ppo2_update_smoke_populates_advantage_diagnostics() -> None:

@@ -19,6 +19,12 @@ PPO2_DT_HOURS = 0.25
 PPO2_STEPS_PER_DAY = 96
 PPO2_DEMAND_BLOCK_SLOTS = 2
 PPO2_OBS_DIM = 16
+PPO2_HIDDEN_SIZE = 128
+PPO2_RECURRENT_ENABLED = True
+# IQ4 GURU-GURU: one recurrent training chunk is one complete 15-minute day.
+# TODO(PPO2-IQ4-GRU): keep recurrent memory isolated from observation/env changes
+# until the unseen test month proves whether Memory Uncle actually earns money.
+PPO2_RECURRENT_SEQUENCE_LENGTH = PPO2_STEPS_PER_DAY
 
 PPO2_GAMMA = 1.0
 PPO2_LAM_ENERGY = 0.97

@@ -54,6 +54,9 @@ from ppo2.settings import (
     LAMBDA_PEAK,
     LEARNING_RATE,
     MIN_MONTH_COVERAGE,
+    PPO2_HIDDEN_SIZE,
+    PPO2_RECURRENT_ENABLED,
+    PPO2_RECURRENT_SEQUENCE_LENGTH,
     PPO_CLIP,
     PPO_EPOCHS,
     PPO_MINIBATCH,
@@ -230,6 +233,8 @@ def _run_policy(
         p_ref_kw=p_ref_kw,
         degradation_cost_per_kwh_discharged=degradation_cost_per_kwh_discharged,
     )
+    if hasattr(agent, "reset_recurrent_state"):
+        agent.reset_recurrent_state()
     obs = env.reset(month)
     done = False
     requested: list[float] = []
@@ -248,6 +253,8 @@ def _run_policy(
             for index in range(0, len(values), PPO2_STEPS_PER_DAY)
         ]
 
+    if hasattr(agent, "reset_recurrent_state"):
+        agent.reset_recurrent_state()
     return {
         "p_grid_days": env.log_grid,
         "soc_days": env.log_soc,
@@ -391,11 +398,15 @@ def _behavior_clone_actor(
         degradation_cost_per_kwh_discharged=degradation_cost_per_kwh_discharged,
         clip_penalty_per_kwh=clip_penalty_per_kwh,
     )
+    episodes: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
     observations: list[np.ndarray] = []
     targets: list[float] = []
     for month, solution in zip(months, oracle_solutions, strict=True):
         obs = env.reset(month)
         done = False
+        month_obs: list[np.ndarray] = []
+        month_targets: list[float] = []
+        month_mask: list[bool] = []
         flat = np.concatenate([
             np.asarray(day_power, dtype=np.float64)
             for day_power in solution["p_bess_days"]
@@ -406,27 +417,76 @@ def _behavior_clone_actor(
             action_star = float(np.clip(
                 target_power / cfg.P_rated_nominal, -action_clip, action_clip
             ))
-            if env.history_ready:
+            ready = env.history_ready
+            month_obs.append(np.asarray(obs, dtype=np.float32))
+            month_targets.append(action_star)
+            month_mask.append(ready)
+            if ready:
                 observations.append(obs)
                 targets.append(action_star)
             obs, _reward, done, _info = env.step(action_star)
+        episodes.append((
+            np.asarray(month_obs, dtype=np.float32),
+            np.asarray(month_targets, dtype=np.float32),
+            np.asarray(month_mask, dtype=bool),
+        ))
 
-    obs_tensor = torch.as_tensor(np.asarray(observations, dtype=np.float32))
-    target_tensor = torch.as_tensor(np.asarray(targets, dtype=np.float32))
-    optimizer = torch.optim.Adam(agent.net.actor.parameters(), lr=learning_rate)
-    rng = np.random.default_rng(seed)
-    indices = np.arange(len(targets))
     loss_value = float("nan")
-    for _ in range(epochs):
-        rng.shuffle(indices)
-        for start in range(0, len(indices), minibatch):
-            batch = indices[start:start + minibatch]
-            predicted = torch.tanh(agent.net.actor(obs_tensor[batch])).squeeze(-1)
-            loss = ((predicted - target_tensor[batch]) ** 2).mean()
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            loss_value = float(loss.item())
+    if agent.recurrent_enabled:
+        actor_parameters = (
+            list(agent.net.actor_encoder.parameters())
+            + list(agent.net.actor_gru.parameters())
+            + list(agent.net.actor.parameters())
+        )
+        optimizer = torch.optim.Adam(actor_parameters, lr=learning_rate)
+        for _ in range(epochs):
+            for episode_obs, episode_targets, episode_mask in episodes:
+                obs_tensor = torch.as_tensor(
+                    episode_obs, dtype=torch.float32, device=agent.device
+                )
+                target_tensor = torch.as_tensor(
+                    episode_targets, dtype=torch.float32, device=agent.device
+                )
+                mask_tensor = torch.as_tensor(
+                    episode_mask, dtype=torch.bool, device=agent.device
+                )
+                hidden = None
+                for start in range(
+                    0, len(episode_obs), agent.recurrent_sequence_length
+                ):
+                    stop = min(
+                        start + agent.recurrent_sequence_length,
+                        len(episode_obs),
+                    )
+                    mean, hidden = agent.net.actor_sequence(
+                        obs_tensor[start:stop].unsqueeze(0), hidden
+                    )
+                    valid = mask_tensor[start:stop]
+                    if bool(valid.any()):
+                        predicted = torch.tanh(mean.squeeze(0).squeeze(-1))[valid]
+                        loss = ((predicted - target_tensor[start:stop][valid]) ** 2).mean()
+                        optimizer.zero_grad()
+                        loss.backward()
+                        optimizer.step()
+                        loss_value = float(loss.item())
+                    hidden = hidden.detach()
+    else:
+        obs_tensor = torch.as_tensor(np.asarray(observations, dtype=np.float32))
+        target_tensor = torch.as_tensor(np.asarray(targets, dtype=np.float32))
+        optimizer = torch.optim.Adam(agent.net.actor.parameters(), lr=learning_rate)
+        rng = np.random.default_rng(seed)
+        indices = np.arange(len(targets))
+        for _ in range(epochs):
+            rng.shuffle(indices)
+            for start in range(0, len(indices), minibatch):
+                batch = indices[start:start + minibatch]
+                predicted = torch.tanh(agent.net.actor(obs_tensor[batch])).squeeze(-1)
+                loss = ((predicted - target_tensor[batch]) ** 2).mean()
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                loss_value = float(loss.item())
+    agent.reset_recurrent_state()
     print(
         f"[train-ppo2] behaviour cloning: {len(targets)} oracle steps, "
         f"{epochs} epochs, final minibatch MSE {loss_value:.5f}",
@@ -533,6 +593,9 @@ def _train_seed(
         critic_lr=critic_lr,
         log_std_init=log_std_init,
         device="cpu",
+        hidden_size=PPO2_HIDDEN_SIZE,
+        recurrent_enabled=PPO2_RECURRENT_ENABLED,
+        recurrent_sequence_length=PPO2_RECURRENT_SEQUENCE_LENGTH,
     )
     raw_fit_cost = None
     if fit_test:
@@ -570,6 +633,14 @@ def _train_seed(
         "native_dt_minutes": 15.0,
         "control_dt_minutes": 15.0,
         "native_steps_per_action": 1,
+        "recurrent_enabled": agent.recurrent_enabled,
+        "recurrent_sequence_length": agent.recurrent_sequence_length,
+        "hidden_size": agent.hidden_size,
+        "policy_architecture": (
+            "ppo2_separate_actor_critic_gru_2head_popart_v1"
+            if agent.recurrent_enabled
+            else "ppo2_feedforward_2head_popart_v1"
+        ),
         "reference_env": "ppo2_senior_15m_v1",
         "action_distribution": "tanh_squashed_gaussian",
         "action_mapping": "physical_feasible_15m",
@@ -596,6 +667,11 @@ def _train_seed(
         "bc_minibatch": bc_minibatch,
         "bc_action_clip": bc_action_clip,
         "rollout_steps": rollout,
+        "rollout_mode": (
+            "one_calendar_month_per_update"
+            if agent.recurrent_enabled
+            else "fixed_transition_count"
+        ),
         "total_steps": total_steps,
         "eval_every_updates": eval_every_updates,
         "d_run_shaping_anchor": "oracle_month_peak",
@@ -633,7 +709,18 @@ def _train_seed(
         },
     }
 
-    buffer = RolloutBuffer(rollout, env.obs_dim)
+    buffer_capacity = (
+        max(rollout, PPO2_STEPS_PER_DAY * 31)
+        if agent.recurrent_enabled
+        else rollout
+    )
+    buffer = RolloutBuffer(
+        buffer_capacity,
+        env.obs_dim,
+        recurrent_hidden_size=(
+            agent.hidden_size if agent.recurrent_enabled else None
+        ),
+    )
     rng = np.random.default_rng(seed)
     month_index = 0
     obs = env.reset(
@@ -657,6 +744,7 @@ def _train_seed(
     def evaluate_and_checkpoint() -> None:
         nonlocal best_val
         torch_rng_state = torch.get_rng_state()
+        recurrent_state = agent.snapshot_recurrent_state()
         try:
             score = _evaluate_months(
                 val_months,
@@ -675,6 +763,7 @@ def _train_seed(
             )
         finally:
             torch.set_rng_state(torch_rng_state)
+            agent.restore_recurrent_state(recurrent_state)
         val_cost = score["total_cost_vnd"]
         saving = (val_base - val_cost) / val_base * 100.0
         gap = (val_cost - val_oracle) / val_oracle * 100.0
@@ -727,6 +816,7 @@ def _train_seed(
 
     while steps < total_steps:
         action, logp, latent, value_energy, value_peak = agent.act(obs)
+        actor_hidden, critic_hidden = agent.recurrent_rollout_inputs()
         next_obs, _reward, done, info = env.step(action)
         reward_energy, reward_peak = _split_reward(info, env.reward_scale_vnd)
         if not info["action_held"]:
@@ -740,11 +830,14 @@ def _train_seed(
                 value_energy,
                 value_peak,
                 float(done),
+                actor_hidden=actor_hidden,
+                critic_hidden=critic_hidden,
             )
         steps += 1
         if done:
             month_index += 1
             next_index = month_index % len(train_months)
+            agent.reset_recurrent_state()
             next_obs = env.reset(
                 _augment_month_reference(
                     train_months[next_index], rng,
@@ -755,8 +848,14 @@ def _train_seed(
             )
         obs = next_obs
 
-        if buffer.full():
-            *_, last_energy, last_peak = agent.act(obs)
+        should_update = (
+            done if agent.recurrent_enabled else buffer.full()
+        )
+        if should_update and buffer.ptr:
+            if agent.recurrent_enabled and done:
+                last_energy, last_peak = 0.0, 0.0
+            else:
+                last_energy, last_peak = agent.estimate_values(obs)
             agent.anneal_lr(steps / max(1, total_steps))
             agent.update(buffer, last_energy, last_peak)
             updates += 1
@@ -765,7 +864,7 @@ def _train_seed(
                 evaluated_at = updates
 
     if buffer.ptr:
-        *_, last_energy, last_peak = agent.act(obs)
+        last_energy, last_peak = agent.estimate_values(obs)
         agent.update(buffer, last_energy, last_peak)
         updates += 1
     if updates != evaluated_at:
@@ -1083,6 +1182,14 @@ def main() -> None:
         "training": {
             "steps": args.steps,
             "rollout": args.rollout,
+            "rollout_mode": (
+                "one_calendar_month_per_update"
+                if PPO2_RECURRENT_ENABLED
+                else "fixed_transition_count"
+            ),
+            "recurrent_enabled": PPO2_RECURRENT_ENABLED,
+            "recurrent_sequence_length": PPO2_RECURRENT_SEQUENCE_LENGTH,
+            "hidden_size": PPO2_HIDDEN_SIZE,
             "eval_every": args.eval_every,
             "actor_lr": args.actor_lr,
             "critic_lr": args.critic_lr,
