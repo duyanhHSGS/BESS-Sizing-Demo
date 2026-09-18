@@ -33,6 +33,7 @@ from bess.training.runners.train_ppo2_dataset import (
     _fit_test_split,
     _split_months,
 )
+from ppo2.runner import _checkpoint_observation_meta
 
 
 def _month(*, load_kw: float = 100.0, pv_kw: float = 0.0) -> MonthData:
@@ -57,6 +58,16 @@ def _env() -> PPO2Env:
         degradation_cost_per_kwh_discharged=500.0,
         clip_penalty_per_kwh=100.0,
     )
+
+
+def test_ppo2_checkpoint_observation_metadata_matches_default_env() -> None:
+    meta = _checkpoint_observation_meta()
+    env = _env()
+
+    assert meta["obs_dim"] == PPO2_OBS_DIM == 16
+    assert meta["observation_schema"] == PPO2_OBSERVATION_SCHEMA
+    assert env.obs_dim == meta["obs_dim"]
+    assert env.observation_schema == meta["observation_schema"]
 
 
 def test_ppo2_compact_observation_purges_only_pv_surplus_eye() -> None:

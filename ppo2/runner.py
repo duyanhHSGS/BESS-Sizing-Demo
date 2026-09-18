@@ -455,6 +455,17 @@ def _write_curve(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+def _checkpoint_observation_meta() -> dict[str, object]:
+    """Return observation metadata that matches the default PPO2 environment."""
+    # TODO(PPO2-META-SCHEMA): keep checkpoint shape and schema emitted together so
+    # compact policies cannot be mislabeled as legacy 17-eye policies.
+    return {
+        "obs_dim": PPO2_OBS_DIM,
+        "obs_variant": "base",
+        "observation_schema": PPO2_OBSERVATION_SCHEMA,
+    }
+
+
 def _train_seed(
     *,
     cfg,
@@ -555,13 +566,10 @@ def _train_seed(
         "p_ref_kw": p_ref,
         "e_cap_kwh": cfg.E_cap,
         "p_rated_kw": cfg.P_rated_nominal,
-        "obs_dim": PPO2_OBS_DIM,
-        "obs_variant": "base",
-        "observation_schema": PPO2_OBSERVATION_SCHEMA,
+        **_checkpoint_observation_meta(),
         "native_dt_minutes": 15.0,
         "control_dt_minutes": 15.0,
         "native_steps_per_action": 1,
-        "observation_schema": "causal_block_aware",
         "reference_env": "ppo2_senior_15m_v1",
         "action_distribution": "tanh_squashed_gaussian",
         "action_mapping": "physical_feasible_15m",
